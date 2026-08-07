@@ -9,3 +9,4 @@ void OverlaySetWindow(HWND hwnd);
 void OverlayRender(IDXGISwapChain* swapChain);
 void OverlayInvalidateSwapchainResources();
 bool OverlayIsVisible();
+extern "C" void RequestOverlayToggle();

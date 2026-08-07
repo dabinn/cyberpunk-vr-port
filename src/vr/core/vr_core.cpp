@@ -111,6 +111,8 @@ struct LiveControls {
     volatile int xrMovementSource;  // 0 = Game, 1 = HMD, 2 = LeftHand, 3 = RightHand
     volatile int xrXInputInstall;   // 1 = install the XInput entry-point detour at startup (default 1, set 0 in vrport.ini to fully bypass)
     volatile int xrInputActions;    // 1 = create gameplay XrActions (thumbstick/trigger/buttons). 0 = pose-only legacy behaviour
+    volatile int xrChordActivation; // 0 = original left L3, 1 = right L3 with click swap, 2 = right thumbrest
+    volatile int xrExtraChordActions; // 1 = recenter/F10 chord actions; D-pad and Back remain unconditional
     volatile int xrMonoXQueueWait;  // 1 = mono path inserts cross-queue Wait before depth capture (legacy). 0 = skip it -- avoids CP2077 async-compute Wait cycle that froze present thread.
     volatile int xrSnapTurnPulseMs; // duration of the discrete snap turn pulse pushed into the right stick (ms)
     volatile int xrMonoDepthCapture; // 1 (default) = mono scene-depth for XR_KHR_composition_layer_depth. The resolve reads the game depth as an SRV WITHOUT transitioning it (D3D12 state is global -> barriering the game's resource device-removes CP2077), on our own capture queue (FIFO before the submit's depth copy, no cross-queue Wait), and only once the scene depth has been a stable shader-readable resource with menus closed for a warmup window (skips the intro/menu-load transient). 0 = no depth in mono.
@@ -180,6 +182,8 @@ void InitRuntimePaths() {
     // the binding/entry-point patch keeps the game from reaching its main menu.
     g_liveControls.xrXInputInstall = 1;
     g_liveControls.xrInputActions = 1;
+    g_liveControls.xrChordActivation = 0;
+    g_liveControls.xrExtraChordActions = 1;
 
     // Capture the recenter-request baseline NOW (before CET could write), so the
     // first OnGameAttached this session is seen as a change and triggers a recenter,
@@ -252,6 +256,8 @@ static void EnsureLiveControlFileExists() {
     // from reaching its main menu.
     fprintf(file, "xr_xinput_install=1\n");
     fprintf(file, "xr_input_actions=1\n");
+    fprintf(file, "xr_chord_activation=0\n");
+    fprintf(file, "xr_extra_chord_actions=1\n");
     fprintf(file, "xr_mono_xqueue_wait=0\n");
     fprintf(file, "xr_snap_turn_pulse_ms=30\n");
     fprintf(file, "xr_mono_depth_capture=1\n");
@@ -471,6 +477,8 @@ static void PollLiveControls() {
     int xrMovementSource = g_liveControls.xrMovementSource;
     int xrXInputInstall = g_liveControls.xrXInputInstall;
     int xrInputActions = g_liveControls.xrInputActions;
+    int xrChordActivation = g_liveControls.xrChordActivation;
+    int xrExtraChordActions = g_liveControls.xrExtraChordActions;
     int xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
     int xrSnapTurnPulseMs = g_liveControls.xrSnapTurnPulseMs > 0 ? g_liveControls.xrSnapTurnPulseMs : 30;
     int xrMonoDepthCapture = g_liveControls.xrMonoDepthCapture;
@@ -684,6 +692,16 @@ static void PollLiveControls() {
             xrInputActions = intValue;
             continue;
         }
+        if (sscanf_s(line, "xr_chord_activation=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_chord_activation = %d", &intValue) == 1) {
+            xrChordActivation = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_extra_chord_actions=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_extra_chord_actions = %d", &intValue) == 1) {
+            xrExtraChordActions = intValue;
+            continue;
+        }
         if (sscanf_s(line, "xr_mono_xqueue_wait=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_mono_xqueue_wait = %d", &intValue) == 1) {
             xrMonoXQueueWait = intValue;
@@ -735,6 +753,8 @@ static void PollLiveControls() {
         g_liveControls.xrReuseLastFrame != xrReuseLastFrame ||
         g_liveControls.xrPairLock != xrPairLock ||
         g_liveControls.xrRenderPoseSubmit != xrRenderPoseSubmit ||
+        g_liveControls.xrChordActivation != xrChordActivation ||
+        g_liveControls.xrExtraChordActions != xrExtraChordActions ||
         g_liveControls.xrRuntime != xrRuntime ||
         g_liveControls.xrDepthSubmit != xrDepthSubmit;
 
@@ -774,6 +794,8 @@ static void PollLiveControls() {
     g_liveControls.xrSnapTurnAngleDeg = xrSnapTurnAngleDeg > 0.0f ? xrSnapTurnAngleDeg : 30.0f;
     g_liveControls.xrXInputInstall = xrXInputInstall != 0 ? 1 : 0;
     g_liveControls.xrInputActions = xrInputActions != 0 ? 1 : 0;
+    g_liveControls.xrChordActivation = (xrChordActivation >= 0 && xrChordActivation <= 2) ? xrChordActivation : 0;
+    g_liveControls.xrExtraChordActions = xrExtraChordActions != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = xrMonoXQueueWait != 0 ? 1 : 0;
     g_liveControls.xrSnapTurnPulseMs = xrSnapTurnPulseMs > 0 ? xrSnapTurnPulseMs : 30;
     g_liveControls.xrMonoDepthCapture = xrMonoDepthCapture != 0 ? 1 : 0;
@@ -836,6 +858,8 @@ static LiveControlsUiState MakeLiveControlsUiState() {
     state.xrPhysicalBodyRotation = g_liveControls.xrPhysicalBodyRotation;
     state.xrXInputInstall = g_liveControls.xrXInputInstall;
     state.xrInputActions = g_liveControls.xrInputActions;
+    state.xrChordActivation = g_liveControls.xrChordActivation;
+    state.xrExtraChordActions = g_liveControls.xrExtraChordActions;
     state.xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
     state.xrMonoDepthCapture = g_liveControls.xrMonoDepthCapture;
     state.xrSnapTurnPulseMs = g_liveControls.xrSnapTurnPulseMs;
@@ -888,6 +912,8 @@ static void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_physical_body_rotation=%d\n", state.xrPhysicalBodyRotation != 0 ? 1 : 0);
     fprintf(file, "xr_xinput_install=%d\n", state.xrXInputInstall != 0 ? 1 : 0);
     fprintf(file, "xr_input_actions=%d\n", state.xrInputActions != 0 ? 1 : 0);
+    fprintf(file, "xr_chord_activation=%d\n", (state.xrChordActivation >= 0 && state.xrChordActivation <= 2) ? state.xrChordActivation : 0);
+    fprintf(file, "xr_extra_chord_actions=%d\n", state.xrExtraChordActions != 0 ? 1 : 0);
     fprintf(file, "xr_mono_xqueue_wait=%d\n", state.xrMonoXQueueWait != 0 ? 1 : 0);
     fprintf(file, "xr_mono_depth_capture=%d\n", state.xrMonoDepthCapture != 0 ? 1 : 0);
     fprintf(file, "xr_snap_turn_pulse_ms=%d\n", state.xrSnapTurnPulseMs > 0 ? state.xrSnapTurnPulseMs : 30);
@@ -951,6 +977,8 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
     g_liveControls.xrSnapTurnAngleDeg = state->xrSnapTurnAngleDeg > 0.0f ? state->xrSnapTurnAngleDeg : 30.0f;
     g_liveControls.xrXInputInstall = state->xrXInputInstall != 0 ? 1 : 0;
     g_liveControls.xrInputActions = state->xrInputActions != 0 ? 1 : 0;
+    g_liveControls.xrChordActivation = (state->xrChordActivation >= 0 && state->xrChordActivation <= 2) ? state->xrChordActivation : 0;
+    g_liveControls.xrExtraChordActions = state->xrExtraChordActions != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = state->xrMonoXQueueWait != 0 ? 1 : 0;
     g_liveControls.xrMonoDepthCapture = state->xrMonoDepthCapture != 0 ? 1 : 0;
     g_liveControls.xrSnapTurnPulseMs = state->xrSnapTurnPulseMs > 0 ? state->xrSnapTurnPulseMs : 30;
@@ -1337,6 +1365,15 @@ extern "C" int GetXrRuntimeMode() {
 
 extern "C" int GetInputActionsEnabled() {
     return g_liveControls.xrInputActions != 0 ? 1 : 0;
+}
+
+extern "C" int GetChordActivationMethod() {
+    const int value = g_liveControls.xrChordActivation;
+    return (value >= 0 && value <= 2) ? value : 0;
+}
+
+extern "C" int GetExtraChordActionsEnabled() {
+    return g_liveControls.xrExtraChordActions != 0 ? 1 : 0;
 }
 
 extern "C" int GetMonoXQueueWait() {
@@ -7321,5 +7358,3 @@ static void InitStereoOnce() {
 __declspec(dllexport) void CyberpunkVRPort_InitStereo() { InitStereoOnce(); }
 
 }
-
-

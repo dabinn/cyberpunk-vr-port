@@ -603,6 +603,7 @@ bool OpenXRManager::Init() {
             makeAction(m_primaryButtonAction,   XR_ACTION_TYPE_BOOLEAN_INPUT,  "primary_button",   "Primary Button (A/X)", true);
             makeAction(m_secondaryButtonAction, XR_ACTION_TYPE_BOOLEAN_INPUT,  "secondary_button", "Secondary Button (B/Y)", true);
             makeAction(m_menuButtonAction,      XR_ACTION_TYPE_BOOLEAN_INPUT,  "menu",             "Menu Button",          false);
+            makeAction(m_rightThumbrestAction,  XR_ACTION_TYPE_BOOLEAN_INPUT,  "right_thumbrest",  "Right Thumbrest",      false);
         }
         Log("OpenXRManager[Input]: gameplay action set %s (xr_input_actions=%d)\n",
             inputActionsEnabled ? "ENABLED" : "DISABLED (pose-only)", (int)inputActionsEnabled);
@@ -665,6 +666,7 @@ bool OpenXRManager::Init() {
             { m_secondaryButtonAction, "/user/hand/left/input/y/click" },
             { m_secondaryButtonAction, "/user/hand/right/input/b/click" },
             { m_menuButtonAction,      "/user/hand/left/input/menu/click" },
+            { m_rightThumbrestAction,  "/user/hand/right/input/thumbrest/touch" },
         });
 
         // -- Valve Index: A/B on both hands, system as menu --
@@ -882,6 +884,7 @@ void OpenXRManager::EndSession() {
     if (m_session == XR_NULL_HANDLE || !m_sessionRunning.load(std::memory_order_relaxed)) return;
     xrEndSession(m_session);
     m_sessionRunning.store(false, std::memory_order_relaxed);
+    m_rightThumbrestAvailable.store(false, std::memory_order_relaxed);
     Log("OpenXRManager: Session ended.\n");
 }
 
@@ -1618,6 +1621,7 @@ void OpenXRManager::Shutdown() {
     }
     m_initialized = false;
     m_poseValid.store(false, std::memory_order_relaxed);
+    m_rightThumbrestAvailable.store(false, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> renderLock(m_renderPoseMutex);
         m_basePoseSet = false;
