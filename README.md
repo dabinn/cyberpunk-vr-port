@@ -1,3 +1,5 @@
+<p align="right"><a href="README-TC.md">中文說明</a></p>
+
 # CyberpunkVR Port
 
 ## Controller Enhancements Fork
@@ -5,9 +7,11 @@
 This fork is based on dariulone's excellent **CyberpunkVR Port v0.1.1**. The
 original mod already provides true stereo rendering, motion-controlled hands,
 VRIK, weapon aiming and visual holsters, but several missing or conflicting
-controller inputs make it difficult to play the full game without reaching for
-a keyboard. So I quickly put together this controller-enhanced version, letting
-everyone jump in and enjoy this awesome mod right away.
+controller inputs leave some actions required by the game unavailable while using
+VR controllers. Opening the F10 menu and recentering VR also still require reaching
+for the keyboard. This controller-enhanced version completes the gamepad mapping
+and adds convenient controller shortcuts, letting everyone jump in and enjoy this
+awesome mod right away.
 
 ![New controller settings in the F10 menu](images/v0.1.1-controller-enhancements.png)
 
