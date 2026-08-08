@@ -1485,6 +1485,16 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
 
             ImGui::Separator();
+            ImGui::TextUnformatted("Vehicle controls");
+            changed |= CheckboxInt("Swap Triggers / Grips While Driving", &state.xrSwapTriggersGripsDriving);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("While driving, use the VR controller triggers as LB/RB and the\n"
+                                  "analog grips as LT/RT. This keeps Fire on the right trigger\n"
+                                  "while mapping brake and accelerate to the grips. Physical\n"
+                                  "gamepad inputs are not remapped. Off preserves the original controls.");
+            }
+
+            ImGui::Separator();
             ImGui::TextUnformatted("Locomotion direction");
             const char* moveSrcNames[] = { "Game (camera)", "HMD (head)", "Left hand", "Right hand" };
             int moveSrc = state.xrMovementSource;

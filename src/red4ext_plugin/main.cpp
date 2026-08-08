@@ -7088,6 +7088,16 @@ void GetVRSharedSlot(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, float*
     int32_t idx = 0; RED4ext::GetParameter(aFrame, &idx); aFrame->code++;
     if (aOut) *aOut = (g_pSharedHands && idx >= 0 && idx < 256) ? g_pSharedHands[idx] : 0.0f;
 }
+
+// Publish the route selected by the existing CET holster-zone classifier.
+// 0 = legacy/unpublished, 1 = XInput RB, 2 = virtual holster.
+void SetVRRightGripRoute(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t) {
+    int32_t route = 0; RED4ext::GetParameter(aFrame, &route); aFrame->code++;
+    if (route < 0 || route > 2) route = 0;
+    EnsureSharedMemory();
+    if (g_pSharedHands) g_pSharedHands[vrshared::kRightGripRoute] = static_cast<float>(route);
+    if (aOut) *aOut = route;
+}
 void GetVRProvDump(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, float* aOut, int64_t) {
     int32_t idx = 0; RED4ext::GetParameter(aFrame, &idx); aFrame->code++;
     double v = 0.0;
@@ -7585,6 +7595,12 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     auto fGetSlot = RED4ext::CGlobalFunction::Create("GetVRSharedSlot", "GetVRSharedSlot", &GetVRSharedSlot);
     fGetSlot->flags = flags; fGetSlot->AddParam("Int32", "idx"); fGetSlot->SetReturnType("Float");
     rtti->RegisterFunction(fGetSlot);
+    auto fGripRoute = RED4ext::CGlobalFunction::Create(
+        "SetVRRightGripRoute", "SetVRRightGripRoute", &SetVRRightGripRoute);
+    fGripRoute->flags = flags;
+    fGripRoute->AddParam("Int32", "route");
+    fGripRoute->SetReturnType("Int32");
+    rtti->RegisterFunction(fGripRoute);
 
     auto f61 = RED4ext::CGlobalFunction::Create("SetVRWeaponAim", "SetVRWeaponAim", &SetVRWeaponAim);
     f61->flags = flags; f61->SetReturnType("Int32");

@@ -112,6 +112,7 @@ struct LiveControls {
     volatile int xrXInputInstall;   // 1 = install the XInput entry-point detour at startup (default 1, set 0 in vrport.ini to fully bypass)
     volatile int xrInputActions;    // 1 = create gameplay XrActions (thumbstick/trigger/buttons). 0 = pose-only legacy behaviour
     volatile int xrFullStickSprintCrouch; // 1 = full-forward LS sends L3 and full-down RS sends R3
+    volatile int xrSwapTriggersGripsDriving; // 1 = in vehicles, VR triggers -> LB/RB and analog grips -> LT/RT
     volatile int xrMonoXQueueWait;  // 1 = mono path inserts cross-queue Wait before depth capture (legacy). 0 = skip it -- avoids CP2077 async-compute Wait cycle that froze present thread.
     volatile int xrSnapTurnPulseMs; // duration of the discrete snap turn pulse pushed into the right stick (ms)
     volatile int xrMonoDepthCapture; // 1 (default) = mono scene-depth for XR_KHR_composition_layer_depth. The resolve reads the game depth as an SRV WITHOUT transitioning it (D3D12 state is global -> barriering the game's resource device-removes CP2077), on our own capture queue (FIFO before the submit's depth copy, no cross-queue Wait), and only once the scene depth has been a stable shader-readable resource with menus closed for a warmup window (skips the intro/menu-load transient). 0 = no depth in mono.
@@ -182,6 +183,7 @@ void InitRuntimePaths() {
     g_liveControls.xrXInputInstall = 1;
     g_liveControls.xrInputActions = 1;
     g_liveControls.xrFullStickSprintCrouch = 1;
+    g_liveControls.xrSwapTriggersGripsDriving = 0;
 
     // Capture the recenter-request baseline NOW (before CET could write), so the
     // first OnGameAttached this session is seen as a change and triggers a recenter,
@@ -474,6 +476,7 @@ static void PollLiveControls() {
     int xrXInputInstall = g_liveControls.xrXInputInstall;
     int xrInputActions = g_liveControls.xrInputActions;
     int xrFullStickSprintCrouch = g_liveControls.xrFullStickSprintCrouch;
+    int xrSwapTriggersGripsDriving = g_liveControls.xrSwapTriggersGripsDriving;
     int xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
     int xrSnapTurnPulseMs = g_liveControls.xrSnapTurnPulseMs > 0 ? g_liveControls.xrSnapTurnPulseMs : 30;
     int xrMonoDepthCapture = g_liveControls.xrMonoDepthCapture;
@@ -692,6 +695,11 @@ static void PollLiveControls() {
             xrFullStickSprintCrouch = intValue;
             continue;
         }
+        if (sscanf_s(line, "xr_swap_triggers_grips_driving=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_swap_triggers_grips_driving = %d", &intValue) == 1) {
+            xrSwapTriggersGripsDriving = intValue;
+            continue;
+        }
         if (sscanf_s(line, "xr_mono_xqueue_wait=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_mono_xqueue_wait = %d", &intValue) == 1) {
             xrMonoXQueueWait = intValue;
@@ -744,6 +752,7 @@ static void PollLiveControls() {
         g_liveControls.xrPairLock != xrPairLock ||
         g_liveControls.xrRenderPoseSubmit != xrRenderPoseSubmit ||
         g_liveControls.xrFullStickSprintCrouch != xrFullStickSprintCrouch ||
+        g_liveControls.xrSwapTriggersGripsDriving != xrSwapTriggersGripsDriving ||
         g_liveControls.xrRuntime != xrRuntime ||
         g_liveControls.xrDepthSubmit != xrDepthSubmit;
 
@@ -784,6 +793,7 @@ static void PollLiveControls() {
     g_liveControls.xrXInputInstall = xrXInputInstall != 0 ? 1 : 0;
     g_liveControls.xrInputActions = xrInputActions != 0 ? 1 : 0;
     g_liveControls.xrFullStickSprintCrouch = xrFullStickSprintCrouch != 0 ? 1 : 0;
+    g_liveControls.xrSwapTriggersGripsDriving = xrSwapTriggersGripsDriving != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = xrMonoXQueueWait != 0 ? 1 : 0;
     g_liveControls.xrSnapTurnPulseMs = xrSnapTurnPulseMs > 0 ? xrSnapTurnPulseMs : 30;
     g_liveControls.xrMonoDepthCapture = xrMonoDepthCapture != 0 ? 1 : 0;
@@ -847,6 +857,7 @@ static LiveControlsUiState MakeLiveControlsUiState() {
     state.xrXInputInstall = g_liveControls.xrXInputInstall;
     state.xrInputActions = g_liveControls.xrInputActions;
     state.xrFullStickSprintCrouch = g_liveControls.xrFullStickSprintCrouch;
+    state.xrSwapTriggersGripsDriving = g_liveControls.xrSwapTriggersGripsDriving;
     state.xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
     state.xrMonoDepthCapture = g_liveControls.xrMonoDepthCapture;
     state.xrSnapTurnPulseMs = g_liveControls.xrSnapTurnPulseMs;
@@ -900,6 +911,7 @@ static void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_xinput_install=%d\n", state.xrXInputInstall != 0 ? 1 : 0);
     fprintf(file, "xr_input_actions=%d\n", state.xrInputActions != 0 ? 1 : 0);
     fprintf(file, "xr_full_stick_sprint_crouch=%d\n", state.xrFullStickSprintCrouch != 0 ? 1 : 0);
+    fprintf(file, "xr_swap_triggers_grips_driving=%d\n", state.xrSwapTriggersGripsDriving != 0 ? 1 : 0);
     fprintf(file, "xr_mono_xqueue_wait=%d\n", state.xrMonoXQueueWait != 0 ? 1 : 0);
     fprintf(file, "xr_mono_depth_capture=%d\n", state.xrMonoDepthCapture != 0 ? 1 : 0);
     fprintf(file, "xr_snap_turn_pulse_ms=%d\n", state.xrSnapTurnPulseMs > 0 ? state.xrSnapTurnPulseMs : 30);
@@ -964,6 +976,7 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
     g_liveControls.xrXInputInstall = state->xrXInputInstall != 0 ? 1 : 0;
     g_liveControls.xrInputActions = state->xrInputActions != 0 ? 1 : 0;
     g_liveControls.xrFullStickSprintCrouch = state->xrFullStickSprintCrouch != 0 ? 1 : 0;
+    g_liveControls.xrSwapTriggersGripsDriving = state->xrSwapTriggersGripsDriving != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = state->xrMonoXQueueWait != 0 ? 1 : 0;
     g_liveControls.xrMonoDepthCapture = state->xrMonoDepthCapture != 0 ? 1 : 0;
     g_liveControls.xrSnapTurnPulseMs = state->xrSnapTurnPulseMs > 0 ? state->xrSnapTurnPulseMs : 30;
@@ -6664,6 +6677,9 @@ static bool     g_xinputHooked = false;
 static int      g_xinputSnapArmedDir = 0;       // currently latched stick direction so we don't fire while held
 static DWORD    g_xinputSnapPulseStartMs = 0;   // when the current pulse began
 static int      g_xinputSnapPulseDir = 0;       // direction of the active pulse (0 = idle)
+static bool     g_xinputRightGripWasDown = false;
+static bool     g_xinputRightGripRoutesToRb = false;
+static bool     g_xinputSuppressHolsterGripUntilRelease = false;
 
 extern "C" int GetSnapTurnPulseMs();
 
@@ -6700,26 +6716,43 @@ static DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState
         r = ERROR_SUCCESS;
     }
 
-    // Buttons: OR (so a physical pad can still augment, and vice versa).
-    pState->Gamepad.wButtons |= vr.buttons;
+    bool menuOpenForRb = (g_menuModeValue != 0);
+    float* sh = GetShotShared();
+    if (!menuOpenForRb && sh) {
+        if (reinterpret_cast<volatile uint32_t*>(sh)[81] != 0u) menuOpenForRb = true;
+    }
+    // Keep the existing LB/RB menu navigation even when the overlay is opened from a vehicle.
+    const bool swapDrivingInputs = g_isInVehicle
+        && g_liveControls.xrSwapTriggersGripsDriving != 0
+        && !menuOpenForRb;
 
-    // MENU-ONLY: right grip = RB (right shoulder) for tab navigation to the RIGHT,
-    // symmetric with the left grip's LB. The right grip is deliberately NEVER merged as
-    // RB in gameplay -- there it is reserved for the hand-to-holster equip (published as
-    // shared[49] above) and the D-pad modifier, and RB is a gameplay action that would
-    // misfire on every holster reach. Menus run no holster logic and can't fire gameplay
-    // actions, so the grip is safe as RB while one is open. Menu state = the native
-    // menu-mode hook OR the redscript world-map bridge flag (shared[81]).
+    // Buttons: OR (so a physical pad can still augment, and vice versa).
+    // When vehicle swapping is active, remove only the LB synthesized from the VR left grip;
+    // the physical gamepad state already in pState remains untouched.
+    WORD vrButtons = vr.buttons;
+    if (swapDrivingInputs) vrButtons &= ~0x0100; // XINPUT_GAMEPAD_LEFT_SHOULDER
+    pState->Gamepad.wButtons |= vrButtons;
+    if (swapDrivingInputs) {
+        if (vr.leftTrigger >= 0.7f)  pState->Gamepad.wButtons |= 0x0100; // LB
+        if (vr.rightTrigger >= 0.7f) pState->Gamepad.wButtons |= 0x0200; // RB
+    }
+
+    // Route one complete right-grip press to either RB or the existing virtual holster.
+    // The CET holster mod owns zone classification and publishes the route continuously;
+    // latch it on the press edge so moving into/out of a zone while held cannot switch paths.
     {
-        bool menuOpenForRb = (g_menuModeValue != 0);
-        if (!menuOpenForRb) {
-            if (float* sh = GetShotShared()) {
-                if (reinterpret_cast<volatile uint32_t*>(sh)[81] != 0u) menuOpenForRb = true;
-            }
+        const bool rightGripDown = vr.rightGrip >= 0.7f;
+        if (rightGripDown && !g_xinputRightGripWasDown) {
+            const int route = sh ? static_cast<int>(sh[vrshared::kRightGripRoute]) : 0;
+            g_xinputRightGripRoutesToRb = menuOpenForRb
+                || (g_isInVehicle && !swapDrivingInputs)
+                || (!g_isInVehicle && route == 1);
         }
-        if (menuOpenForRb && vr.rightGrip >= 0.7f) {
+        if (rightGripDown && g_xinputRightGripRoutesToRb && !swapDrivingInputs) {
             pState->Gamepad.wButtons |= 0x0200; // XINPUT_GAMEPAD_RIGHT_SHOULDER
         }
+        if (!rightGripDown) g_xinputRightGripRoutesToRb = false;
+        g_xinputRightGripWasDown = rightGripDown;
     }
 
     // Triggers: take the max so a physical squeeze isn't lost.
@@ -6727,8 +6760,8 @@ static DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState
     // mod sets IsBlocking/IsDeflecting directly, damageManager.script mitigates on those stats,
     // and the PSM Block state with its AimWalk/sprint debuffs is never entered. A physical left
     // trigger still reaches the game's own 'MeleeBlock' action through this merge as in flat.)
-    BYTE lt = FloatToBYTE(vr.leftTrigger);
-    BYTE rt = FloatToBYTE(vr.rightTrigger);
+    BYTE lt = FloatToBYTE(swapDrivingInputs ? vr.leftGrip : vr.leftTrigger);
+    BYTE rt = FloatToBYTE(swapDrivingInputs ? vr.rightGrip : vr.rightTrigger);
     // The VR left trigger reaches the gamepad LT (aim / zoom, melee block, VEHICLE BRAKE) unless
     // the smoking lighter has a claim on it, which is only true on foot with empty hands.
     //
@@ -6749,7 +6782,12 @@ static DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState
     // The CET hand-to-holster mod reads this + the IN-GAME wrist-to-hip distances the plugin
     // publishes from the live FK pose to decide whether reaching for a visual holster + a grip
     // press should equip / unequip the corresponding weapon.
-    OpenXRManager::Get().SetSharedSlot(49, vr.rightGrip > 0.5f ? 1.0f : 0.0f);
+    // A seated pose can overlap a body holster. Suppress the CET grip edge for the entire vehicle
+    // stay, and keep suppressing a grip already held while exiting until it is released.
+    if (g_isInVehicle) g_xinputSuppressHolsterGripUntilRelease = true;
+    if (vr.rightGrip <= 0.5f) g_xinputSuppressHolsterGripUntilRelease = false;
+    OpenXRManager::Get().SetSharedSlot(
+        49, !g_xinputSuppressHolsterGripUntilRelease && vr.rightGrip > 0.5f ? 1.0f : 0.0f);
     // LEFT hand, for the smoking mod: the lighter is ignited by the left trigger and the cigarette
     // is taken to and from the mouth with either grip, so it needs all three. Only the right grip
     // was ever published; the left pair had no channel at all, and the CET bridge was reading [67]
@@ -6768,7 +6806,8 @@ static DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState
     // count it down. Otherwise merge the physical trigger into RT normally (guns shooting / held attack).
     float meleeImpulse = OpenXRManager::Get().GetSharedSlot(29);
     if (meleeImpulse > 0.5f) {
-        pState->Gamepad.bRightTrigger = 255;
+        if (!g_isInVehicle) pState->Gamepad.bRightTrigger = 255;
+        else if (rt > pState->Gamepad.bRightTrigger) pState->Gamepad.bRightTrigger = rt;
         OpenXRManager::Get().SetSharedSlot(29, meleeImpulse - 1.0f);
     } else {
         if (rt > pState->Gamepad.bRightTrigger) pState->Gamepad.bRightTrigger = rt;
