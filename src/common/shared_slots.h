@@ -115,6 +115,7 @@
 //  [154]       left trigger analog (0..1)     plugin -> Smoking CET bridge
 //  [155]       left grip pressed (0/1)        plugin -> Smoking CET bridge
 //  [156]       DEBUG logging on (0/1)         plugin -> every CET bridge
+//  [157]       right-grip route (0=legacy, 1=RB, 2=holster)  Holster Lua -> dxgi
 // ============================================================================
 
 namespace vrshared {
@@ -149,4 +150,5 @@ constexpr int kLeftGripPressed   = 155;
 // smoking one alone in a single session, and as much again from the weapon one. A log nobody can
 // open is a log nobody reads.
 constexpr int kDebugLog          = 156;
+constexpr int kRightGripRoute    = 157;
 } // namespace vrshared

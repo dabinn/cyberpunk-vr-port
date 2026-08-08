@@ -103,6 +103,9 @@ struct LiveControlsUiState {
     // and Back/Select remain active regardless of this value.
     int xrExtraChordActions;
     int xrFullStickSprintCrouch;
+    // In vehicles only, map VR triggers to LB/RB and analog grips to LT/RT.
+    // Physical XInput controller state is never remapped.
+    int xrSwapTriggersGripsDriving;
     // Mono submit safety flags. Defaults 0 keep CP2077 mono mode from hanging on
     // the menu (see cybervrport-controller-bindings memory for the trace).
     int xrMonoXQueueWait;
