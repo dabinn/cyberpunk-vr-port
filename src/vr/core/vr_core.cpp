@@ -111,6 +111,8 @@ struct LiveControls {
     volatile int xrMovementSource;  // 0 = Game, 1 = HMD, 2 = LeftHand, 3 = RightHand
     volatile int xrXInputInstall;   // 1 = install the XInput entry-point detour at startup (default 1, set 0 in vrport.ini to fully bypass)
     volatile int xrInputActions;    // 1 = create gameplay XrActions (thumbstick/trigger/buttons). 0 = pose-only legacy behaviour
+    volatile int xrChordActivation; // 0 = left L3, 1 = right R3, 2 = right thumbrest
+    volatile int xrExtraChordActions; // 1 = recenter/F10 chord actions; D-pad and Back remain unconditional
     volatile int xrFullStickSprintCrouch; // 1 = full-forward LS sends L3 and full-down RS sends R3
     volatile int xrSwapTriggersGripsDriving; // 1 = in vehicles, VR triggers -> LB/RB and analog grips -> LT/RT
     volatile int xrMonoXQueueWait;  // 1 = mono path inserts cross-queue Wait before depth capture (legacy). 0 = skip it -- avoids CP2077 async-compute Wait cycle that froze present thread.
@@ -182,6 +184,8 @@ void InitRuntimePaths() {
     // the binding/entry-point patch keeps the game from reaching its main menu.
     g_liveControls.xrXInputInstall = 1;
     g_liveControls.xrInputActions = 1;
+    g_liveControls.xrChordActivation = 0;
+    g_liveControls.xrExtraChordActions = 1;
     g_liveControls.xrFullStickSprintCrouch = 1;
     g_liveControls.xrSwapTriggersGripsDriving = 0;
 
@@ -256,6 +260,8 @@ static void EnsureLiveControlFileExists() {
     // from reaching its main menu.
     fprintf(file, "xr_xinput_install=1\n");
     fprintf(file, "xr_input_actions=1\n");
+    fprintf(file, "xr_chord_activation=0\n");
+    fprintf(file, "xr_extra_chord_actions=1\n");
     fprintf(file, "xr_mono_xqueue_wait=0\n");
     fprintf(file, "xr_snap_turn_pulse_ms=30\n");
     fprintf(file, "xr_mono_depth_capture=1\n");
@@ -475,6 +481,8 @@ static void PollLiveControls() {
     int xrMovementSource = g_liveControls.xrMovementSource;
     int xrXInputInstall = g_liveControls.xrXInputInstall;
     int xrInputActions = g_liveControls.xrInputActions;
+    int xrChordActivation = g_liveControls.xrChordActivation;
+    int xrExtraChordActions = g_liveControls.xrExtraChordActions;
     int xrFullStickSprintCrouch = g_liveControls.xrFullStickSprintCrouch;
     int xrSwapTriggersGripsDriving = g_liveControls.xrSwapTriggersGripsDriving;
     int xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
@@ -690,6 +698,16 @@ static void PollLiveControls() {
             xrInputActions = intValue;
             continue;
         }
+        if (sscanf_s(line, "xr_chord_activation=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_chord_activation = %d", &intValue) == 1) {
+            xrChordActivation = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_extra_chord_actions=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_extra_chord_actions = %d", &intValue) == 1) {
+            xrExtraChordActions = intValue;
+            continue;
+        }
         if (sscanf_s(line, "xr_full_stick_sprint_crouch=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_full_stick_sprint_crouch = %d", &intValue) == 1) {
             xrFullStickSprintCrouch = intValue;
@@ -751,6 +769,8 @@ static void PollLiveControls() {
         g_liveControls.xrReuseLastFrame != xrReuseLastFrame ||
         g_liveControls.xrPairLock != xrPairLock ||
         g_liveControls.xrRenderPoseSubmit != xrRenderPoseSubmit ||
+        g_liveControls.xrChordActivation != xrChordActivation ||
+        g_liveControls.xrExtraChordActions != xrExtraChordActions ||
         g_liveControls.xrFullStickSprintCrouch != xrFullStickSprintCrouch ||
         g_liveControls.xrSwapTriggersGripsDriving != xrSwapTriggersGripsDriving ||
         g_liveControls.xrRuntime != xrRuntime ||
@@ -792,6 +812,8 @@ static void PollLiveControls() {
     g_liveControls.xrSnapTurnAngleDeg = xrSnapTurnAngleDeg > 0.0f ? xrSnapTurnAngleDeg : 30.0f;
     g_liveControls.xrXInputInstall = xrXInputInstall != 0 ? 1 : 0;
     g_liveControls.xrInputActions = xrInputActions != 0 ? 1 : 0;
+    g_liveControls.xrChordActivation = (xrChordActivation >= 0 && xrChordActivation <= 2) ? xrChordActivation : 0;
+    g_liveControls.xrExtraChordActions = xrExtraChordActions != 0 ? 1 : 0;
     g_liveControls.xrFullStickSprintCrouch = xrFullStickSprintCrouch != 0 ? 1 : 0;
     g_liveControls.xrSwapTriggersGripsDriving = xrSwapTriggersGripsDriving != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = xrMonoXQueueWait != 0 ? 1 : 0;
@@ -856,6 +878,8 @@ static LiveControlsUiState MakeLiveControlsUiState() {
     state.xrPhysicalBodyRotation = g_liveControls.xrPhysicalBodyRotation;
     state.xrXInputInstall = g_liveControls.xrXInputInstall;
     state.xrInputActions = g_liveControls.xrInputActions;
+    state.xrChordActivation = g_liveControls.xrChordActivation;
+    state.xrExtraChordActions = g_liveControls.xrExtraChordActions;
     state.xrFullStickSprintCrouch = g_liveControls.xrFullStickSprintCrouch;
     state.xrSwapTriggersGripsDriving = g_liveControls.xrSwapTriggersGripsDriving;
     state.xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
@@ -910,6 +934,8 @@ static void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_physical_body_rotation=%d\n", state.xrPhysicalBodyRotation != 0 ? 1 : 0);
     fprintf(file, "xr_xinput_install=%d\n", state.xrXInputInstall != 0 ? 1 : 0);
     fprintf(file, "xr_input_actions=%d\n", state.xrInputActions != 0 ? 1 : 0);
+    fprintf(file, "xr_chord_activation=%d\n", (state.xrChordActivation >= 0 && state.xrChordActivation <= 2) ? state.xrChordActivation : 0);
+    fprintf(file, "xr_extra_chord_actions=%d\n", state.xrExtraChordActions != 0 ? 1 : 0);
     fprintf(file, "xr_full_stick_sprint_crouch=%d\n", state.xrFullStickSprintCrouch != 0 ? 1 : 0);
     fprintf(file, "xr_swap_triggers_grips_driving=%d\n", state.xrSwapTriggersGripsDriving != 0 ? 1 : 0);
     fprintf(file, "xr_mono_xqueue_wait=%d\n", state.xrMonoXQueueWait != 0 ? 1 : 0);
@@ -975,6 +1001,8 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
     g_liveControls.xrSnapTurnAngleDeg = state->xrSnapTurnAngleDeg > 0.0f ? state->xrSnapTurnAngleDeg : 30.0f;
     g_liveControls.xrXInputInstall = state->xrXInputInstall != 0 ? 1 : 0;
     g_liveControls.xrInputActions = state->xrInputActions != 0 ? 1 : 0;
+    g_liveControls.xrChordActivation = (state->xrChordActivation >= 0 && state->xrChordActivation <= 2) ? state->xrChordActivation : 0;
+    g_liveControls.xrExtraChordActions = state->xrExtraChordActions != 0 ? 1 : 0;
     g_liveControls.xrFullStickSprintCrouch = state->xrFullStickSprintCrouch != 0 ? 1 : 0;
     g_liveControls.xrSwapTriggersGripsDriving = state->xrSwapTriggersGripsDriving != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = state->xrMonoXQueueWait != 0 ? 1 : 0;
@@ -1363,6 +1391,15 @@ extern "C" int GetXrRuntimeMode() {
 
 extern "C" int GetInputActionsEnabled() {
     return g_liveControls.xrInputActions != 0 ? 1 : 0;
+}
+
+extern "C" int GetChordActivationMethod() {
+    const int value = g_liveControls.xrChordActivation;
+    return (value >= 0 && value <= 2) ? value : 0;
+}
+
+extern "C" int GetExtraChordActionsEnabled() {
+    return g_liveControls.xrExtraChordActions != 0 ? 1 : 0;
 }
 
 extern "C" int GetMonoXQueueWait() {
@@ -7395,4 +7432,3 @@ static void InitStereoOnce() {
 __declspec(dllexport) void CyberpunkVRPort_InitStereo() { InitStereoOnce(); }
 
 }
-

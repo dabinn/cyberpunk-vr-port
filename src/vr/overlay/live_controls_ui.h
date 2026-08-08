@@ -95,6 +95,13 @@ struct LiveControlsUiState {
     // OpenXR binding or XInput entry-point patch can't keep CP2077 from booting.
     int xrXInputInstall;
     int xrInputActions;
+    // Controller chord layout. 0 = left L3 + right stick D-pad (original),
+    // 1 = right R3 + left stick D-pad, 2 = right
+    // thumbrest + left stick D-pad.
+    int xrChordActivation;
+    // Optional chord actions only: VR recenter and F10 overlay toggle. D-pad
+    // and Back/Select remain active regardless of this value.
+    int xrExtraChordActions;
     int xrFullStickSprintCrouch;
     // In vehicles only, map VR triggers to LB/RB and analog grips to LT/RT.
     // Physical XInput controller state is never remapped.
