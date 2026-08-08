@@ -1513,10 +1513,22 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
 
             ImGui::Separator();
-            ImGui::TextUnformatted("Default binding (CP2077 native gamepad):");
-            ImGui::BulletText("Left stick   - walk / jog (push FULL forward = sprint / L3)");
+            ImGui::TextUnformatted("Stick edge actions");
+            changed |= CheckboxInt("Full-stick Sprint / Crouch", &state.xrFullStickSprintCrouch);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Send L3 when the left stick is fully forward and R3 when the\n"
+                                  "right stick is fully down. Off keeps both sticks as analog input only.");
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Other bindings (CP2077 native gamepad):");
+            if (state.xrFullStickSprintCrouch != 0)
+                ImGui::BulletText("Left stick   - walk / jog (push FULL forward = sprint / L3)");
+            else
+                ImGui::BulletText("Left stick   - walk / jog");
             ImGui::BulletText("Right stick X - turn camera (Y = pitch unless Disable Mouse Y is on)");
-            ImGui::BulletText("Right stick FULL down - crouch (R3)");
+            if (state.xrFullStickSprintCrouch != 0)
+                ImGui::BulletText("Right stick FULL down - crouch (R3)");
             ImGui::BulletText("Right A      - JUMP");
             ImGui::BulletText("Right B      - dodge");
             ImGui::BulletText("Left  X      - reload / interact");

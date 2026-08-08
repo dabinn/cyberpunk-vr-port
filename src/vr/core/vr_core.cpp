@@ -111,6 +111,7 @@ struct LiveControls {
     volatile int xrMovementSource;  // 0 = Game, 1 = HMD, 2 = LeftHand, 3 = RightHand
     volatile int xrXInputInstall;   // 1 = install the XInput entry-point detour at startup (default 1, set 0 in vrport.ini to fully bypass)
     volatile int xrInputActions;    // 1 = create gameplay XrActions (thumbstick/trigger/buttons). 0 = pose-only legacy behaviour
+    volatile int xrFullStickSprintCrouch; // 1 = full-forward LS sends L3 and full-down RS sends R3
     volatile int xrMonoXQueueWait;  // 1 = mono path inserts cross-queue Wait before depth capture (legacy). 0 = skip it -- avoids CP2077 async-compute Wait cycle that froze present thread.
     volatile int xrSnapTurnPulseMs; // duration of the discrete snap turn pulse pushed into the right stick (ms)
     volatile int xrMonoDepthCapture; // 1 (default) = mono scene-depth for XR_KHR_composition_layer_depth. The resolve reads the game depth as an SRV WITHOUT transitioning it (D3D12 state is global -> barriering the game's resource device-removes CP2077), on our own capture queue (FIFO before the submit's depth copy, no cross-queue Wait), and only once the scene depth has been a stable shader-readable resource with menus closed for a warmup window (skips the intro/menu-load transient). 0 = no depth in mono.
@@ -180,6 +181,7 @@ void InitRuntimePaths() {
     // the binding/entry-point patch keeps the game from reaching its main menu.
     g_liveControls.xrXInputInstall = 1;
     g_liveControls.xrInputActions = 1;
+    g_liveControls.xrFullStickSprintCrouch = 1;
 
     // Capture the recenter-request baseline NOW (before CET could write), so the
     // first OnGameAttached this session is seen as a change and triggers a recenter,
@@ -471,6 +473,7 @@ static void PollLiveControls() {
     int xrMovementSource = g_liveControls.xrMovementSource;
     int xrXInputInstall = g_liveControls.xrXInputInstall;
     int xrInputActions = g_liveControls.xrInputActions;
+    int xrFullStickSprintCrouch = g_liveControls.xrFullStickSprintCrouch;
     int xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
     int xrSnapTurnPulseMs = g_liveControls.xrSnapTurnPulseMs > 0 ? g_liveControls.xrSnapTurnPulseMs : 30;
     int xrMonoDepthCapture = g_liveControls.xrMonoDepthCapture;
@@ -684,6 +687,11 @@ static void PollLiveControls() {
             xrInputActions = intValue;
             continue;
         }
+        if (sscanf_s(line, "xr_full_stick_sprint_crouch=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_full_stick_sprint_crouch = %d", &intValue) == 1) {
+            xrFullStickSprintCrouch = intValue;
+            continue;
+        }
         if (sscanf_s(line, "xr_mono_xqueue_wait=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_mono_xqueue_wait = %d", &intValue) == 1) {
             xrMonoXQueueWait = intValue;
@@ -735,6 +743,7 @@ static void PollLiveControls() {
         g_liveControls.xrReuseLastFrame != xrReuseLastFrame ||
         g_liveControls.xrPairLock != xrPairLock ||
         g_liveControls.xrRenderPoseSubmit != xrRenderPoseSubmit ||
+        g_liveControls.xrFullStickSprintCrouch != xrFullStickSprintCrouch ||
         g_liveControls.xrRuntime != xrRuntime ||
         g_liveControls.xrDepthSubmit != xrDepthSubmit;
 
@@ -774,6 +783,7 @@ static void PollLiveControls() {
     g_liveControls.xrSnapTurnAngleDeg = xrSnapTurnAngleDeg > 0.0f ? xrSnapTurnAngleDeg : 30.0f;
     g_liveControls.xrXInputInstall = xrXInputInstall != 0 ? 1 : 0;
     g_liveControls.xrInputActions = xrInputActions != 0 ? 1 : 0;
+    g_liveControls.xrFullStickSprintCrouch = xrFullStickSprintCrouch != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = xrMonoXQueueWait != 0 ? 1 : 0;
     g_liveControls.xrSnapTurnPulseMs = xrSnapTurnPulseMs > 0 ? xrSnapTurnPulseMs : 30;
     g_liveControls.xrMonoDepthCapture = xrMonoDepthCapture != 0 ? 1 : 0;
@@ -836,6 +846,7 @@ static LiveControlsUiState MakeLiveControlsUiState() {
     state.xrPhysicalBodyRotation = g_liveControls.xrPhysicalBodyRotation;
     state.xrXInputInstall = g_liveControls.xrXInputInstall;
     state.xrInputActions = g_liveControls.xrInputActions;
+    state.xrFullStickSprintCrouch = g_liveControls.xrFullStickSprintCrouch;
     state.xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
     state.xrMonoDepthCapture = g_liveControls.xrMonoDepthCapture;
     state.xrSnapTurnPulseMs = g_liveControls.xrSnapTurnPulseMs;
@@ -888,6 +899,7 @@ static void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_physical_body_rotation=%d\n", state.xrPhysicalBodyRotation != 0 ? 1 : 0);
     fprintf(file, "xr_xinput_install=%d\n", state.xrXInputInstall != 0 ? 1 : 0);
     fprintf(file, "xr_input_actions=%d\n", state.xrInputActions != 0 ? 1 : 0);
+    fprintf(file, "xr_full_stick_sprint_crouch=%d\n", state.xrFullStickSprintCrouch != 0 ? 1 : 0);
     fprintf(file, "xr_mono_xqueue_wait=%d\n", state.xrMonoXQueueWait != 0 ? 1 : 0);
     fprintf(file, "xr_mono_depth_capture=%d\n", state.xrMonoDepthCapture != 0 ? 1 : 0);
     fprintf(file, "xr_snap_turn_pulse_ms=%d\n", state.xrSnapTurnPulseMs > 0 ? state.xrSnapTurnPulseMs : 30);
@@ -951,6 +963,7 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
     g_liveControls.xrSnapTurnAngleDeg = state->xrSnapTurnAngleDeg > 0.0f ? state->xrSnapTurnAngleDeg : 30.0f;
     g_liveControls.xrXInputInstall = state->xrXInputInstall != 0 ? 1 : 0;
     g_liveControls.xrInputActions = state->xrInputActions != 0 ? 1 : 0;
+    g_liveControls.xrFullStickSprintCrouch = state->xrFullStickSprintCrouch != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = state->xrMonoXQueueWait != 0 ? 1 : 0;
     g_liveControls.xrMonoDepthCapture = state->xrMonoDepthCapture != 0 ? 1 : 0;
     g_liveControls.xrSnapTurnPulseMs = state->xrSnapTurnPulseMs > 0 ? state->xrSnapTurnPulseMs : 30;
@@ -6768,13 +6781,14 @@ static DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState
     if (fabsf(lx) > fabsf(pState->Gamepad.sThumbLX / 32767.0f)) pState->Gamepad.sThumbLX = FloatToSHORT(lx);
     if (fabsf(ly) > fabsf(pState->Gamepad.sThumbLY / 32767.0f)) pState->Gamepad.sThumbLY = FloatToSHORT(ly);
 
-    // Left stick pushed near FULL forward => SPRINT. A partial push is left as the
-    // game's normal jog; only "to the stop" sprints. CP2077 sprint is the left-stick
+    // When enabled, left stick pushed near FULL forward => SPRINT. A partial push is
+    // left as the game's normal jog; only "to the stop" sprints. CP2077 sprint is the left-stick
     // click (L3), so we just assert L3 while the stick is forward past the threshold
     // -- no more clicking the stick. Level-triggered (held while past the threshold)
     // mirrors physically holding L3: correct for hold-to-sprint, and toggle-sprint
     // auto-cancels on slow-down so it stays in sync as well.
-    const bool wantSprint = (ly > 0.90f);
+    const bool fullStickActions = g_liveControls.xrFullStickSprintCrouch != 0;
+    const bool wantSprint = fullStickActions && (ly > 0.90f);
     // Published for the snap-event machinery: DURING SPRINT the game RATE-LIMITS heading
     // changes (sprint turns arc over several frames instead of jumping), so the instant
     // packet pre-rotation must be suppressed there (OnFootDeltaHeadCallback).
@@ -6784,11 +6798,11 @@ static DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState
     float rx = ApplyStickDeadzone(vr.rightThumbX, 0.18f);
     float ry = ApplyStickDeadzone(vr.rightThumbY, 0.18f);
 
-    // Right stick pushed near FULL down => CROUCH. Same bind as the right-stick click
+    // When enabled, right stick pushed near FULL down => CROUCH. Same bind as the right-stick click
     // (R3) used today; we assert R3 while the stick is held fully down and consume the
     // downward Y so it doesn't also drive camera pitch. Detected here, before the snap
     // turn block may zero ry, so it works regardless of the turn mode.
-    const bool wantCrouch = (ry < -0.90f);
+    const bool wantCrouch = fullStickActions && (ry < -0.90f);
     if (wantCrouch) ry = 0.0f;
 
     // Suppress pitch from the stick if the user wants HMD-only pitch.
@@ -7342,5 +7356,4 @@ static void InitStereoOnce() {
 __declspec(dllexport) void CyberpunkVRPort_InitStereo() { InitStereoOnce(); }
 
 }
-
 
