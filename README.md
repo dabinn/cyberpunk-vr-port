@@ -1,5 +1,100 @@
 # CyberpunkVR Port
 
+## Controller Enhancements Fork
+
+This fork is based on dariulone's excellent **CyberpunkVR Port v0.1.1**. The
+original mod already provides true stereo rendering, motion-controlled hands,
+VRIK, weapon aiming and visual holsters, but several missing or conflicting
+controller inputs make it difficult to play the full game without reaching for
+a keyboard. So I quickly put together this controller-enhanced version, letting
+everyone jump in and enjoy this awesome mod right away.
+
+![New controller settings in the F10 menu](images/v0.1.1-controller-enhancements.png)
+
+- **RB now works normally**, so you can shoot while driving.
+- RB and the original **visual holsters** still work together: squeeze Right
+  Grip inside a holster zone to use it, or anywhere else for RB. Visual holsters
+  are temporarily disabled in vehicles so you cannot put your weapon away by
+  accident.
+- An optional driving layout automatically swaps Triggers and Grips, keeping
+  Fire on Right Trigger while the analog grips control brake and accelerator.
+- Chord controls provide every standard Xbox controller input, plus VR Recenter
+  and the F10 menu—no keyboard required. Choose L3, R3, or a Virtual
+  Desktop-style Right Thumbrest touch as the activation control.
+- **Disable Mouse Y (Pitch)** is fixed, so the right stick or mouse can freely
+  look up and down instead of being limited to horizontal turning.
+- Full-stick Sprint / Crouch is now optional. Turn both this option and Disable
+  Mouse Y (Pitch) off to use the full right-stick range for vertical look.
+
+[Watch the vehicle combat demonstration on YouTube](https://www.youtube.com/watch?v=n6bx6JbvSgs)
+
+
+
+### Controller setup
+
+Press **F10**, open **Controls**, and choose the options you prefer. Settings are
+saved automatically.
+
+#### Emulate D-pad and Additional Controls
+
+Choose one **Chord Activation Method**. The default is the original L3 method:
+
+| Activation method | D-pad | Back / Select | VR Recenter | F10 Menu |
+|---|---|---|---|---|
+| Hold **L3** (left thumbstick click) | Right stick | Left Menu | A | B |
+| Hold **R3** (right thumbstick click) | Left stick | Left Menu | X | Y |
+| Touch **Right Thumbrest** | Left stick | Left Menu | X | Y |
+
+Hold the activation control first, then move the stick or press the other button.
+L3 and R3 keep their normal functions.
+
+Left Menu sends Start; chord + Left Menu sends Back / Select. D-pad and Back /
+Select are always enabled. **Extra Chord Actions** adds Recenter and F10 Menu and
+is on by default.
+
+**Right Thumbrest** is the touch-sensitive area beside the face buttons where
+your thumb naturally rests, so it can activate the chord without a click. Only
+some VR controllers support it, including Quest 3; unsupported controllers fall
+back to L3.
+
+Keyboard shortcuts also remain available: **F7** for Recenter and **F10 /
+Insert** for the menu.
+
+#### Right Grip and visual holsters
+
+- Grip inside a shoulder or hip holster zone: use the original visual holster.
+- Grip anywhere else: send **RB**.
+- In a vehicle: visual holsters are disabled.
+
+#### Swap Triggers / Grips While Driving
+
+Enable this option to keep shooting on Right Trigger while driving:
+
+| VR input | Emulated gamepad input |
+|---|---|
+| Left Trigger | LB |
+| Right Trigger | RB |
+| Left analog Grip | LT |
+| Right analog Grip | RT |
+
+The analog grips become brake and accelerator. Only VR controller input is
+changed; physical gamepads are unaffected. This option is **off by default**.
+
+#### Other options
+
+| Setting | Behavior |
+|---|---|
+| **Disable Mouse Y (Pitch)** | On: HMD-only vertical look. Off: mouse and right-stick vertical look enabled. |
+| **Full-stick Sprint / Crouch** | Fully push the left stick forward to Sprint or the right stick down to Crouch. On by default. |
+
+### Credits and upstream documentation
+
+All core VR functionality comes from
+[dariulone's CyberpunkVR Port](https://github.com/dariulone/cyberpunk-vr-port).
+The original README continues below. For controller mappings, use the guide above.
+
+---
+
 A 6-DoF **VR mod for Cyberpunk 2077**, built as a **RED4ext plugin** — there is no
 `dxgi.dll` proxy any more. `CyberpunkVR_Stereo` drives OpenXR head tracking, real
 stereo and the in-headset overlay; `CyberpunkVR_Hands` drives a **full-body VR
