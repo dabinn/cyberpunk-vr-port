@@ -1918,6 +1918,7 @@ static void ApplyKnownResolutionOverrides() {
 }
 
 static volatile float g_pitchOverrideValue = 0.0f;
+static volatile float g_gamePitchRadians = 0.0f;
 // THE ENGINE'S FOV FIELD IS VERTICAL. Measured live in x64dbg on the MAIN view context: we wrote
 // 94.0 (the de-canted horizontal) and the frustum came back tan(V/2) = 1.072369 -- exactly tan 47,
 // i.e. the engine took our number as the VERTICAL -- with tan(H/2) = 1.002432, which is precisely
@@ -2318,8 +2319,8 @@ extern "C" __declspec(dllexport) int CyberpunkVR_CamWriteInPatch = 1;
 // LocateCamera publishes the HEADING only; PatchCamera multiplies it by the HMD pose and
 // writes the product. The split follows how fast each part moves:
 //
-//   heading - mouse/stick yaw, recenter, physical-body realign. Gameplay-rate, and a value one
-//             interval old is not detectable in it.
+//   heading - mouse/stick yaw and optional pitch, recenter, physical-body realign. Gameplay-rate,
+//             and a value one interval old is not detectable in it.
 //   HMD     - the whole point. It has to be the sample belonging to the frame being built, and
 //             only the write site knows when that is.
 //
@@ -2329,8 +2330,10 @@ extern "C" __declspec(dllexport) int CyberpunkVR_CamWriteInPatch = 1;
 // Whenever Patch leads, it writes the PREVIOUS interval's product -- a full frame of
 // orientation lag that never catches up, and an image that does not match the pose submitted
 // with it. Composing here takes the ordering out of the answer entirely.
-static volatile float g_headingSy = 0.0f;      // heading quaternion is (0, 0, sy, cy)
+static volatile float g_headingSy = 0.0f;
 static volatile float g_headingCy = 1.0f;
+static volatile float g_headingPitchS = 0.0f;  // pitch quaternion is (s, 0, 0, c)
+static volatile float g_headingPitchC = 1.0f;
 static volatile uint32_t g_headingValid = 0;   // 0 on the shot frame / native-aim mode
 
 // The product actually written into both cameras, composed once per present interval.
@@ -3154,18 +3157,25 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         // at the pair boundary (UpdatePairLock + FlushHandsToShared), before the next
         // pair's animation.
 
-        // Keep mouse/controller yaw as the body heading, but do not add mouse-Y pitch
-        // on top of HMD pitch. The headset supplies vertical look in VR.
+        // The headset supplies vertical look when mouse-Y pitch is disabled. When it is
+        // enabled, preserve the game's pitch and compose it with the HMD orientation.
         const float gameYaw = atan2f(-bodyGameForwardX, bodyGameForwardY);
+        const float gamePitch = g_liveControls.xrDisableMouseY != 0
+            ? 0.0f
+            : g_gamePitchRadians;
         const float cy = cosf(gameYaw * 0.5f);
         const float sy = sinf(gameYaw * 0.5f);
+        const float pc = cosf(gamePitch * 0.5f);
+        const float ps = sinf(gamePitch * 0.5f);
 
-        // Publish the heading for the write site. This -- not the finished product -- is what
+        // Publish the game orientation for the write site. This -- not the finished product -- is what
         // this hook is uniquely able to produce: it is the only place that has the body
         // forward, the recenter base and the physical-rotation realign. The HMD half is
         // multiplied in at the write, where it can be current.
         g_headingSy = sy;
         g_headingCy = cy;
+        g_headingPitchS = ps;
+        g_headingPitchC = pc;
         g_headingValid = skipHmdOrientation ? 0u : 1u;
         CyberpunkVR_DebugTidLocateCam = GetCurrentThreadId();
 
@@ -3174,14 +3184,18 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         const float xrGameZ = xrPose.oriY;
         const float xrGameW = xrPose.oriW;
 
-        // Camera = heading * FULL HMD orientation in EVERY on-foot mode. With physical
+        // Camera = game orientation * FULL HMD orientation in EVERY on-foot mode. With physical
         // body rotation ON, body-realign (OnOnFootDeltaHead) turns the game HEADING only
         // on a PHYSICAL body turn and rotates the recenter base by the same angle, so a
         // head-only turn moves the VIEW but leaves the body/heading put. (The old unarmed
         // branch stripped the HMD yaw and glued the heading to it, which rotated the body
         // on every head turn -- replaced by the realign model.)
+        float headingX, headingY, headingZ, headingW;
+        MulQuat(0.0f, 0.0f, sy, cy, ps, 0.0f, 0.0f, pc,
+            headingX, headingY, headingZ, headingW);
         float tmpX, tmpY, tmpZ, tmpW;
-        MulQuat(0.0f, 0.0f, sy, cy, xrGameX, xrGameY, xrGameZ, xrGameW, tmpX, tmpY, tmpZ, tmpW);
+        MulQuat(headingX, headingY, headingZ, headingW,
+            xrGameX, xrGameY, xrGameZ, xrGameW, tmpX, tmpY, tmpZ, tmpW);
         NormalizeQuat(tmpX, tmpY, tmpZ, tmpW);
 
         camera_qx = tmpX;
@@ -3886,7 +3900,7 @@ extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* owner
 
     // ---- ORIENTATION: the head pose, into BOTH cameras ------------------------------------
     //
-    // This is what makes VRCAM track. LocateCamera composed heading * HMD for this frame and
+    // This is what makes VRCAM track. LocateCamera composed game orientation * HMD for this frame and
     // published it; here it goes into the camera's own quaternion store, which is what the
     // rest of the frame reads. Both cameras get the SAME orientation -- the eyes differ by the
     // lateral IPD offset below, not by where they look.
@@ -3977,8 +3991,12 @@ extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* owner
                 }
                 if (got) {
                     // Same axis mapping LocateCamera uses: XR (x, y, z) -> game (x, -z, y).
-                    float rx, ry, rz, rw;
+                    float headingX, headingY, headingZ, headingW;
                     MulQuat(0.0f, 0.0f, g_headingSy, g_headingCy,
+                            g_headingPitchS, 0.0f, 0.0f, g_headingPitchC,
+                            headingX, headingY, headingZ, headingW);
+                    float rx, ry, rz, rw;
+                    MulQuat(headingX, headingY, headingZ, headingW,
                             p.oriX, -p.oriZ, p.oriY, p.oriW, rx, ry, rz, rw);
                     NormalizeQuat(rx, ry, rz, rw);
                     CamWriteQuatPublish(rx, ry, rz, rw);
@@ -4568,18 +4586,22 @@ extern "C" void __fastcall OnPitchHookCallback(void* pitchState, float originalP
     g_pitchHookHits++;
 
     // Mouse-Y pitch in CP2077 also drives a constrained camera pivot offset, which
-    // moves the head toward/away from the body in VR. Keep the game pitch neutral;
-    // HMD pitch is applied visually in LocateCamera instead.
-    const float desiredPitch = 0.0f;
+    // moves the head toward/away from the body in VR. Keep the game pitch neutral
+    // only when HMD-only pitch is enabled; otherwise preserve the game input.
+    const float desiredPitch = g_liveControls.xrDisableMouseY != 0 ? 0.0f : originalPitch;
+
+    float minPitch = 0.0f;
+    float maxPitch = 0.0f;
+    ReadFloatSafe(reinterpret_cast<uintptr_t>(pitchState) + 0x14, &minPitch);
+    ReadFloatSafe(reinterpret_cast<uintptr_t>(pitchState) + 0x18, &maxPitch);
+    const float clampedPitch = (std::max)(minPitch, (std::min)(maxPitch, desiredPitch));
+    const bool pitchUsesDegrees = fabsf(minPitch) > 3.2f || fabsf(maxPitch) > 3.2f;
+    g_gamePitchRadians = clampedPitch * (pitchUsesDegrees ? 0.01745329252f : 1.0f);
 
     g_pitchOverrideValue = desiredPitch;
 
     if (g_verboseLog && (g_pitchHookHits % 600) == 1) {
-        float minPitch = 0.0f;
-        float maxPitch = 0.0f;
-        ReadFloatSafe(reinterpret_cast<uintptr_t>(pitchState) + 0x14, &minPitch);
-        ReadFloatSafe(reinterpret_cast<uintptr_t>(pitchState) + 0x18, &maxPitch);
-        Log("Pitch hook: state=%p original=%.6f neutral=%.6f clamp=[%.6f, %.6f]\n",
+        Log("Pitch hook: state=%p original=%.6f desired=%.6f clamp=[%.6f, %.6f]\n",
             pitchState,
             originalPitch,
             desiredPitch,
@@ -6848,7 +6870,6 @@ static DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState
         }
         // Stick X is consumed by the snap turn, so do not pass it to the game.
         rx = 0.0f;
-        ry = 0.0f;
     }
 
     if (fabsf(rx) > fabsf(pState->Gamepad.sThumbRX / 32767.0f)) pState->Gamepad.sThumbRX = FloatToSHORT(rx);
