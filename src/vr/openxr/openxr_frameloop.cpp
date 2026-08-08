@@ -671,7 +671,12 @@ DWORD OpenXRManager::FrameThreadMain() {
                 constexpr uint16_t XB_Y              = 0x8000;
 
                 bool rightThumbrestTouched = false;
-                bool rightThumbrestAvailable = false;
+                bool rightThumbrestAvailable = m_rightThumbrestAvailable.load(std::memory_order_relaxed);
+                if (gameplayInputActive
+                    && !m_rightThumbrestProfileKnown.load(std::memory_order_relaxed)) {
+                    RefreshRightThumbrestAvailability();
+                    rightThumbrestAvailable = m_rightThumbrestAvailable.load(std::memory_order_relaxed);
+                }
                 if (gameplayInputActive && m_rightThumbrestAction != XR_NULL_HANDLE) {
                     XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
                     gi.action = m_rightThumbrestAction;
@@ -679,6 +684,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                     XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
                     if (XR_SUCCEEDED(xrGetActionStateBoolean(m_session, &gi, &st)) && st.isActive) {
                         rightThumbrestAvailable = true;
+                        m_rightThumbrestProfileKnown.store(true, std::memory_order_relaxed);
                         rightThumbrestTouched = st.currentState != XR_FALSE;
                     }
                 }
@@ -882,7 +888,6 @@ DWORD OpenXRManager::FrameThreadMain() {
                 struct ChordRuntimeState {
                     int effectiveMode = -1;
                     bool modifierHeld = false;
-                    bool modifierUsed = false;
                     bool modifierPassthrough = false;
                     bool dpadArmed = false;
                     bool menuDown = false;
@@ -925,47 +930,38 @@ DWORD OpenXRManager::FrameThreadMain() {
                     const bool chordInputAlreadyActive =
                         std::abs(stickX[dpadStick]) >= dpadNeutralThreshold
                         || std::abs(stickY[dpadStick]) >= dpadNeutralThreshold
+                        || (effectiveMode == 0
+                            && (std::abs(stickX[0]) >= dpadNeutralThreshold
+                                || std::abs(stickY[0]) >= dpadNeutralThreshold))
+                        || (effectiveMode == 1
+                            && (std::abs(stickX[1]) >= dpadNeutralThreshold
+                                || std::abs(stickY[1]) >= dpadNeutralThreshold))
                         || menuPressed
                         || (extraChordActionsEnabled
                             && (facePressed[recenterButton] || facePressed[overlayButton]));
-
                     if (s_chord.effectiveMode != effectiveMode) {
                         s_chord.effectiveMode = effectiveMode;
                         s_chord.modifierHeld = modifierPressed;
-                        s_chord.modifierUsed = modifierPressed;
                         s_chord.modifierPassthrough = false;
                         s_chord.dpadArmed = false;
                     } else if (modifierPressed) {
                         if (!s_chord.modifierHeld) {
                             s_chord.modifierHeld = true;
-                            s_chord.modifierUsed = chordInputAlreadyActive;
                             s_chord.modifierPassthrough = chordInputAlreadyActive;
                             s_chord.dpadArmed = false;
                         }
                     } else if (s_chord.modifierHeld) {
-                        if (!s_chord.modifierUsed && effectiveMode != 2) {
-                            ctrl.buttons |= XB_LEFT_THUMB;
-                        }
                         s_chord.modifierHeld = false;
-                        s_chord.modifierUsed = false;
                         s_chord.modifierPassthrough = false;
                         s_chord.dpadArmed = false;
                     }
                     const bool chordReady = modifierPressed && modifierWasHeld
                         && !s_chord.modifierPassthrough;
 
-                    if (effectiveMode == 0) {
-                        if (stickClicked[1]) ctrl.buttons |= XB_RIGHT_THUMB;
-                    } else if (effectiveMode == 1) {
-                        if (stickClicked[0]) ctrl.buttons |= XB_RIGHT_THUMB;
-                    } else {
-                        if (stickClicked[0]) ctrl.buttons |= XB_LEFT_THUMB;
-                        if (stickClicked[1]) ctrl.buttons |= XB_RIGHT_THUMB;
-                    }
-                    if (modifierPressed && s_chord.modifierPassthrough && effectiveMode != 2) {
-                        ctrl.buttons |= XB_LEFT_THUMB;
-                    }
-
+                    // Chord recognition is additive: physical thumb clicks always keep their
+                    // standard XInput meaning while the modifier interprets later inputs.
+                    if (stickClicked[0]) ctrl.buttons |= XB_LEFT_THUMB;
+                    if (stickClicked[1]) ctrl.buttons |= XB_RIGHT_THUMB;
                     if (chordReady) {
                         const float sx = stickX[dpadStick];
                         const float sy = stickY[dpadStick];
@@ -975,11 +971,10 @@ DWORD OpenXRManager::FrameThreadMain() {
                             s_chord.dpadArmed = true;
                         }
                         if (s_chord.dpadArmed) {
-                            bool dpadUsed = false;
-                            if (sy > dpadThreshold)  { ctrl.buttons |= XB_DPAD_UP;    dpadUsed = true; }
-                            if (sy < -dpadThreshold) { ctrl.buttons |= XB_DPAD_DOWN;  dpadUsed = true; }
-                            if (sx < -dpadThreshold) { ctrl.buttons |= XB_DPAD_LEFT;  dpadUsed = true; }
-                            if (sx > dpadThreshold)  { ctrl.buttons |= XB_DPAD_RIGHT; dpadUsed = true; }
+                            if (sy > dpadThreshold)   ctrl.buttons |= XB_DPAD_UP;
+                            if (sy < -dpadThreshold)  ctrl.buttons |= XB_DPAD_DOWN;
+                            if (sx < -dpadThreshold)  ctrl.buttons |= XB_DPAD_LEFT;
+                            if (sx > dpadThreshold)   ctrl.buttons |= XB_DPAD_RIGHT;
                             if (dpadStick == 0) {
                                 ctrl.leftThumbX = 0.0f;
                                 ctrl.leftThumbY = 0.0f;
@@ -987,13 +982,11 @@ DWORD OpenXRManager::FrameThreadMain() {
                                 ctrl.rightThumbX = 0.0f;
                                 ctrl.rightThumbY = 0.0f;
                             }
-                            if (dpadUsed) s_chord.modifierUsed = true;
                         }
                     }
 
                     if (menuPressed && !s_chord.menuDown) {
                         s_chord.menuChorded = chordReady;
-                        if (s_chord.menuChorded) s_chord.modifierUsed = true;
                     }
                     if (menuPressed) {
                         ctrl.buttons |= s_chord.menuChorded ? XB_BACK : XB_START;
@@ -1009,12 +1002,10 @@ DWORD OpenXRManager::FrameThreadMain() {
                     if (extraChordActionsEnabled && chordReady) {
                         if (facePressed[recenterButton] && !s_chord.faceWasDown[recenterButton]) {
                             s_chord.faceChordLatched[recenterButton] = true;
-                            s_chord.modifierUsed = true;
                             RequestRecenter();
                         }
                         if (facePressed[overlayButton] && !s_chord.faceWasDown[overlayButton]) {
                             s_chord.faceChordLatched[overlayButton] = true;
-                            s_chord.modifierUsed = true;
                             RequestOverlayToggle();
                         }
                     }

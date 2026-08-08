@@ -672,6 +672,7 @@ public:
 private:
     static DWORD WINAPI FrameThreadThunk(LPVOID param);
     DWORD FrameThreadMain();
+    void RefreshRightThumbrestAvailability();
     // Dedicated submit thread: parks while the inline Present pump owns the loop, and
     // takes the loop over whenever UseThreadedSubmit() is true (SteamVR, or
     // ThreadedMonoSubmit) so the blocking fence/swapchain waits never run on the
@@ -737,6 +738,8 @@ private:
     XrAction m_secondaryButtonAction = XR_NULL_HANDLE;   // Bool, per hand (Y / B)
     XrAction m_menuButtonAction = XR_NULL_HANDLE;        // Bool, left only on Touch
     XrAction m_rightThumbrestAction = XR_NULL_HANDLE;    // Bool, Oculus Touch right thumbrest touch
+    XrPath m_oculusTouchProfilePath = XR_NULL_PATH;
+    std::atomic<bool> m_rightThumbrestProfileKnown{false};
     std::atomic<bool> m_rightThumbrestAvailable{false};
     XrPath m_handPaths[2] = { XR_NULL_PATH, XR_NULL_PATH };
     XrSpace m_handSpaces[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
