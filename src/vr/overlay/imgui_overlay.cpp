@@ -23,9 +23,9 @@ extern void Log(const char* fmt, ...);
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-// located (HMD-injected) game-world camera quaternion, defined in vr_core.cpp. Declared at GLOBAL
-// scope (NOT inside the anonymous namespace below) so it keeps external linkage.
-extern volatile float g_lastLocateQuat[4];
+// Coherent MAIN render-camera + muzzle snapshot, published by vr_core.cpp.
+extern "C" int GetBarrelDotRenderSnapshot(float outCameraQuat[4], float outMuzzleFwd[3],
+                                            uint64_t* outId);
 
 // ---- sync_stereo tunables (stereo/sync_stereo.cpp, all dllexported) ------------------------
 // Live values, not part of LiveControlsUiState: the engine hooks read these globals directly
@@ -120,9 +120,8 @@ float g_handLocatorScale = 1.0f;
 // gun barrel looks" line). Reuses the same head-relative projection as the hand proxy.
 bool g_drawAimRay = true;
 float g_aimRayLenM = 8.0f;
-// EXACT barrel crosshair: project the GAME muzzle forward (plugin publishes it to shared[24..26])
-// through the located game camera (= the eye view) -> a dot exactly where the bullet goes.
-bool g_drawBarrelCross = true;   // g_lastLocateQuat is declared above, at global scope
+// Barrel-direction overlay toggle.
+bool g_drawBarrelCross = true;
 
 void MapAbstractHandPoint(bool isLeftHand, float hx, float hy, float hz, float* cx, float* cy, float* cz) {
     if (isLeftHand) {
@@ -651,12 +650,11 @@ extern "C" __declspec(dllexport) uint64_t CyberpunkVR_BarrelDotTick = 0;
 extern "C" __declspec(dllexport) int32_t  CyberpunkVR_BarrelDotSecondEye = 1;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugBarrelDotDraws = 0;
 
-// EXACT barrel crosshair. The plugin publishes the weapon muzzle WORLD forward (shared[24..26]); we
-// rotate it into the located game camera's local frame (inv(camQuat) * fwd) and project that
-// direction with the SAME view/FOV the eye renders through -> the dot lands exactly where the bullet
-// goes (both derive from the same muzzle + camera). No controller-space guessing.
+// Project the weapon muzzle's world-forward direction through MAIN's render camera. Camera and
+// muzzle are read from one final-camera snapshot: the historical Present-time path mixed a latest
+// Locate quaternion with an independently timed CET muzzle and produced velocity-dependent trails
+// during fast head turns. This is a direction indicator, not a collision raycast or guaranteed hit.
 void DrawBarrelCrosshair() {
-    
     const float enableLaser = OpenXRManager::Get().GetSharedSlot(144);   // weapon flag (was [126]: HMD-Z collision)
     
     float rad = 3.0f;
@@ -672,24 +670,12 @@ void DrawBarrelCrosshair() {
         return;
     } 
 
-    if (OpenXRManager::Get().GetSharedSlot(27) < 0.5f) return;   // muzzle fwd not published yet
-    // Latched like the position, and for the same reason. With no weapon the muzzle quaternion
-    // is identity, and SetVRMuzzleQuat then publishes its +Y as (0, 1, 0) exactly -- a direction
-    // that is not the barrel and that dragged the aim point behind the camera (measured
-    // ly = -13.3, and the projection duly refused). Anything that is exactly the identity default
-    // is not an answer, so the last real barrel direction is kept instead.
-    static float s_mf[3] = {0.0f, 0.0f, 0.0f};
-    {
-        const float rx = OpenXRManager::Get().GetSharedSlot(24);
-        const float ry = OpenXRManager::Get().GetSharedSlot(25);
-        const float rz = OpenXRManager::Get().GetSharedSlot(26);
-        const bool isDefault = (rx == 0.0f && ry == 1.0f && rz == 0.0f);
-        if (!isDefault && rx*rx + ry*ry + rz*rz > 0.25f) { s_mf[0]=rx; s_mf[1]=ry; s_mf[2]=rz; }
-    }
-    const float mfx = s_mf[0], mfy = s_mf[1], mfz = s_mf[2];
-    if (mfx*mfx + mfy*mfy + mfz*mfz < 0.25f) return;
-
-    const float cqx = g_lastLocateQuat[0], cqy = g_lastLocateQuat[1], cqz = g_lastLocateQuat[2], cqw = g_lastLocateQuat[3];
+    float cameraQuat[4] = {};
+    float muzzleFwd[3] = {};
+    if (!GetBarrelDotRenderSnapshot(cameraQuat, muzzleFwd, nullptr)) return;
+    const float mfx = muzzleFwd[0], mfy = muzzleFwd[1], mfz = muzzleFwd[2];
+    const float cqx = cameraQuat[0], cqy = cameraQuat[1];
+    const float cqz = cameraQuat[2], cqw = cameraQuat[3];
 
     // A DIRECTION CANNOT MARK AN IMPACT POINT except for an eye that lies on the bullet's line.
     //
