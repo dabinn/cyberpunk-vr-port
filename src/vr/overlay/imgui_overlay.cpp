@@ -107,6 +107,11 @@ WNDPROC g_originalWndProc = nullptr;
 bool g_imguiInitialized = false;
 bool g_menuVisible = false;
 std::atomic<uint32_t> g_menuToggleRequests{0};
+bool g_showCompactAdsTelemetry = true;
+// Normalized MAIN/right-eye backbuffer coordinates. Keep the default comfortably
+// inside the lens-visible area instead of at the desktop mirror's outer corner.
+float g_compactAdsTelemetryX = 0.57f;
+float g_compactAdsTelemetryY = 0.30f;
 bool g_drawHandLocator = false;
 bool g_drawHandProxy3D = false;
 bool g_drawHandDebugAxes = false;
@@ -1445,6 +1450,18 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             ImGui::SetTooltip("Off by default for a clean cyberpunkvrport.log. Enable only\n"
                               "when capturing ClipCursor / depth / hook diagnostics.");
         }
+        ImGui::Checkbox("Show compact telemetry while playing", &g_showCompactAdsTelemetry);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Draw a small MAIN/right-eye ADS camera panel after F10 is closed.\n"
+                              "Normal stereo submission remains active.");
+        }
+        if (g_showCompactAdsTelemetry) {
+            ImGui::Indent();
+            ImGui::SliderFloat("Telemetry X", &g_compactAdsTelemetryX, 0.10f, 0.90f, "%.2f");
+            ImGui::SliderFloat("Telemetry Y", &g_compactAdsTelemetryY, 0.10f, 0.90f, "%.2f");
+            ImGui::TextDisabled("Normalized position in the MAIN/right-eye image");
+            ImGui::Unindent();
+        }
             }
             ImGui::EndTabItem();
         }
@@ -1627,6 +1644,55 @@ bool DrawLiveControls(LiveControlsUiState& state) {
     }
 
     return changed;
+}
+
+void DrawCompactAdsCameraTelemetry() {
+    if (!g_showCompactAdsTelemetry) return;
+
+    AdsCameraTelemetryUiState t{};
+    GetAdsCameraTelemetryUiState(&t);
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(
+        ImVec2(display.x * g_compactAdsTelemetryX, display.y * g_compactAdsTelemetryY),
+        ImGuiCond_Always,
+        ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowBgAlpha(0.72f);
+    constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+        ImGuiWindowFlags_NoInputs;
+    if (ImGui::Begin("ADS camera telemetry##compact", nullptr, flags)) {
+        if (!t.available) {
+            ImGui::TextUnformatted("ADS CAM  waiting for gameplay camera...");
+        } else {
+            const ImVec4 stateColor = t.aiming
+                ? ImVec4(1.0f, 0.78f, 0.24f, 1.0f)
+                : ImVec4(0.45f, 0.9f, 0.55f, 1.0f);
+            const float expectedZoom = CyberpunkVR_DebugVrcamZoomFactor;
+            const float sharedZoomRaw = OpenXRManager::Get().GetSharedSlot(28);
+            const float projectionZoom = (CyberpunkVR_OverlayFollowAds &&
+                                          expectedZoom > 0.5f && expectedZoom < 4.0f)
+                ? expectedZoom : 1.0f;
+            const float extraZoom = sharedZoomRaw > 1.05f ? sharedZoomRaw : 1.0f;
+            const float finalZoom = projectionZoom * extraZoom;
+            ImGui::TextColored(stateColor, "ADS CAM  %s", t.aiming ? "ON" : "HIP");
+            ImGui::Text("zoom expected %.3fx   final %.3fx", expectedZoom, finalZoom);
+            ImGui::TextDisabled("shared[28] %.3fx", sharedZoomRaw);
+            if (!t.baselineValid) {
+                ImGui::TextUnformatted("Hold hip-fire briefly to capture baseline");
+            } else {
+                ImGui::Text("delta cm  R %+6.2f  F %+6.2f  U %+6.2f",
+                            t.deltaRight * 100.0f, t.deltaForward * 100.0f, t.deltaUp * 100.0f);
+                ImGui::Text("peak  cm  R %6.2f  F %6.2f  U %6.2f   n=%u",
+                            t.peakRight * 100.0f, t.peakForward * 100.0f,
+                            t.peakUp * 100.0f, t.samples);
+                ImGui::TextDisabled("raw   cm  R %+6.2f  F %+6.2f  U %+6.2f",
+                                    t.residualRight * 100.0f, t.residualForward * 100.0f,
+                                    t.residualUp * 100.0f);
+            }
+        }
+    }
+    ImGui::End();
 }
 
 void ReleaseRenderTargets() {
@@ -1941,6 +2007,7 @@ void OverlayRender(IDXGISwapChain* swapChain) {
 
     DrawHandLocatorOverlay();
     DrawBarrelCrosshair();
+    DrawCompactAdsCameraTelemetry();
 
     LiveControlsUiState state{};
     GetLiveControlsUiState(&state);
