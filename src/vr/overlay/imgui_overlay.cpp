@@ -184,23 +184,25 @@ static bool GetOverlayProjTans(const ImVec2& displaySize, float* tanHalfX, float
     float tx = tanf((hfovDeg * 0.5f) * (3.1415926535f / 180.0f));
     float ty = tx * (displaySize.y / displaySize.x);
 
-    // AIMING MAGNIFIES THE IMAGE WITHOUT TOUCHING THE FOV, so a projection built from the FOV alone
-    // stops matching the picture the moment the player raises the sights.
+    // ADS changes MAIN's projection matrix without changing the scalar FOV used above. Therefore
+    // tx/ty still describe the unzoomed frustum until we apply the ratio recovered by sync_stereo:
     //
-    // Measured on the MAIN view context: the fov scalar at +0x90 reads 68.238 both at rest and
-    // while aiming -- ADS does not go through it. It goes through the projection matrix, +0x214,
-    // and sync_stereo already recovers the ratio from there: g_ads_factor = projYY * tan(fov/2),
-    // which comes out 1.0000 at rest and 1.4998 aiming. The world grows by that; everything drawn
-    // here from the unzoomed tangents does not, so the sight mark sat at two thirds of its proper
-    // distance from centre and the shot went somewhere else. Dividing the tangents by the factor
-    // is the same magnification applied to us.
+    //     ads = MAIN projYY * tan(baseFov / 2)
     //
-    // Guarded rather than trusted: the factor is sampled from a live engine matrix, so anything
-    // outside a plausible zoom range means the sample is stale or the field moved, and the honest
-    // response is to draw as if unzoomed rather than to throw the mark across the screen.
+    // Measured examples are 1.0x at hip, ~1.3-1.5x for ordinary ADS, and 4.25x for a sniper
+    // scope. Dividing both tangents by `ads` is the ONE projection correction: because screen
+    // NDC is proportional to 1/tanHalfFov, this magnifies every projected offset by `ads` and
+    // makes the overlay match the pixels MAIN actually rendered.
+    //
+    // Do not add shared-memory slot [28] on top. It is an independently timed CET GetZoom sample
+    // kept for telemetry only; multiplying by it again produced the confirmed 1.3x * 1.3x SMG
+    // error. The old `ads < 4` guard merely hid that bug for 4.25x sniper scopes by skipping this
+    // correct projection step and leaving [28] as their accidental sole multiplier. There is no
+    // weapon-class boundary at 4x and no justified finite upper limit here. Accept every finite,
+    // positive factor; reject only values that cannot represent a projection scale.
     if (CyberpunkVR_OverlayFollowAds) {
         const float ads = CyberpunkVR_DebugVrcamZoomFactor;
-        if (ads > 0.5f && ads < 4.0f) { tx /= ads; ty /= ads; }
+        if (std::isfinite(ads) && ads > 0.0f) { tx /= ads; ty /= ads; }
     }
 
     if (tx <= 0.0001f || ty <= 0.0001f) return false;
@@ -797,33 +799,14 @@ void DrawBarrelCrosshair() {
     // With world data present the direction path is not a fallback, it is a wrong answer.
     if (CyberpunkVR_BarrelDotWorld && haveWorld && !worldOk) return;
     if (worldOk || ProjectHeadSpacePointToScreen(vx, vz, -vy, displaySize, &sc)) {
-        // ZOOM COMPENSATION (scope/ADS): the bullet leaves the barrel regardless of zoom, but
-        // a scope magnifies the on-screen image by ~Z around the view center while our dot was
-        // projected at the un-zoomed HMD FOV. Published zoom factor lives in shared[28] (CET
-        // pushes PlayerStateMachine.ZoomLevel). For small angles the screen offset scales ~linearly
-        // with Z, so push the dot's offset-from-center out by Z so it tracks the magnified barrel.
-        // shared[28] = live camera GetZoom (1.0 normal, ~5.25 scoped) -- the REAL scope magnification
-        // (the scope changes GetZoom, not FOV). Scale the dot's offset from screen center by it so the
-        // dot tracks the magnified impact while scoped. Published by the CET weapon mod each frame.
-        const float zoom = OpenXRManager::Get().GetSharedSlot(28);
-        if (zoom > 1.05f) {
-            const float cx = displaySize.x * 0.5f, cy = displaySize.y * 0.5f;
-            sc.x = cx + (sc.x - cx) * zoom;
-            sc.y = cy + (sc.y - cy) * zoom;
-        }
+        // ADS is already part of GetOverlayProjTans() through MAIN's actual projection
+        // matrix. Do NOT multiply the screen offset by shared[28] here: that independent
+        // CET sample double-zooms ordinary ADS and can be a frame out of sync.
         // PUBLISH IT FOR THE SECOND EYE. The overlay draws into the backbuffer, which is eye 0
         // only -- eye 1 is the VRCAM view and no ImGui list ever reaches it. Rather than repeat
         // this projection there (and risk the two disagreeing for a reason of my own making),
         // hand the finished screen position over in NDC and let the eye pass stamp the same
-        // point. Published AFTER the zoom compensation, so both dots carry it.
-        if (worldOk) {
-            const float z2 = OpenXRManager::Get().GetSharedSlot(28);
-            if (z2 > 1.05f) {
-                const float cx2 = displaySize.x * 0.5f, cy2 = displaySize.y * 0.5f;
-                scRight.x = cx2 + (scRight.x - cx2) * z2;
-                scRight.y = cy2 + (scRight.y - cy2) * z2;
-            }
-        }
+        // point. Both eye projections already use the same effective ADS frustum.
         CyberpunkVR_BarrelDotNdcX = (sc.x / displaySize.x) * 2.0f - 1.0f;
         CyberpunkVR_BarrelDotNdcY = 1.0f - (sc.y / displaySize.y) * 2.0f;
         {
@@ -839,8 +822,6 @@ void DrawBarrelCrosshair() {
                     // The offset eye is on the other side once MAIN moves eyes.
                     dx = -(ipd / zeroM) / thx;
                     if (CyberpunkVR_MainIsRightEye) dx = -dx;
-                    const float z = OpenXRManager::Get().GetSharedSlot(28);
-                    if (z > 1.05f) dx *= z;
                 }
             }
             CyberpunkVR_BarrelDotNdcX2 = (worldOk
@@ -1671,13 +1652,13 @@ void DrawCompactAdsCameraTelemetry() {
             const float expectedZoom = CyberpunkVR_DebugVrcamZoomFactor;
             const float sharedZoomRaw = OpenXRManager::Get().GetSharedSlot(28);
             const float projectionZoom = (CyberpunkVR_OverlayFollowAds &&
-                                          expectedZoom > 0.5f && expectedZoom < 4.0f)
+                                          std::isfinite(expectedZoom) &&
+                                          expectedZoom > 0.0f)
                 ? expectedZoom : 1.0f;
-            const float extraZoom = sharedZoomRaw > 1.05f ? sharedZoomRaw : 1.0f;
-            const float finalZoom = projectionZoom * extraZoom;
+            const float finalZoom = projectionZoom;
             ImGui::TextColored(stateColor, "ADS CAM  %s", t.aiming ? "ON" : "HIP");
             ImGui::Text("zoom expected %.3fx   final %.3fx", expectedZoom, finalZoom);
-            ImGui::TextDisabled("shared[28] %.3fx", sharedZoomRaw);
+            ImGui::TextDisabled("shared[28] %.3fx   diagnostic only", sharedZoomRaw);
             if (!t.baselineValid) {
                 ImGui::TextUnformatted("Hold hip-fire briefly to capture baseline");
             } else {

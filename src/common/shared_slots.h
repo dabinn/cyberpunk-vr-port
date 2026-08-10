@@ -31,7 +31,7 @@
 //  [23]       holster mode simple/immersive  openxr -> Holster Lua (RAW idx!)
 //  [24..26]   muzzle forward             plugin (SetVRMuzzleQuat) -> overlay
 //  [27]       muzzle valid               plugin -> overlay
-//  [28]       zoom level                 plugin -> overlay
+//  [28]       camera GetZoom diagnostic  plugin -> overlay telemetry ONLY; never scale projection
 //  [29]       melee impulse              dxgi reads/decrements
 //  [30]       right trigger held (bool)  dxgi -> plugin native
 //  [31]       in-vehicle flag            dxgi -> plugin hook (arms-only VRIK in vehicles)

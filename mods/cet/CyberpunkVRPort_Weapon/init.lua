@@ -6,8 +6,9 @@
 --      installs the override hooks that redirect the shot down the barrel (slot 33 / mode 6),
 --   2) publishes the weapon muzzle world orientation each frame (SetVRMuzzleQuat) -- drives both
 --      the launch override and the overlay barrel laser dot, and
---   3) publishes the live camera zoom (SetVRZoomLevel) so the overlay scales the laser dot while
---      scoped (a scope changes GetZoom 1.0 -> ~5.25, not the FOV), and
+--   3) publishes live camera GetZoom through SetVRZoomLevel for diagnostics only. Never use that
+--      shared value to scale the overlay: MAIN's render projection already contains ADS zoom, and
+--      applying both values double-zooms ordinary weapons, and
 --   4) VR MOTION MELEE: detects a real controller swing (weapon moved fast relative to the player)
 --      and fires the game's NATIVE melee attack along the blade via redscript PlayerPuppet:VRMeleeSwing
 --      (mod CyberpunkVRPort_Melee). The native box-sweep does collision/damage/reaction/stamina, so
@@ -263,8 +264,8 @@ registerForEvent('onUpdate', function(dt)
             end
         end
 
-        -- Publish the LIVE camera zoom so the dxgi overlay scales the barrel laser dot by the real
-        -- scope magnification (scope changes GetZoom, NOT FOV; PSM.ZoomLevel is only a level index).
+        -- DIAGNOSTIC ONLY. Publish live camera GetZoom for telemetry. Do not use this value to
+        -- scale the dot/projection: MAIN's actual projection matrix already contains ADS zoom.
         if type(SetVRZoomLevel) == 'function' then
             local cam = pl and pl:GetFPPCameraComponent()
             if cam then

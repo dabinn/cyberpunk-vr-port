@@ -7006,11 +7006,6 @@ void SetVRMuzzleQuat(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*,
         g_pSharedHands[27] = 1.0f;  // valid
     }
 }
-// Publish the current ADS/scope zoom factor to shared[28] so the dxgi overlay can scale the
-// barrel laser-dot's screen offset by it (the scope magnifies the image but the bullet still
-// leaves the barrel). CET pushes PlayerStateMachine.ZoomLevel each frame; 1.0 = no zoom.
-// Companion to SetVRMuzzleQuat: the same GetMuzzleSlotWorldTransform the CET weapon mod already
-// reads, minus the half it used to throw away.
 void SetVRMuzzlePos(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t) {
     float x = 0.0f, y = 0.0f, z = 0.0f;
     RED4ext::GetParameter(aFrame, &x);
@@ -7030,6 +7025,10 @@ void SetVRMuzzlePos(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, 
     }
 }
 
+// DIAGNOSTIC ONLY: publish CET camera GetZoom() to shared-memory slot [28] for telemetry.
+// DO NOT use this slot to scale an overlay or camera projection. MAIN's render projection
+// already contains ADS magnification; applying [28] again double-zooms ordinary weapons,
+// and this independently sampled value may also be a frame out of sync.
 void SetVRZoomLevel(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t) {
     float z = 1.0f; RED4ext::GetParameter(aFrame, &z); aFrame->code++;
     if (g_pSharedHands) g_pSharedHands[28] = (z > 0.01f && z < 64.0f) ? z : 1.0f;
