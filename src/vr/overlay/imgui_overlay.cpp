@@ -55,10 +55,8 @@ extern "C" uint64_t CyberpunkVR_DebugMirrorRtvHits;
 extern "C" int CyberpunkVR_IsVrcamViewActive();
 extern "C" float CyberpunkVR_DebugMainProjYY;
 extern "C" float CyberpunkVR_DebugMainCamFov;
-extern "C" float CyberpunkVR_DebugVrcamZoomFactor;
-// 1 = everything the overlay projects (the sight mark above all) follows the weapon's ADS
-// magnification. 0 = the old behaviour, projected from the lens FOV alone.
-extern "C" __declspec(dllexport) int CyberpunkVR_OverlayFollowAds = 1;
+// Effective ADS magnification recovered from MAIN's live world projection.
+extern "C" float CyberpunkVR_MainAdsZoomFactor;
 extern "C" float CyberpunkVR_DebugVrcamWantFov;
 extern "C" float CyberpunkVR_DebugVrcamBaseFov;
 // per-node CPU profiler
@@ -199,10 +197,8 @@ static bool GetOverlayProjTans(const ImVec2& displaySize, float* tanHalfX, float
     // correct projection step and leaving [28] as their accidental sole multiplier. There is no
     // weapon-class boundary at 4x and no justified finite upper limit here. Accept every finite,
     // positive factor; reject only values that cannot represent a projection scale.
-    if (CyberpunkVR_OverlayFollowAds) {
-        const float ads = CyberpunkVR_DebugVrcamZoomFactor;
-        if (std::isfinite(ads) && ads > 0.0f) { tx /= ads; ty /= ads; }
-    }
+    const float ads = CyberpunkVR_MainAdsZoomFactor;
+    if (std::isfinite(ads) && ads > 0.0f) { tx /= ads; ty /= ads; }
 
     if (tx <= 0.0001f || ty <= 0.0001f) return false;
     *tanHalfX = tx;
@@ -1266,13 +1262,12 @@ void DrawStereoControls() {
     if (ImGui::Checkbox("VRCAM Mirror  (separate window, for capture)", &mirrorOn))
         CyberpunkVR_MirrorOutput = mirrorOn ? 1u : 0u;
 
-    // Weapon ADS is not a toggle: the vrcam eye always follows MAIN's vertical FOV, narrowed by
-    // the aim zoom. Read-only here because the numbers are the quickest way to tell a wrong FOV
-    // from a stale one.
+    // VRCAM follows MAIN's effective vertical projection, including ADS magnification. These
+    // read-only values distinguish a projection mismatch from stale camera state.
     ImGui::TextDisabled("vrcam fov %.2f  (asset %.2f)   main yy %.5f  fov %.2f   ADS x%.3f",
                         CyberpunkVR_DebugVrcamWantFov, CyberpunkVR_DebugVrcamBaseFov,
                         CyberpunkVR_DebugMainProjYY, CyberpunkVR_DebugMainCamFov,
-                        CyberpunkVR_DebugVrcamZoomFactor);
+                        CyberpunkVR_MainAdsZoomFactor);
 
     if (ImGui::CollapsingHeader("Diagnostics")) {
         bool slog = CyberpunkVR_StereoLog != 0;
@@ -1635,15 +1630,12 @@ void DrawCompactAdsCameraTelemetry() {
             const ImVec4 stateColor = t.aiming
                 ? ImVec4(1.0f, 0.78f, 0.24f, 1.0f)
                 : ImVec4(0.45f, 0.9f, 0.55f, 1.0f);
-            const float expectedZoom = CyberpunkVR_DebugVrcamZoomFactor;
+            const float mainAdsZoom = CyberpunkVR_MainAdsZoomFactor;
             const float sharedZoomRaw = OpenXRManager::Get().GetSharedSlot(28);
-            const float projectionZoom = (CyberpunkVR_OverlayFollowAds &&
-                                          std::isfinite(expectedZoom) &&
-                                          expectedZoom > 0.0f)
-                ? expectedZoom : 1.0f;
-            const float finalZoom = projectionZoom;
+            const float finalZoom = (std::isfinite(mainAdsZoom) && mainAdsZoom > 0.0f)
+                ? mainAdsZoom : 1.0f;
             ImGui::TextColored(stateColor, "ADS CAM  %s", t.aiming ? "ON" : "HIP");
-            ImGui::Text("zoom expected %.3fx   final %.3fx", expectedZoom, finalZoom);
+            ImGui::Text("zoom MAIN %.3fx   final %.3fx", mainAdsZoom, finalZoom);
             ImGui::TextDisabled("shared[28] %.3fx   diagnostic only", sharedZoomRaw);
             if (!t.baselineValid) {
                 ImGui::TextUnformatted("Hold hip-fire briefly to capture baseline");

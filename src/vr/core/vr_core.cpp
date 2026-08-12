@@ -24,6 +24,9 @@
 #include "swapchain_hooks.h"
 #include "../../common/log_throttle.h"
 
+// MAIN/world ADS magnification measured from the live projection in sync_stereo.cpp.
+extern "C" float CyberpunkVR_MainAdsZoomFactor;
+
 static FILE* g_logFile = nullptr;
 static char g_gameDir[MAX_PATH] = {};
 static char g_liveControlPath[MAX_PATH] = {};
@@ -2849,6 +2852,52 @@ bool g_hasWeaponEquipped = false;
 static std::mutex g_adsCameraTelemetryMutex;
 static AdsCameraTelemetryUiState g_adsCameraTelemetry{};
 
+// CP2077 renders the world and the first-person weapon/body layer with independent ADS zooms.
+// That is harmless on a flat screen because the sight is held at screen centre, but in VR an
+// off-axis hand-held sight is projected to two different screen positions.  Drive the weapon
+// override from MAIN's live projection zoom so the rendered sight, scope reticle and world ray
+// remain collinear.  Only the weapon override is touched; MAIN/world projection is left native.
+static void SyncAdsWeaponZoomToWorld() {
+    static uintptr_t s_savedCam = 0;
+    static float s_savedWeaponWeight = 0.0f;
+    static float s_savedWeaponValue = 1.0f;
+    static bool s_saved = false;
+    static bool s_prevAiming = false;
+
+    const bool aiming = g_isAiming;
+    const uintptr_t camObj = g_camObjMain.load(std::memory_order_acquire);
+    if (!camObj) {
+        s_prevAiming = aiming;
+        return;
+    }
+
+    __try {
+        float* const weaponWeight = reinterpret_cast<float*>(camObj + 0x280);
+        float* const weaponValue  = reinterpret_cast<float*>(camObj + 0x284);
+        if (aiming) {
+            if (!s_prevAiming || !s_saved || s_savedCam != camObj) {
+                s_savedCam = camObj;
+                s_savedWeaponWeight = *weaponWeight;
+                s_savedWeaponValue = *weaponValue;
+                s_saved = std::isfinite(s_savedWeaponWeight) &&
+                          std::isfinite(s_savedWeaponValue);
+            }
+
+            const float liveWorldZoom = CyberpunkVR_MainAdsZoomFactor;
+            if (std::isfinite(liveWorldZoom) && liveWorldZoom > 0.5f && liveWorldZoom < 12.0f) {
+                *weaponWeight = 1.0f;
+                *weaponValue = liveWorldZoom;
+            }
+        } else if (s_prevAiming && s_saved && s_savedCam == camObj) {
+            *weaponWeight = s_savedWeaponWeight;
+            *weaponValue = s_savedWeaponValue;
+            s_saved = false;
+        }
+
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    s_prevAiming = aiming;
+}
+
 extern "C" void GetAdsCameraTelemetryUiState(AdsCameraTelemetryUiState* outState) {
     if (!outState) return;
     std::lock_guard<std::mutex> lock(g_adsCameraTelemetryMutex);
@@ -2906,6 +2955,8 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
             return;
         }
     }
+
+    SyncAdsWeaponZoomToWorld();
 
     // 1. Inizializza la cache RTTI solo al primissimo frame
     if (!g_isRTTIInitialized) {
