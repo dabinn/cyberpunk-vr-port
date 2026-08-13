@@ -2,7 +2,7 @@
 
 # CyberpunkVR Port - Tofu Express X
 
-豆腐宅急便X -- **Tofu Express X** 是以原作者 [dariulone](https://github.com/dariulone) 的 CyberpunkVR 為基礎製作的增強版本，收錄本 fork 已完成並經過測試、但尚未出現在 upstream release 中的修正與改良。
+豆腐宅急便X -- **Tofu Express X** 是以原作者 [dariulone](https://github.com/dariulone) 的 CyberpunkVR 為基礎製作的增強版本，收錄本 fork 已完成並經過測試、但尚未由上游釋出的修正與改良。
 
 本次版本以上游 **CyberpunkVR v0.1.1** 為基礎，主要改善武器瞄準與 VR 控制器操作，讓它們更加穩定、準確，也更容易使用。
 
