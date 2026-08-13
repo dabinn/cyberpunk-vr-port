@@ -106,7 +106,7 @@ WNDPROC g_originalWndProc = nullptr;
 bool g_imguiInitialized = false;
 bool g_menuVisible = false;
 std::atomic<uint32_t> g_menuToggleRequests{0};
-bool g_showCompactAdsTelemetry = true;
+bool g_showCompactAdsTelemetry = false;
 // Normalized MAIN/right-eye backbuffer coordinates. Keep the default comfortably
 // inside the lens-visible area instead of at the desktop mirror's outer corner.
 float g_compactAdsTelemetryX = 0.57f;
