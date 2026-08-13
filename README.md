@@ -1,17 +1,34 @@
 <p align="right"><a href="README-TC.md">中文說明</a></p>
 
-# CyberpunkVR Port
+# CyberpunkVR Port - Tofu Express X
 
-## Controller Enhancements Fork
+**Tofu Express X** is an enhanced release of CyberpunkVR based on the original work by [dariulone](https://github.com/dariulone). It packages tested fixes and improvements from this fork that are not yet available in the upstream release.
 
-This fork is based on dariulone's excellent **CyberpunkVR Port v0.1.1**. The
-original mod already provides true stereo rendering, motion-controlled hands,
-VRIK, weapon aiming and visual holsters, but several missing or conflicting
-controller inputs leave some actions required by the game unavailable while using
-VR controllers. Opening the F10 menu and recentering VR also still require reaching
-for the keyboard. This controller-enhanced version completes the gamepad mapping
-and adds convenient controller shortcuts, letting everyone jump in and enjoy this
-awesome mod right away.
+This release is based on upstream **CyberpunkVR v0.1.1** and focuses on making weapon aiming and VR controller input more stable, accurate, and comfortable to use.
+
+### Improvements in Tofu Express 2
+
+- **The weapon laser dot no longer jumps when entering ADS.** Your aim now stays consistent when switching between hip fire and ADS, including when using high-magnification sniper scopes.
+- **The laser dot is much more stable during fast head turns.** Long trails and multiple separated dots have been greatly reduced, making the indicator easier to follow during combat.
+- **Reflex reticles and sniper-scope crosshairs now stay aligned with the laser dot.** ADS zoom no longer causes the weapon sight and the actual aiming direction to drift apart.
+- **Non-VRIK ADS aiming is more predictable.** Raising the weapon into ADS now keeps it close to the point you were aiming at before the animation started. This also lays the groundwork for improving the head-aiming—or **Gun-Face**—mode in the next release. Some players simply prefer aiming with their face instead of waving VR controllers around.
+
+Under the hood, the weapon, sight, ADS zoom, and aiming-indicator paths now use more consistent camera and timing data. The practical result is simple: **what you see through the sight is much closer to where the weapon is actually aiming.**
+
+### Also includes everything from [controller-enhancements](https://github.com/dabinn/cyberpunk-vr-port/releases/download/v0.1.1-controller-enhancements/CyberpunkVRPort-0.1.1-controller-enhancements.zip)
+
+This release includes all changes from the previous **controller-enhancements** release:
+
+- **More flexible controller chords.** Choose L3, R3, or the right thumbrest as the chord activator, depending on your controller and preference.
+- **Complete Xbox controller button mapping through VR controllers.** Every Xbox controller button is now supported, filling in the inputs that were missing from the original mod.
+- **Optional controller shortcuts for VR recentering and the F10 menu.**
+- **More reliable L3/R3 behavior.** Normal thumbstick clicks remain usable during gameplay, while accidental actions in game menus are reduced.
+- **Added a toggle for full-stick sprint and crouch.** The original mod always enables sprint when the left stick is pushed fully forward and crouch when the right stick is pushed fully down. This behavior can now be enabled or disabled from the F10 menu.
+- **Improved right-hand grip-button routing.** It operates immersive weapon holsters while your hand is inside a holster zone and works as RB everywhere else.
+- **Safer vehicle controls.** Holster gestures are disabled while driving to prevent accidental weapon actions.
+- **Added an optional vehicle-only trigger/grip swap.** This keeps firing on the right trigger, consistent with on-foot combat, while the analog VR grip buttons control acceleration and braking. Xbox controller input is not affected.
+- **Fixed vertical camera control.** Turning off **Disable Mouse Y** now correctly restores mouse and right-stick vertical look.
+
 
 ![New controller settings in the F10 menu](images/v0.1.1-controller-enhancements.png)
 
