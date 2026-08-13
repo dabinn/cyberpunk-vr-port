@@ -599,6 +599,15 @@ bool OpenXRManager::CaptureMonoDepthOnWriterQueue(uint64_t serial) {
 // VRCAM_s stale view of the world. 0 = the previous behaviour, for A/B.
 extern "C" __declspec(dllexport) int CyberpunkVR_MonoMenu = 1;
 
+// The F10/Insert settings overlay is ImGui drawn onto the game backbuffer (see OverlayRender in
+// the Present hook, which runs BEFORE this capture), so it lands in the mono snapshot but NOT in
+// VRCAM's independent world render -> it only shows in the backbuffer eye. Treating the overlay
+// like a menu (both eyes take the backbuffer while it is visible) puts it in BOTH eyes.
+// 1 = overlay visible forces mono (both eyes). 0 = previous behaviour (overlay one eye), for A/B.
+extern "C" __declspec(dllexport) int CyberpunkVR_MonoOverlay = 1;
+// Defined in imgui_overlay.cpp: true while the F10/Insert overlay is on screen.
+bool OverlayIsVisible();
+
 bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const D3D12_RESOURCE_DESC& sourceDesc, uint64_t serial,
     const XrPosef poses[2], const XrFovf fovs[2], const bool hasView[2]) {
     if (!backBuffer || !hasView[0] || !hasView[1]) {
@@ -732,7 +741,8 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
     // Skipping it leaves both eyes on the backbuffer snapshot, i.e. the menu, mono -- which is
     // what a mono surface should look like.
     const bool menuOpen = (GetMenuRectMode() != 0) || (GetMenuMode() != 0);
-    if (CyberpunkVR_StereoSubmit && eyeW && eyeH && !(menuOpen && CyberpunkVR_MonoMenu)) {
+    const bool overlayForcesMono = CyberpunkVR_MonoOverlay && OverlayIsVisible();
+    if (CyberpunkVR_StereoSubmit && eyeW && eyeH && !(menuOpen && CyberpunkVR_MonoMenu) && !overlayForcesMono) {
         ID3D12Resource* vrcamSrc = CyberpunkVR_GetVrcamEyeTextureFresh();
         if (vrcamSrc) {
             if (EnsureVrcamEyeTexture(eyeW, eyeH, DXGI_FORMAT_R8G8B8A8_TYPELESS)) {
