@@ -3005,10 +3005,10 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
             // the vehicle drives the puppet, body IK fights it and breaks the
             // character/camera position. Arms-only in vehicles.
             OpenXRManager::Get().SetSharedSlot(31, g_isInVehicle ? 1.0f : 0.0f);
+            OpenXRManager::Get().SetSharedSlot(vrshared::kNonVrikAdsMuzzleStabilizer, 1.0f);
+            OpenXRManager::Get().SetSharedSlot(vrshared::kAiming, g_isAiming ? 1.0f : 0.0f);
         }
     }
-    
-
     // SNAP HOLDBACK, second life — now on the CLEAN baseline (its first test was polluted by
     // the since-reverted re-yaw fixes flashing on their own). The snapdiag log proved: [141]
     // jumps the FULL snap delta in one frame in sprint too, and standing snaps are clean —

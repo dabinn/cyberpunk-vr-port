@@ -2679,7 +2679,9 @@ void UpdateVRIKAnimInputs(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* 
         // single-frame hitches so a healthy VRIK never pays the re-arm cost at all.
         constexpr int kStaleFrameThreshold = 10;
         int req = static_cast<int>(g_pSharedHands[32]);
-        if (req > 0) {
+        const bool needsAdsPoseHook =
+            g_pSharedHands[vrshared::kNonVrikAdsMuzzleStabilizer] > 0.5f;
+        if (req > 0 || needsAdsPoseHook) {
             if (!s_vrHooksInstalled) {
                 // Only the pose-apply hook is needed (the old ComponentFunc21 hook was
                 // removed: it trampolined a super-hot per-component Update and tanked FPS).
@@ -2701,13 +2703,21 @@ void UpdateVRIKAnimInputs(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* 
                 s_staleFrames = 0;
             }
             s_lastMatchCalls = matchCalls;
-            if (s_lastReq <= 0) g_VRBind = req;   // off -> on edge
-            if (g_VRNeutralizeAnimGraph != 0) {
-                ForceVRNeutralAnimGraphInputs();
+            if (req > 0) {
+                if (s_lastReq <= 0) g_VRBind = req;   // off -> on edge
+                if (g_VRNeutralizeAnimGraph != 0) {
+                    ForceVRNeutralAnimGraphInputs();
+                }
+                // Keep the diag bone snapshot fresh while tracking, so the overlay's
+                // "Log VR Diag" works without the CET window's capture toggle.
+                g_VRDiagCapture = 1;
+            } else {
+                if (s_lastReq > 0) {
+                    g_VRBind = 0;
+                    g_VRDiagCapture = 0;
+                    g_pSharedHands[119] = 0.0f;
+                }
             }
-            // Keep the diag bone snapshot fresh while tracking, so the overlay's
-            // "Log VR Diag" works without the CET window's capture toggle.
-            g_VRDiagCapture = 1;
         } else {
             if (s_lastReq > 0) {
                 g_VRBind = 0; g_VRDiagCapture = 0;                    // on -> off edge
@@ -5398,6 +5408,33 @@ volatile int   g_VRCamPosValid = 0;   // 0 until Lua has pushed a camera/entity 
 // GetWorldOrientation().yaw was nil (silently 0), so we now take the real quaternion.
 volatile float g_VREntityQI = 0.0f, g_VREntityQJ = 0.0f, g_VREntityQK = 0.0f, g_VREntityQR = 1.0f;
 
+void SetVRWeaponPoseState(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame,
+                          int32_t* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext); RED4EXT_UNUSED_PARAMETER(a4);
+    int32_t weaponState = 0;
+    float aimInRemaining = 0.0f;
+    RED4ext::GetParameter(aFrame, &weaponState);
+    RED4ext::GetParameter(aFrame, &aimInRemaining);
+    aFrame->code++;
+    if (g_pSharedHands) {
+        g_pSharedHands[vrshared::kWeaponPsmState] = static_cast<float>(weaponState);
+        g_pSharedHands[vrshared::kAimInRemaining] = aimInRemaining;
+    }
+    if (aOut) *aOut = 1;
+}
+
+void SetVRWeaponRaiseTransition(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame,
+                                int32_t* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext); RED4EXT_UNUSED_PARAMETER(a4);
+    int32_t active = 0;
+    RED4ext::GetParameter(aFrame, &active);
+    aFrame->code++;
+    if (g_pSharedHands) {
+        g_pSharedHands[vrshared::kSafeToReady] = active != 0 ? 1.0f : 0.0f;
+    }
+    if (aOut) *aOut = 1;
+}
+
 // CAMERA-KICK TRACE ring buffer (see the trace block in SetVRPlayerYaw and the dump in
 // WriteVRDiagCore). Columns: 0..2 raw local (camLua-entLua), 3..4 cam quat i/j (pitch/
 // roll kick indicators), 5..7 filtered pair local, 8..10 eyeBake [116..118], 11 camBake y,
@@ -7576,6 +7613,17 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
 
     auto fMuz = RED4ext::CGlobalFunction::Create("SetVRMuzzleQuat", "SetVRMuzzleQuat", &SetVRMuzzleQuat);
     fMuz->flags = flags; fMuz->AddParam("Float","i"); fMuz->AddParam("Float","j"); fMuz->AddParam("Float","k"); fMuz->AddParam("Float","r"); rtti->RegisterFunction(fMuz);
+    auto fWeaponPoseState = RED4ext::CGlobalFunction::Create(
+        "SetVRWeaponPoseState", "SetVRWeaponPoseState", &SetVRWeaponPoseState);
+    fWeaponPoseState->flags = flags; fWeaponPoseState->SetReturnType("Int32");
+    fWeaponPoseState->AddParam("Int32", "weaponState");
+    fWeaponPoseState->AddParam("Float", "aimInRemaining");
+    rtti->RegisterFunction(fWeaponPoseState);
+    auto fWeaponRaiseTransition = RED4ext::CGlobalFunction::Create(
+        "SetVRWeaponRaiseTransition", "SetVRWeaponRaiseTransition", &SetVRWeaponRaiseTransition);
+    fWeaponRaiseTransition->flags = flags; fWeaponRaiseTransition->SetReturnType("Int32");
+    fWeaponRaiseTransition->AddParam("Int32", "active");
+    rtti->RegisterFunction(fWeaponRaiseTransition);
     auto fZoom = RED4ext::CGlobalFunction::Create("SetVRZoomLevel", "SetVRZoomLevel", &SetVRZoomLevel);
     fZoom->flags = flags; fZoom->AddParam("Float","zoom"); rtti->RegisterFunction(fZoom);
     auto fMeleeFire = RED4ext::CGlobalFunction::Create("SetVRMeleeFire", "SetVRMeleeFire", &SetVRMeleeFire);

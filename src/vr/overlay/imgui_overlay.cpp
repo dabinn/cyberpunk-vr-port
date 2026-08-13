@@ -1,4 +1,5 @@
 #include "imgui_overlay.h"
+#include "../../common/shared_slots.h"
 #include "live_controls_ui.h"
 #include "openxr_manager.h"
 
@@ -1611,8 +1612,6 @@ bool DrawLiveControls(LiveControlsUiState& state) {
 void DrawCompactAdsCameraTelemetry() {
     if (!g_showCompactAdsTelemetry) return;
 
-    AdsCameraTelemetryUiState t{};
-    GetAdsCameraTelemetryUiState(&t);
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos(
         ImVec2(display.x * g_compactAdsTelemetryX, display.y * g_compactAdsTelemetryY),
@@ -1624,32 +1623,19 @@ void DrawCompactAdsCameraTelemetry() {
         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
         ImGuiWindowFlags_NoInputs;
     if (ImGui::Begin("ADS camera telemetry##compact", nullptr, flags)) {
-        if (!t.available) {
-            ImGui::TextUnformatted("ADS CAM  waiting for gameplay camera...");
-        } else {
-            const ImVec4 stateColor = t.aiming
-                ? ImVec4(1.0f, 0.78f, 0.24f, 1.0f)
-                : ImVec4(0.45f, 0.9f, 0.55f, 1.0f);
-            const float mainAdsZoom = CyberpunkVR_MainAdsZoomFactor;
-            const float sharedZoomRaw = OpenXRManager::Get().GetSharedSlot(28);
-            const float finalZoom = (std::isfinite(mainAdsZoom) && mainAdsZoom > 0.0f)
-                ? mainAdsZoom : 1.0f;
-            ImGui::TextColored(stateColor, "ADS CAM  %s", t.aiming ? "ON" : "HIP");
-            ImGui::Text("zoom MAIN %.3fx   final %.3fx", mainAdsZoom, finalZoom);
-            ImGui::TextDisabled("shared[28] %.3fx   diagnostic only", sharedZoomRaw);
-            if (!t.baselineValid) {
-                ImGui::TextUnformatted("Hold hip-fire briefly to capture baseline");
-            } else {
-                ImGui::Text("delta cm  R %+6.2f  F %+6.2f  U %+6.2f",
-                            t.deltaRight * 100.0f, t.deltaForward * 100.0f, t.deltaUp * 100.0f);
-                ImGui::Text("peak  cm  R %6.2f  F %6.2f  U %6.2f   n=%u",
-                            t.peakRight * 100.0f, t.peakForward * 100.0f,
-                            t.peakUp * 100.0f, t.samples);
-                ImGui::TextDisabled("raw   cm  R %+6.2f  F %+6.2f  U %+6.2f",
-                                    t.residualRight * 100.0f, t.residualForward * 100.0f,
-                                    t.residualUp * 100.0f);
-            }
-        }
+        const bool adsProperty = OpenXRManager::Get().GetSharedSlot(vrshared::kAiming) > 0.5f;
+        const ImVec4 stateColor = adsProperty
+            ? ImVec4(1.0f, 0.78f, 0.24f, 1.0f)
+            : ImVec4(0.45f, 0.9f, 0.55f, 1.0f);
+        const int weaponPsm = static_cast<int>(std::lround(
+            OpenXRManager::Get().GetSharedSlot(vrshared::kWeaponPsmState)));
+        const char* weaponPsmName = weaponPsm == 5 ? "READY" :
+                                    weaponPsm == 6 ? "SAFE" : "OTHER";
+        ImGui::TextColored(stateColor, "ADS: %s", adsProperty ? "ON" : "OFF");
+        ImGui::Text("Weapon: %s (%d)", weaponPsmName, weaponPsm);
+        ImGui::Text("Aim-in running: %s   Safe->Ready: %s",
+                    OpenXRManager::Get().GetSharedSlot(vrshared::kAimInRemaining) > 0.001f ? "YES" : "NO",
+                    OpenXRManager::Get().GetSharedSlot(vrshared::kSafeToReady) > 0.5f ? "YES" : "NO");
     }
     ImGui::End();
 }

@@ -229,6 +229,7 @@ private final func UpdatePlayerSettings() -> Void {
 @wrapMethod(ReadyEvents)
 protected func OnTick(timeDelta: Float, stateContext: ref<StateContext>, scriptInterface: ref<StateGameScriptInterface>) -> Void {
   wrappedMethod(timeDelta, stateContext, scriptInterface);
+  VRPortPublishWeaponPoseState(scriptInterface);
   let f = new AnimFeature_WeaponHandlingStats();
   f.weaponRecoil = 0.0;
   f.weaponSpread = GameInstance.GetStatsSystem(scriptInterface.GetGame())
