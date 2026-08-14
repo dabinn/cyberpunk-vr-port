@@ -724,6 +724,19 @@ static inline void VRIK_WriteLocalPos(uint8_t* boneBuf, int idx,
     t[0]=local[0]; t[1]=local[1]; t[2]=local[2];
 }
 
+// Head Aim is selected when the regular muzzle-direction shot override is disabled. Keep the
+// persistent VRIK setting untouched; this runtime gate only transfers pose ownership while an
+// on-foot weapon with a live muzzle transform is present.
+static inline bool VRIK_IsHeadAimWeaponActive() {
+    // kWeaponFlag is outside the [0..126] coherent pose snapshot. These are single-float
+    // state flags, so read them directly instead of indexing past g_handsStable.
+    return g_pSharedHands &&
+        g_pSharedHands[58] <= 0.5f &&
+        g_pSharedHands[vrshared::kWeaponFlag] > 0.5f &&
+        g_pSharedHands[27] > 0.5f &&
+        g_pSharedHands[31] <= 0.5f;
+}
+
 // Keeps the vanilla non-VRIK ADS raise animation, but removes the direction change it adds.
 // Hip fire records the last trustworthy muzzle direction in game-heading space. While aiming,
 // a small closed-loop correction rotates only WeaponRight during the ADS transition. Once the
@@ -751,7 +764,7 @@ static inline void VRIK_ApplyNonVrikAdsMuzzleStabilizer(uint8_t* boneBuf) {
     static RawWeaponPoseCache s_rawPoseCache[4];
     static int s_rawPoseReplace = 0;
 
-    if (!g_pSharedHands || g_VRBind > 0 ||
+    if (!g_pSharedHands || VRIK_IsHeadAimWeaponActive() || g_VRBind > 0 ||
         g_pSharedHands[vrshared::kNonVrikAdsMuzzleStabilizer] <= 0.5f ||
         g_pSharedHands[vrshared::kWeaponFlag] <= 0.5f ||
         g_pSharedHands[27] <= 0.5f) {
@@ -925,6 +938,107 @@ static inline void VRIK_ApplyNonVrikAdsMuzzleStabilizer(uint8_t* boneBuf) {
             s_freezeLocalCorrectionPending = false;
         }
     }
+    VRIK_QuatNorm(correctedModel);
+    VRIK_WriteLocalRot(boneBuf, weaponIdx, g_fkRot[parent], correctedModel);
+}
+
+// While Head Aim owns an equipped weapon, continuously rotate WeaponRight so the live muzzle
+// direction follows the final render-view direction. The correction is accumulated from the
+// measured muzzle error once per entity tick and is always composed onto that tick's untouched
+// animation pose, preventing repeated pose-apply passes from multiplying it into themselves.
+static inline void VRIK_ApplyHeadAimWeaponDirection(uint8_t* boneBuf) {
+    struct RawWeaponPoseCache {
+        uint8_t* boneBuf = nullptr;
+        float tick = -1.0f;
+        int weaponIdx = -1;
+        float localRot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    };
+    static float s_totalModelCorrection[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    static float s_lastTick = -1.0f;
+    static RawWeaponPoseCache s_rawPoseCache[4];
+    static int s_rawPoseReplace = 0;
+
+    if (!VRIK_IsHeadAimWeaponActive()) {
+        s_totalModelCorrection[0]=0.0f; s_totalModelCorrection[1]=0.0f;
+        s_totalModelCorrection[2]=0.0f; s_totalModelCorrection[3]=1.0f;
+        s_lastTick = -1.0f;
+        return;
+    }
+
+    const int weaponIdx = static_cast<int>(g_VRSmokeCigIdx);
+    if (weaponIdx < 0 || weaponIdx >= VRIK_FKCount() || !g_viewPktValid) return;
+
+    float muzzle[3] = { SharedPose(24), SharedPose(25), SharedPose(26) };
+    if (VRIK_Norm3(muzzle) < 0.5f) return;
+
+    float viewQ[4] = { g_viewPkt[0], g_viewPkt[1], g_viewPkt[2], g_viewPkt[3] };
+    VRIK_QuatNorm(viewQ);
+    const float localForward[3] = {0.0f, 1.0f, 0.0f};
+    float desiredWorld[3];
+    VRIK_QuatRotateVec(viewQ, localForward, desiredWorld);
+    if (VRIK_Norm3(desiredWorld) < 0.5f) return;
+
+    const float tick = SharedPose(vrshared::kEntitySeq);
+    if (tick != s_lastTick) {
+        s_lastTick = tick;
+
+        float errorWorld[4];
+        VRIK_QuatFromTo(muzzle, desiredWorld, errorWorld);
+        float stepWorld[4];
+        VRIK_QuatScale(errorWorld, 0.65f, stepWorld);
+
+        float entQ[4] = { g_VREntityQI, g_VREntityQJ, g_VREntityQK, g_VREntityQR };
+        VRIK_QuatNorm(entQ);
+        float invEnt[4]; VRIK_QuatConj(entQ, invEnt);
+        float tmp[4], stepModel[4];
+        VRIK_QuatMul(invEnt, stepWorld, tmp);
+        VRIK_QuatMul(tmp, entQ, stepModel);
+        VRIK_QuatNorm(stepModel);
+
+        float next[4];
+        VRIK_QuatMul(stepModel, s_totalModelCorrection, next);
+        VRIK_QuatNorm(next);
+        constexpr float kMaxCorrectionRadians = 65.0f * 0.01745329252f;
+        float w = std::fabs(next[3]);
+        if (w > 1.0f) w = 1.0f;
+        const float angle = 2.0f * std::acos(w);
+        if (angle > kMaxCorrectionRadians) {
+            VRIK_QuatScale(next, kMaxCorrectionRadians / angle, next);
+        }
+        s_totalModelCorrection[0]=next[0]; s_totalModelCorrection[1]=next[1];
+        s_totalModelCorrection[2]=next[2]; s_totalModelCorrection[3]=next[3];
+    }
+
+    RawWeaponPoseCache* rawPose = nullptr;
+    for (auto& entry : s_rawPoseCache) {
+        if (entry.boneBuf == boneBuf) {
+            rawPose = &entry;
+            break;
+        }
+    }
+    if (!rawPose) {
+        rawPose = &s_rawPoseCache[s_rawPoseReplace++ & 3];
+        rawPose->boneBuf = boneBuf;
+        rawPose->tick = -1.0f;
+    }
+    if (rawPose->tick != tick || rawPose->weaponIdx != weaponIdx) {
+        const float* rawLocal = reinterpret_cast<const float*>(
+            boneBuf + weaponIdx * 48 + VRIK_ROT_OFF);
+        rawPose->localRot[0]=rawLocal[0]; rawPose->localRot[1]=rawLocal[1];
+        rawPose->localRot[2]=rawLocal[2]; rawPose->localRot[3]=rawLocal[3];
+        VRIK_QuatNorm(rawPose->localRot);
+        rawPose->tick = tick;
+        rawPose->weaponIdx = weaponIdx;
+    }
+
+    VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+    const int parent = g_VRBoneParent[weaponIdx];
+    if (parent < 0 || parent >= weaponIdx) return;
+    float rawModel[4];
+    VRIK_QuatMul(g_fkRot[parent], rawPose->localRot, rawModel);
+    VRIK_QuatNorm(rawModel);
+    float correctedModel[4];
+    VRIK_QuatMul(s_totalModelCorrection, rawModel, correctedModel);
     VRIK_QuatNorm(correctedModel);
     VRIK_WriteLocalRot(boneBuf, weaponIdx, g_fkRot[parent], correctedModel);
 }
@@ -2325,10 +2439,12 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
     // No VirtualQuery here -- that syscall per call was the FPS killer. a2 is always
     // a valid pose-apply argument, so a single __try guards the dereferences.
     if (!(g_PlayerTrackBufA || g_PlayerTrackBufB)) return result;
+    const bool headAimWork = VRIK_IsHeadAimWeaponActive();
     const bool nonVrikAdsWork = g_pSharedHands &&
         g_pSharedHands[vrshared::kNonVrikAdsMuzzleStabilizer] > 0.5f &&
         g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
-    if (g_VRBind <= 0 && !nonVrikAdsWork && g_AnimPoseDebug == 0 && g_VRDiagCapture == 0 &&
+    if (g_VRBind <= 0 && !headAimWork && !nonVrikAdsWork &&
+        g_AnimPoseDebug == 0 && g_VRDiagCapture == 0 &&
         g_VRSmokeFingerActive == 0 && g_VRSmokeFingerCapture == 0 &&
         g_VRSmokeFingerActiveL == 0 && g_VRSmokeFingerCaptureL == 0) return result;
 
@@ -2348,7 +2464,18 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
                 // present thread).
                 RefreshHandsSnapshot();
 
+                const bool headAimWeaponActive = VRIK_IsHeadAimWeaponActive();
+                static bool s_prevHeadAimWeaponActive = false;
+                if (headAimWeaponActive != s_prevHeadAimWeaponActive) {
+                    // A cached VRIK solve belongs to the previous pose owner. Force a fresh solve
+                    // when controller-driven VRIK resumes instead of replaying that stale pose.
+                    g_solveCacheTick = -1.0e9f;
+                    g_solveCacheN = 0;
+                    s_prevHeadAimWeaponActive = headAimWeaponActive;
+                }
                 VRIK_ApplyNonVrikAdsMuzzleStabilizer(boneBuf);
+                if (headAimWeaponActive) VRIK_LatchViewPacket();
+                VRIK_ApplyHeadAimWeaponDirection(boneBuf);
 
                 // SMOKE FINGER-HOLD (fingers-only grip). Runs on EVERY player pass, BEFORE
                 // the solve/replay split, so the curl is bit-identical across the 4-5
@@ -2676,7 +2803,8 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
                 // VRIK FULL-ARM IK (mode 4): model-space FK + 2-bone IK, rotation-only
                 // writes (no stretch). Anchored at the head bone's model position; the
                 // controller offset is taken straight from the proven gizmo world math.
-                if (g_VRBind == 4 && g_pSharedHands && g_VRBoneCount > 0 && g_VRHeadBoneIdx >= 0) {
+                if (!headAimWeaponActive && g_VRBind == 4 && g_pSharedHands &&
+                    g_VRBoneCount > 0 && g_VRHeadBoneIdx >= 0) {
                     // Solve-per-tick accounting (post-write tamper diagnosis). Counts how
                     // many times the PLAYER pose-apply runs within one entity tick and
                     // which distinct bone buffers participate.
@@ -3847,7 +3975,7 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
                     }
                 }
                 // Legacy direct-write binding (modes 1..3): single-bone hand write.
-                else if (g_VRBind > 0 && g_pSharedHands) {
+                else if (!headAimWeaponActive && g_VRBind > 0 && g_pSharedHands) {
                     // Resolve the head bone pose once (shared by both hands).
                     bool  headOk = false;
                     float headPos[3]  = { 0.0f, 0.0f, 0.0f };
