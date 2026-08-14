@@ -116,10 +116,9 @@ struct LiveControlsUiState {
     // ignoring visual holsters: over-shoulder = EquipmentSlot1, right hip = Slot2,
     // left hip = Slot3. Read by the CET Holster mod via GetVRSharedSlot(23).
     int xrImmersiveHolsters;
-    // Physical body rotation. 1 = the avatar body follows the HMD/aim heading
-    // (continuous body-yaw tracking on foot; aiming / holding a weapon switches the
-    // camera to full head-look + head-relative movement). 0 (default) = classic
-    // stick / snap-turn heading. Vehicles are unaffected either way. F10 -> VRIK tab.
+    // Physical body rotation. 1 = the avatar body follows only the HMD yaw beyond the
+    // free-look band; locomotion still uses the independently selected source. 0 (default) =
+    // classic stick / snap-turn heading. Vehicles are unaffected either way. F10 -> VRIK tab.
     int xrPhysicalBodyRotation;
 };
 
