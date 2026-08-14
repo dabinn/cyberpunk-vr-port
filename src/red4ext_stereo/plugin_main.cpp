@@ -32,6 +32,9 @@
 
 #include <RED4ext/RED4ext.hpp>
 
+#include "vr/openxr/openxr_manager.h"
+#include "vr/overlay/imgui_overlay.h"
+
 extern void Log(const char* fmt, ...);
 
 // Runtime paths (log file, vrport.ini, CET mod folders). Was called from DllMain.
@@ -85,6 +88,12 @@ RED4EXT_C_EXPORT bool RED4EXT_CALL Main(RED4ext::v1::PluginHandle, RED4ext::v1::
         break;
     }
     case RED4ext::v1::EMainReason::Unload:
+        // RED4ext unloads the plugin before the process finishes tearing down the graphics
+        // runtime. Stop OpenXR and release our overlay references while D3D is still alive;
+        // otherwise the runtime can call through objects already poisoned by D3D shutdown.
+        OverlaySetDeviceAndQueue(nullptr, nullptr);
+        OpenXRManager::Get().Shutdown();
+        g_started.store(false);
         Log("=== CyberpunkVRPort red4ext plugin unloaded ===\n");
         break;
     }
