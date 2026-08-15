@@ -724,6 +724,19 @@ static inline void VRIK_WriteLocalPos(uint8_t* boneBuf, int idx,
     t[0]=local[0]; t[1]=local[1]; t[2]=local[2];
 }
 
+// The original weapon-aim option keeps its established polarity: enabled selects controller 6DoF,
+// disabled selects HMD 3DoF Head Aim. The persistent VRIK setting remains untouched, and both modes
+// use the same muzzle-direction projectile path.
+static inline bool VRIK_IsHeadAimWeaponActive() {
+    // kWeaponFlag is outside the [0..126] coherent pose snapshot. These are single-float
+    // state flags, so read them directly instead of indexing past g_handsStable.
+    return g_pSharedHands &&
+        g_pSharedHands[58] <= 0.5f &&
+        g_pSharedHands[vrshared::kWeaponFlag] > 0.5f &&
+        g_pSharedHands[27] > 0.5f &&
+        g_pSharedHands[31] <= 0.5f;
+}
+
 // Keeps the vanilla non-VRIK ADS raise animation, but removes the direction change it adds.
 // Hip fire records the last trustworthy muzzle direction in game-heading space. While aiming,
 // a small closed-loop correction rotates only WeaponRight during the ADS transition. Once the
@@ -751,7 +764,7 @@ static inline void VRIK_ApplyNonVrikAdsMuzzleStabilizer(uint8_t* boneBuf) {
     static RawWeaponPoseCache s_rawPoseCache[4];
     static int s_rawPoseReplace = 0;
 
-    if (!g_pSharedHands || g_VRBind > 0 ||
+    if (!g_pSharedHands || VRIK_IsHeadAimWeaponActive() || g_VRBind > 0 ||
         g_pSharedHands[vrshared::kNonVrikAdsMuzzleStabilizer] <= 0.5f ||
         g_pSharedHands[vrshared::kWeaponFlag] <= 0.5f ||
         g_pSharedHands[27] <= 0.5f) {
@@ -1939,6 +1952,29 @@ static inline void VRIK_BodyAxesFromCamYaw(const float* camModelRot,
     if (VRIK_Norm3(bodyFwd) < 1e-4f) { bodyFwd[0]=0.0f; bodyFwd[1]=1.0f; bodyFwd[2]=0.0f; }
 }
 
+// Head Aim uses the final HMD orientation as the absolute 3DoF WeaponRight model rotation.
+// The view quaternion is already expressed in game world axes (+Y forward), so only the ordinary
+// world-to-entity conversion is required. Position remains entirely owned by the vanilla pose.
+static inline void VRIK_ApplyHeadAimWeaponOrientation(uint8_t* boneBuf) {
+    if (!VRIK_IsHeadAimWeaponActive()) return;
+
+    const int weaponIdx = static_cast<int>(g_VRSmokeCigIdx);
+    if (weaponIdx < 0 || weaponIdx >= VRIK_FKCount() || !g_viewPktValid) return;
+
+    float viewQ[4] = { g_viewPkt[0], g_viewPkt[1], g_viewPkt[2], g_viewPkt[3] };
+    VRIK_QuatNorm(viewQ);
+    float entQ[4] = { g_VREntityQI, g_VREntityQJ, g_VREntityQK, g_VREntityQR };
+    VRIK_QuatNorm(entQ);
+    float invEnt[4]; VRIK_QuatConj(entQ, invEnt);
+    float viewModel[4]; VRIK_QuatMul(invEnt, viewQ, viewModel);
+    VRIK_QuatNorm(viewModel);
+
+    VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+    const int parent = g_VRBoneParent[weaponIdx];
+    if (parent < 0 || parent >= weaponIdx) return;
+    VRIK_WriteLocalRot(boneBuf, weaponIdx, g_fkRot[parent], viewModel);
+}
+
 // Gizmo-exact hand target + HMD-anchored shoulder, both in model space.
 //   target   = camModelPos + camModelRot * mapLocalPos(controllerOpenXR)   (== gizmo)
 //   shoulder = camModelPos + camModelRot * mapLocalPos(shoulderOpenXR)      (HMD-anchored)
@@ -2325,10 +2361,21 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
     // No VirtualQuery here -- that syscall per call was the FPS killer. a2 is always
     // a valid pose-apply argument, so a single __try guards the dereferences.
     if (!(g_PlayerTrackBufA || g_PlayerTrackBufB)) return result;
+    const bool headAimWork = VRIK_IsHeadAimWeaponActive();
+    static bool s_prevHeadAimWeaponActive = false;
+    const bool headAimChanged = headAimWork != s_prevHeadAimWeaponActive;
+    if (headAimChanged) {
+        // A cached VRIK solve belongs to the previous pose owner. Force a fresh solve when
+        // controller-driven VRIK resumes.
+        g_solveCacheTick = -1.0e9f;
+        g_solveCacheN = 0;
+        s_prevHeadAimWeaponActive = headAimWork;
+    }
     const bool nonVrikAdsWork = g_pSharedHands &&
         g_pSharedHands[vrshared::kNonVrikAdsMuzzleStabilizer] > 0.5f &&
         g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
-    if (g_VRBind <= 0 && !nonVrikAdsWork && g_AnimPoseDebug == 0 && g_VRDiagCapture == 0 &&
+    if (g_VRBind <= 0 && !headAimWork && !nonVrikAdsWork &&
+        g_AnimPoseDebug == 0 && g_VRDiagCapture == 0 &&
         g_VRSmokeFingerActive == 0 && g_VRSmokeFingerCapture == 0 &&
         g_VRSmokeFingerActiveL == 0 && g_VRSmokeFingerCaptureL == 0) return result;
 
@@ -2348,7 +2395,10 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
                 // present thread).
                 RefreshHandsSnapshot();
 
+                const bool headAimWeaponActive = headAimWork;
                 VRIK_ApplyNonVrikAdsMuzzleStabilizer(boneBuf);
+                if (headAimWeaponActive) VRIK_LatchViewPacket();
+                VRIK_ApplyHeadAimWeaponOrientation(boneBuf);
 
                 // SMOKE FINGER-HOLD (fingers-only grip). Runs on EVERY player pass, BEFORE
                 // the solve/replay split, so the curl is bit-identical across the 4-5
@@ -2676,7 +2726,8 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
                 // VRIK FULL-ARM IK (mode 4): model-space FK + 2-bone IK, rotation-only
                 // writes (no stretch). Anchored at the head bone's model position; the
                 // controller offset is taken straight from the proven gizmo world math.
-                if (g_VRBind == 4 && g_pSharedHands && g_VRBoneCount > 0 && g_VRHeadBoneIdx >= 0) {
+                if (!headAimWeaponActive && g_VRBind == 4 && g_pSharedHands &&
+                    g_VRBoneCount > 0 && g_VRHeadBoneIdx >= 0) {
                     // Solve-per-tick accounting (post-write tamper diagnosis). Counts how
                     // many times the PLAYER pose-apply runs within one entity tick and
                     // which distinct bone buffers participate.
@@ -3847,7 +3898,7 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
                     }
                 }
                 // Legacy direct-write binding (modes 1..3): single-bone hand write.
-                else if (g_VRBind > 0 && g_pSharedHands) {
+                else if (!headAimWeaponActive && g_VRBind > 0 && g_pSharedHands) {
                     // Resolve the head bone pose once (shared by both hands).
                     bool  headOk = false;
                     float headPos[3]  = { 0.0f, 0.0f, 0.0f };
