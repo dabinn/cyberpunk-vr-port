@@ -724,6 +724,42 @@ static inline void VRIK_WriteLocalPos(uint8_t* boneBuf, int idx,
     t[0]=local[0]; t[1]=local[1]; t[2]=local[2];
 }
 
+// Preserve the authored WeaponRight grip transform and rotate its RightHand parent instead.
+// desiredWeaponModel = desiredHandModel * weaponLocal, therefore
+// desiredHandModel = desiredWeaponModel * inverse(weaponLocal).
+static inline bool VRIK_WriteWeaponModelRotViaRightHand(uint8_t* boneBuf, int weaponIdx,
+                                                         const float* desiredWeaponModel,
+                                                         const float* weaponLocalOverride = nullptr) {
+    const int handIdx = static_cast<int>(g_VRRightBoneIdx);
+    if (weaponIdx < 0 || weaponIdx >= VRIK_FKCount() ||
+        handIdx < 0 || handIdx >= VRIK_FKCount() ||
+        g_VRBoneParent[weaponIdx] != handIdx) {
+        return false;
+    }
+
+    const int handParent = g_VRBoneParent[handIdx];
+    if (handParent < 0 || handParent >= handIdx) return false;
+
+    float weaponLocal[4];
+    if (weaponLocalOverride) {
+        weaponLocal[0]=weaponLocalOverride[0]; weaponLocal[1]=weaponLocalOverride[1];
+        weaponLocal[2]=weaponLocalOverride[2]; weaponLocal[3]=weaponLocalOverride[3];
+    } else {
+        const float* local = reinterpret_cast<const float*>(
+            boneBuf + weaponIdx * 48 + VRIK_ROT_OFF);
+        weaponLocal[0]=local[0]; weaponLocal[1]=local[1];
+        weaponLocal[2]=local[2]; weaponLocal[3]=local[3];
+    }
+    VRIK_QuatNorm(weaponLocal);
+
+    float invWeaponLocal[4]; VRIK_QuatConj(weaponLocal, invWeaponLocal);
+    float desiredHandModel[4];
+    VRIK_QuatMul(desiredWeaponModel, invWeaponLocal, desiredHandModel);
+    VRIK_QuatNorm(desiredHandModel);
+    VRIK_WriteLocalRot(boneBuf, handIdx, g_fkRot[handParent], desiredHandModel);
+    return true;
+}
+
 // The original weapon-aim option keeps its established polarity: enabled selects controller 6DoF,
 // disabled selects HMD 3DoF Head Aim. The persistent VRIK setting remains untouched, and both modes
 // use the same muzzle-direction projectile path.
@@ -733,14 +769,14 @@ static inline bool VRIK_IsHeadAimWeaponActive() {
     return g_pSharedHands &&
         g_pSharedHands[58] <= 0.5f &&
         g_pSharedHands[vrshared::kWeaponFlag] > 0.5f &&
-        g_pSharedHands[27] > 0.5f &&
-        g_pSharedHands[31] <= 0.5f;
+        g_pSharedHands[27] > 0.5f;
 }
 
 // Keeps the vanilla non-VRIK ADS raise animation, but removes the direction change it adds.
 // Hip fire records the last trustworthy muzzle direction in game-heading space. While aiming,
-// a small closed-loop correction rotates only WeaponRight during the ADS transition. Once the
-// aim-in ends, the final correction is converted to a weapon-local delta so normal ADS breathing,
+// a small closed-loop correction rotates the right hand and attached weapon during the ADS
+// transition. Once aim-in ends, the final correction is converted to a weapon-local delta so
+// normal ADS breathing,
 // sway and RS aim remain live. Hip capture is gated only by the engine's Ready/Safe/ADS states.
 // Heading space excludes physical HMD motion while preserving ordinary mouse/stick turns.
 static inline void VRIK_ApplyNonVrikAdsMuzzleStabilizer(uint8_t* boneBuf) {
@@ -748,7 +784,9 @@ static inline void VRIK_ApplyNonVrikAdsMuzzleStabilizer(uint8_t* boneBuf) {
         uint8_t* boneBuf = nullptr;
         float tick = -1.0f;
         int weaponIdx = -1;
-        float localRot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        int handIdx = -1;
+        float weaponLocalRot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        float handLocalRot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     };
     static float s_hipAimHeading[3] = {0.0f, 1.0f, 0.0f};
     static float s_totalModelCorrection[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -894,9 +932,9 @@ static inline void VRIK_ApplyNonVrikAdsMuzzleStabilizer(uint8_t* boneBuf) {
     if (!aiming || !s_hipAimValid) return;
 
     // Hooked_AnimPoseApply can visit the same player pose buffer several times in one entity
-    // tick. Cache that tick's unmodified WeaponRight local rotation and always compose from it;
-    // multiplying the correction into the already-corrected pass accumulates rotation and can
-    // eventually skew both ADS and the following hip pose.
+    // tick. Cache that tick's unmodified RightHand and WeaponRight local rotations and always
+    // compose from them; multiplying the correction into the already-corrected pass accumulates
+    // rotation and can eventually skew both ADS and the following hip pose.
     RawWeaponPoseCache* rawPose = nullptr;
     for (auto& entry : s_rawPoseCache) {
         if (entry.boneBuf == boneBuf) {
@@ -909,21 +947,33 @@ static inline void VRIK_ApplyNonVrikAdsMuzzleStabilizer(uint8_t* boneBuf) {
         rawPose->boneBuf = boneBuf;
         rawPose->tick = -1.0f;
     }
-    if (rawPose->tick != tick || rawPose->weaponIdx != weaponIdx) {
-        const float* rawLocal = reinterpret_cast<const float*>(
+    const int handIdx = static_cast<int>(g_VRRightBoneIdx);
+    if (handIdx < 0 || handIdx >= VRIK_FKCount() ||
+        g_VRBoneParent[weaponIdx] != handIdx) return;
+    if (rawPose->tick != tick || rawPose->weaponIdx != weaponIdx || rawPose->handIdx != handIdx) {
+        const float* rawWeaponLocal = reinterpret_cast<const float*>(
             boneBuf + weaponIdx * 48 + VRIK_ROT_OFF);
-        rawPose->localRot[0]=rawLocal[0]; rawPose->localRot[1]=rawLocal[1];
-        rawPose->localRot[2]=rawLocal[2]; rawPose->localRot[3]=rawLocal[3];
-        VRIK_QuatNorm(rawPose->localRot);
+        const float* rawHandLocal = reinterpret_cast<const float*>(
+            boneBuf + handIdx * 48 + VRIK_ROT_OFF);
+        rawPose->weaponLocalRot[0]=rawWeaponLocal[0]; rawPose->weaponLocalRot[1]=rawWeaponLocal[1];
+        rawPose->weaponLocalRot[2]=rawWeaponLocal[2]; rawPose->weaponLocalRot[3]=rawWeaponLocal[3];
+        rawPose->handLocalRot[0]=rawHandLocal[0]; rawPose->handLocalRot[1]=rawHandLocal[1];
+        rawPose->handLocalRot[2]=rawHandLocal[2]; rawPose->handLocalRot[3]=rawHandLocal[3];
+        VRIK_QuatNorm(rawPose->weaponLocalRot);
+        VRIK_QuatNorm(rawPose->handLocalRot);
         rawPose->tick = tick;
         rawPose->weaponIdx = weaponIdx;
+        rawPose->handIdx = handIdx;
     }
 
     VRIK_ComputeFK(boneBuf, VRIK_FKCount());
-    const int parent = g_VRBoneParent[weaponIdx];
-    if (parent < 0 || parent >= weaponIdx) return;
+    const int handParent = g_VRBoneParent[handIdx];
+    if (handParent < 0 || handParent >= handIdx) return;
+    float rawHandModel[4];
+    VRIK_QuatMul(g_fkRot[handParent], rawPose->handLocalRot, rawHandModel);
+    VRIK_QuatNorm(rawHandModel);
     float rawModel[4];
-    VRIK_QuatMul(g_fkRot[parent], rawPose->localRot, rawModel);
+    VRIK_QuatMul(rawHandModel, rawPose->weaponLocalRot, rawModel);
     VRIK_QuatNorm(rawModel);
     float correctedModel[4];
     if (s_adsCorrectionFrozen && !s_freezeLocalCorrectionPending) {
@@ -939,7 +989,8 @@ static inline void VRIK_ApplyNonVrikAdsMuzzleStabilizer(uint8_t* boneBuf) {
         }
     }
     VRIK_QuatNorm(correctedModel);
-    VRIK_WriteLocalRot(boneBuf, weaponIdx, g_fkRot[parent], correctedModel);
+    VRIK_WriteWeaponModelRotViaRightHand(
+        boneBuf, weaponIdx, correctedModel, rawPose->weaponLocalRot);
 }
 
 static inline void VRIK_DampenTorsoWeaponPose(uint8_t* boneBuf) {
@@ -1952,9 +2003,10 @@ static inline void VRIK_BodyAxesFromCamYaw(const float* camModelRot,
     if (VRIK_Norm3(bodyFwd) < 1e-4f) { bodyFwd[0]=0.0f; bodyFwd[1]=1.0f; bodyFwd[2]=0.0f; }
 }
 
-// Head Aim uses the final HMD orientation as the absolute 3DoF WeaponRight model rotation.
+// Head Aim uses the final HMD orientation as the absolute 3DoF weapon model rotation.
 // The view quaternion is already expressed in game world axes (+Y forward), so only the ordinary
-// world-to-entity conversion is required. Position remains entirely owned by the vanilla pose.
+// world-to-entity conversion is required. RightHand carries the authored WeaponRight grip transform;
+// position remains entirely owned by the vanilla pose.
 static inline void VRIK_ApplyHeadAimWeaponOrientation(uint8_t* boneBuf) {
     if (!VRIK_IsHeadAimWeaponActive()) return;
 
@@ -1970,9 +2022,223 @@ static inline void VRIK_ApplyHeadAimWeaponOrientation(uint8_t* boneBuf) {
     VRIK_QuatNorm(viewModel);
 
     VRIK_ComputeFK(boneBuf, VRIK_FKCount());
-    const int parent = g_VRBoneParent[weaponIdx];
-    if (parent < 0 || parent >= weaponIdx) return;
-    VRIK_WriteLocalRot(boneBuf, weaponIdx, g_fkRot[parent], viewModel);
+    VRIK_WriteWeaponModelRotViaRightHand(boneBuf, weaponIdx, viewModel);
+}
+
+struct VRIK_AimArmPose {
+    uint8_t* boneBuf = nullptr;
+    float tick = -1.0f;
+    int bone[6] = {-1,-1,-1,-1,-1,-1}; // right upper/fore/hand, left upper/fore/hand
+    float localRot[6][4] = {};
+    float rawPos[6][3] = {};
+    float rawRot[6][4] = {};
+    float targetHand[2][3] = {};
+    float targetElbow[2][3] = {};
+    float targetLeftRot[4] = {0.0f,0.0f,0.0f,1.0f};
+    bool valid = false;
+};
+inline VRIK_AimArmPose g_aimArmPose[4];
+
+static inline bool VRIK_CurrentRightEye(float* outWorld, float* outModel,
+                                         float* outViewModel, float* outCamModelPos,
+                                         float* outCentreModelRot) {
+    float unusedCamRot[4];
+    if (!g_viewPktValid || !VRIK_ComputeCamModel(outCamModelPos, unusedCamRot)) return false;
+    float headWorld[3];
+    if (!VRIK_ResolveViewPos(headWorld)) return false;
+
+    float viewQ[4] = {g_viewPkt[0],g_viewPkt[1],g_viewPkt[2],g_viewPkt[3]};
+    VRIK_QuatNorm(viewQ);
+    const float rightAxis[3] = {1.0f,0.0f,0.0f};
+    float rightWorld[3]; VRIK_QuatRotateVec(viewQ, rightAxis, rightWorld);
+    const float halfIpd = SharedPose(95);
+    outWorld[0]=headWorld[0]+rightWorld[0]*halfIpd;
+    outWorld[1]=headWorld[1]+rightWorld[1]*halfIpd;
+    outWorld[2]=headWorld[2]+rightWorld[2]*halfIpd;
+
+    float entQ[4] = {g_VREntityQI,g_VREntityQJ,g_VREntityQK,g_VREntityQR};
+    VRIK_QuatNorm(entQ);
+    float invEnt[4]; VRIK_QuatConj(entQ, invEnt);
+    float eyeDeltaWorld[3] = {outWorld[0]-g_VREntityPosX,
+                              outWorld[1]-g_VREntityPosY,
+                              outWorld[2]-g_VREntityPosZ};
+    VRIK_QuatRotateVec(invEnt, eyeDeltaWorld, outModel);
+    VRIK_QuatMul(invEnt, viewQ, outViewModel); VRIK_QuatNorm(outViewModel);
+
+    // The render view is composed as gameHeading * mappedHmd. Divide out the exact raw HMD
+    // quaternion published beside this view instead of comparing against the engine camera,
+    // whose orientation may already contain the HMD. This recovers the centred game-camera frame
+    // used by the authored weapon pose even when the player is looking away from the body.
+    float hmdGame[4] = {g_viewPkt[13], -g_viewPkt[15], g_viewPkt[14], g_viewPkt[16]};
+    if ((hmdGame[0]*hmdGame[0] + hmdGame[1]*hmdGame[1] +
+         hmdGame[2]*hmdGame[2] + hmdGame[3]*hmdGame[3]) < 1e-6f) {
+        hmdGame[0]=0.0f; hmdGame[1]=0.0f; hmdGame[2]=0.0f; hmdGame[3]=1.0f;
+    } else {
+        VRIK_QuatNorm(hmdGame);
+    }
+    float invHmdGame[4]; VRIK_QuatConj(hmdGame, invHmdGame);
+    float centreWorld[4]; VRIK_QuatMul(viewQ, invHmdGame, centreWorld);
+    VRIK_QuatMul(invEnt, centreWorld, outCentreModelRot);
+    VRIK_QuatNorm(outCentreModelRot);
+    return true;
+}
+
+// Convert the game's authored ADS hand pose from the centred camera frame into the HMD rotation
+// frame. The eye offset is latched relative to the vanilla camera: locomotion and crouch still move
+// the arms with the player, while later physical head translation remains free for sight adjustment.
+static inline void VRIK_PrepareAimArmTargets(uint8_t* boneBuf) {
+    static bool s_prevHeadAim=false, s_prevAiming=false;
+    static bool s_headAnchorValid=false, s_nonVrikAnchorValid=false;
+    static float s_headCentreOffsetCam[3]={0,0,0};
+    static float s_nonVrikEyeOffsetCam[3]={0,0,0};
+    const bool headAim = VRIK_IsHeadAimWeaponActive();
+    const bool nonVrik = g_pSharedHands && g_VRBind <= 0 &&
+        g_pSharedHands[vrshared::kNonVrikAdsMuzzleStabilizer] > 0.5f &&
+        g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
+    const bool aiming = g_pSharedHands && g_pSharedHands[vrshared::kAiming] > 0.5f;
+    const bool active = aiming && (headAim || nonVrik);
+
+    VRIK_AimArmPose* pose = nullptr;
+    for (auto& entry : g_aimArmPose) {
+        entry.valid = false;
+        if (entry.boneBuf == boneBuf) { pose=&entry; break; }
+        if (!pose && entry.boneBuf == nullptr) pose=&entry;
+    }
+    if (!active || !pose) {
+        if (!aiming) { s_headAnchorValid=false; s_nonVrikAnchorValid=false; }
+        s_prevHeadAim=headAim; s_prevAiming=aiming;
+        return;
+    }
+    if (pose->boneBuf != boneBuf) { pose->boneBuf=boneBuf; pose->tick=-1.0f; }
+
+    const int bone[6] = {g_VRRightUpperArmIdx,g_VRRightForeArmIdx,g_VRRightBoneIdx,
+                         g_VRLeftUpperArmIdx,g_VRLeftForeArmIdx,g_VRLeftBoneIdx};
+    for (int i=0;i<6;++i) if (bone[i] < 0 || bone[i] >= VRIK_FKCount()) return;
+    const float tick = SharedPose(13);
+    bool samePose = pose->tick == tick;
+    for (int i=0;i<6;++i) samePose = samePose && pose->bone[i] == bone[i];
+    if (samePose) {
+        for (int i=0;i<6;++i) {
+            float* q = reinterpret_cast<float*>(boneBuf + bone[i]*48 + VRIK_ROT_OFF);
+            q[0]=pose->localRot[i][0]; q[1]=pose->localRot[i][1];
+            q[2]=pose->localRot[i][2]; q[3]=pose->localRot[i][3];
+        }
+    } else {
+        for (int i=0;i<6;++i) {
+            const float* q = reinterpret_cast<const float*>(boneBuf + bone[i]*48 + VRIK_ROT_OFF);
+            pose->bone[i]=bone[i];
+            pose->localRot[i][0]=q[0]; pose->localRot[i][1]=q[1];
+            pose->localRot[i][2]=q[2]; pose->localRot[i][3]=q[3];
+        }
+        pose->tick=tick;
+    }
+
+    VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+    for (int i=0;i<6;++i) {
+        for (int k=0;k<3;++k) pose->rawPos[i][k]=g_fkPos[bone[i]][k];
+        for (int k=0;k<4;++k) pose->rawRot[i][k]=g_fkRot[bone[i]][k];
+    }
+
+    float eyeWorld[3], eyeModel[3], viewModel[4], camPos[3], centreRot[4];
+    if (!VRIK_CurrentRightEye(eyeWorld,eyeModel,viewModel,camPos,centreRot)) return;
+    float invCentre[4]; VRIK_QuatConj(centreRot,invCentre);
+    float liveDelta[4]; VRIK_QuatMul(viewModel,invCentre,liveDelta); VRIK_QuatNorm(liveDelta);
+
+    // The authored ADS pose is centred between the eyes. Keep that cyclopean point as the source
+    // pivot and use the actual right eye as the destination; pre-shifting both points by half-IPD
+    // would cancel the dominant-eye correction. Head Aim latches only physical head translation:
+    // the right-eye IPD orbit remains live as the HMD rotates.
+    float eyeFromCentre[3]={eyeModel[0]-camPos[0],eyeModel[1]-camPos[1],eyeModel[2]-camPos[2]};
+    float eyeOffsetCam[3]; VRIK_QuatRotateVec(invCentre,eyeFromCentre,eyeOffsetCam);
+    const float rightAxis[3]={1.0f,0.0f,0.0f};
+    float eyeRight[3]; VRIK_QuatRotateVec(viewModel,rightAxis,eyeRight);
+    const float halfIpd=SharedPose(95);
+    eyeRight[0]*=halfIpd; eyeRight[1]*=halfIpd; eyeRight[2]*=halfIpd;
+    float headCentre[3]={eyeModel[0]-eyeRight[0],eyeModel[1]-eyeRight[1],eyeModel[2]-eyeRight[2]};
+    float headFromCam[3]={headCentre[0]-camPos[0],headCentre[1]-camPos[1],headCentre[2]-camPos[2]};
+    float headOffsetCam[3]; VRIK_QuatRotateVec(invCentre,headFromCam,headOffsetCam);
+    if (headAim && (!s_prevHeadAim || !s_prevAiming || !s_headAnchorValid)) {
+        for(int k=0;k<3;++k) s_headCentreOffsetCam[k]=headOffsetCam[k];
+        s_headAnchorValid=true;
+    }
+    if (nonVrik && aiming && (!s_prevAiming || s_prevHeadAim || !s_nonVrikAnchorValid)) {
+        for(int k=0;k<3;++k) s_nonVrikEyeOffsetCam[k]=eyeOffsetCam[k];
+        s_nonVrikAnchorValid=true;
+    }
+    if (!headAim) s_headAnchorValid=false;
+    if (!aiming) s_nonVrikAnchorValid=false;
+    s_prevHeadAim=headAim; s_prevAiming=aiming;
+
+    float anchor[3], delta[4];
+    if (headAim && s_headAnchorValid) {
+        float headOff[3]; VRIK_QuatRotateVec(centreRot,s_headCentreOffsetCam,headOff);
+        for(int k=0;k<3;++k) anchor[k]=camPos[k]+headOff[k]+eyeRight[k];
+        for(int k=0;k<4;++k) delta[k]=liveDelta[k];
+    } else if (nonVrik && s_nonVrikAnchorValid) {
+        float eyeOff[3]; VRIK_QuatRotateVec(centreRot,s_nonVrikEyeOffsetCam,eyeOff);
+        for(int k=0;k<3;++k) anchor[k]=camPos[k]+eyeOff[k];
+        delta[0]=0.0f; delta[1]=0.0f; delta[2]=0.0f; delta[3]=1.0f;
+    } else return;
+
+    const int handSlot[2]={2,5}, elbowSlot[2]={1,4};
+    for(int side=0;side<2;++side) {
+        float relH[3]={pose->rawPos[handSlot[side]][0]-camPos[0],
+                       pose->rawPos[handSlot[side]][1]-camPos[1],
+                       pose->rawPos[handSlot[side]][2]-camPos[2]};
+        float relE[3]={pose->rawPos[elbowSlot[side]][0]-camPos[0],
+                       pose->rawPos[elbowSlot[side]][1]-camPos[1],
+                       pose->rawPos[elbowSlot[side]][2]-camPos[2]};
+        float rotH[3],rotE[3]; VRIK_QuatRotateVec(delta,relH,rotH); VRIK_QuatRotateVec(delta,relE,rotE);
+        for(int k=0;k<3;++k) { pose->targetHand[side][k]=anchor[k]+rotH[k];
+                               pose->targetElbow[side][k]=anchor[k]+rotE[k]; }
+    }
+    VRIK_QuatMul(delta,pose->rawRot[5],pose->targetLeftRot); VRIK_QuatNorm(pose->targetLeftRot);
+    pose->valid=true;
+}
+
+// Rotation-only two-bone solve for an authored arm pose. Segment translations remain untouched,
+// so this cannot stretch the wrist away from the forearm like a direct hand-bone translation.
+static inline void VRIK_SolveAimArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
+                                    const float rawPos[3][3], const float rawRot[3][4],
+                                    const float* targetHand, const float* elbowHint,
+                                    const float* targetHandRot) {
+    float upVec[3]={rawPos[1][0]-rawPos[0][0],rawPos[1][1]-rawPos[0][1],rawPos[1][2]-rawPos[0][2]};
+    float foreVec[3]={rawPos[2][0]-rawPos[1][0],rawPos[2][1]-rawPos[1][1],rawPos[2][2]-rawPos[1][2]};
+    const float upLen=VRIK_Norm3(upVec), foreLen=VRIK_Norm3(foreVec);
+    float toHand[3]={targetHand[0]-rawPos[0][0],targetHand[1]-rawPos[0][1],targetHand[2]-rawPos[0][2]};
+    float dist=VRIK_Norm3(toHand);
+    if(upLen<1e-4f||foreLen<1e-4f||dist<1e-4f) return;
+    const float minD=std::fabs(upLen-foreLen)+1e-4f, maxD=upLen+foreLen-1e-4f;
+    float reach=dist; if(reach<minD)reach=minD; if(reach>maxD)reach=maxD;
+    const float along=(upLen*upLen-foreLen*foreLen+reach*reach)/(2.0f*reach);
+    const float height=std::sqrt(std::fmax(0.0f,upLen*upLen-along*along));
+    float linePoint[3]={rawPos[0][0]+toHand[0]*along,rawPos[0][1]+toHand[1]*along,rawPos[0][2]+toHand[2]*along};
+    float bend[3]={elbowHint[0]-linePoint[0],elbowHint[1]-linePoint[1],elbowHint[2]-linePoint[2]};
+    float proj=VRIK_Dot3(bend,toHand); bend[0]-=toHand[0]*proj; bend[1]-=toHand[1]*proj; bend[2]-=toHand[2]*proj;
+    if(VRIK_Norm3(bend)<1e-4f){ bend[0]=rawPos[1][0]-linePoint[0]; bend[1]=rawPos[1][1]-linePoint[1]; bend[2]=rawPos[1][2]-linePoint[2];
+        proj=VRIK_Dot3(bend,toHand); bend[0]-=toHand[0]*proj; bend[1]-=toHand[1]*proj; bend[2]-=toHand[2]*proj; if(VRIK_Norm3(bend)<1e-4f)return; }
+    float newElbow[3]={linePoint[0]+bend[0]*height,linePoint[1]+bend[1]*height,linePoint[2]+bend[2]*height};
+    float desiredUp[3]={newElbow[0]-rawPos[0][0],newElbow[1]-rawPos[0][1],newElbow[2]-rawPos[0][2]}; VRIK_Norm3(desiredUp);
+    float desiredFore[3]={targetHand[0]-newElbow[0],targetHand[1]-newElbow[1],targetHand[2]-newElbow[2]}; VRIK_Norm3(desiredFore);
+    float dUp[4],newUp[4]; VRIK_QuatFromTo(upVec,desiredUp,dUp); VRIK_QuatMul(dUp,rawRot[0],newUp); VRIK_QuatNorm(newUp);
+    float dFore[4],newFore[4]; VRIK_QuatFromTo(foreVec,desiredFore,dFore); VRIK_QuatMul(dFore,rawRot[1],newFore); VRIK_QuatNorm(newFore);
+    const int upParent=g_VRBoneParent[upperIdx]; const float identity[4]={0,0,0,1};
+    VRIK_WriteLocalRot(boneBuf,upperIdx,(upParent>=0&&upParent<VRIK_FKCount())?g_fkRot[upParent]:identity,newUp);
+    VRIK_WriteLocalRot(boneBuf,foreIdx,newUp,newFore);
+    VRIK_WriteLocalRot(boneBuf,handIdx,newFore,targetHandRot);
+}
+
+static inline void VRIK_SolvePreparedAimArms(uint8_t* boneBuf) {
+    VRIK_AimArmPose* pose=nullptr;
+    for(auto& entry:g_aimArmPose) if(entry.boneBuf==boneBuf){pose=&entry;break;}
+    if(!pose||!pose->valid)return;
+    VRIK_ComputeFK(boneBuf,VRIK_FKCount());
+    float rightHandRot[4]={g_fkRot[pose->bone[2]][0],g_fkRot[pose->bone[2]][1],g_fkRot[pose->bone[2]][2],g_fkRot[pose->bone[2]][3]};
+    VRIK_SolveAimArm(boneBuf,pose->bone[0],pose->bone[1],pose->bone[2],
+                     &pose->rawPos[0],&pose->rawRot[0],pose->targetHand[0],pose->targetElbow[0],rightHandRot);
+    VRIK_ComputeFK(boneBuf,VRIK_FKCount());
+    VRIK_SolveAimArm(boneBuf,pose->bone[3],pose->bone[4],pose->bone[5],
+                     &pose->rawPos[3],&pose->rawRot[3],pose->targetHand[1],pose->targetElbow[1],pose->targetLeftRot);
 }
 
 // Gizmo-exact hand target + HMD-anchored shoulder, both in model space.
@@ -2396,9 +2662,12 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
                 RefreshHandsSnapshot();
 
                 const bool headAimWeaponActive = headAimWork;
+                const bool adsEyeAlignmentActive = headAimWeaponActive || nonVrikAdsWork;
+                if (adsEyeAlignmentActive) VRIK_LatchViewPacket();
+                VRIK_PrepareAimArmTargets(boneBuf);
                 VRIK_ApplyNonVrikAdsMuzzleStabilizer(boneBuf);
-                if (headAimWeaponActive) VRIK_LatchViewPacket();
                 VRIK_ApplyHeadAimWeaponOrientation(boneBuf);
+                VRIK_SolvePreparedAimArms(boneBuf);
 
                 // SMOKE FINGER-HOLD (fingers-only grip). Runs on EVERY player pass, BEFORE
                 // the solve/replay split, so the curl is bit-identical across the 4-5
