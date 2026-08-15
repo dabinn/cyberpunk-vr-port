@@ -1436,16 +1436,17 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                                "weapon swap = Y, fire = RT, aim = LT, grenade = RG, scanner = LG).");
             ImGui::Separator();
 
-            // Keep the established setting and polarity. Both modes launch from the live muzzle;
-            // checked uses controller 6DoF, unchecked uses HMD-only 3DoF Head Aim.
+            // Keep the established backend setting while presenting Head Aim as the positive UI
+            // choice. Both modes launch from the live muzzle; the display value is the inverse of
+            // the persisted weapon-aim value so existing configurations retain their behaviour.
             {
-                static bool s_weaponAim = true;   // default ON — backend's m_weaponAimEnable also defaults to 1
-                if (ImGui::Checkbox("Use Weapon Aiming / Decoupled VR Head Aim", &s_weaponAim)) {
-                    OpenXRManager::Get().SetWeaponAimEnable(s_weaponAim ? 1 : 0);
+                static bool s_headAim = OpenXRManager::Get().GetWeaponAimEnable() == 0;
+                if (ImGui::Checkbox("Decoupled VR Head Aim", &s_headAim)) {
+                    OpenXRManager::Get().SetWeaponAimEnable(s_headAim ? 0 : 1);
                 }
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("ON: Aim with your VR controllers (6DoF Hand Aim).\n"
-                                      "OFF: Aim with your headset, decoupled from locomotion (3DoF Head Aim).\n"
+                    ImGui::SetTooltip("ON: Aim with your headset, decoupled from locomotion (3DoF Head Aim).\n"
+                                      "OFF: Aim with your VR controllers (6DoF Hand Aim).\n"
                                       "Shots always fire from the actual weapon barrel.");
                 }
                 ImGui::Checkbox("Weapon Aim lasewr dot (where the bullet hits)", &g_drawBarrelCross);
