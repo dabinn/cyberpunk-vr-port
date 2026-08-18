@@ -3630,6 +3630,11 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
             // so the hands mapping and the [148] pre-snap guard track what is on screen.
             shView[141] = renderGameYaw + g_snapHold141;
             shView[142] = 1.0f;
+            // Full VRIK targets are tracked in the stable render/world frame. Publish the
+            // gameplay yaw removed by body follow so the Hands plugin can counter-rotate its
+            // model-space targets when the avatar entity turns underneath the controllers.
+            // Snap turn remains exclusively represented by [141] and its event packet.
+            shView[vrshared::kBodyFollowAppliedYaw] = WrapYawPi(gameYaw - renderGameYaw);
             // [227..230] the HEAD orientation this view was composed from, XR axes, same space
             // as the [16..19] the hand publish carries. The arms rotate their head-local
             // controller offset by the view quaternion [104..107], which is built here -- at a
