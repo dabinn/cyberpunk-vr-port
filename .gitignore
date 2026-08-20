@@ -17,6 +17,10 @@ CyberpunkVRProxy.log
 tools/*
 !tools/xr_probe/
 !tools/crash/
+!tools/auto_installer/
+tools/auto_installer/bin/
+tools/auto_installer/obj/
+!tools/auto_installer/*.ps1
 releases/
 *.py
 memory/

@@ -1,4 +1,4 @@
-# Assemble a tester package under dist\, laid out exactly as it must land in the game root.
+# Assemble a tester package under dist\ with a FOMOD wrapper and a Cyberpunk 2077\ payload.
 #
 # Everything comes from the repo or from a build output -- nothing is read out of the installed
 # game -- so what a tester gets is what is committed. Run scripts\sync_assets.ps1 first if the
@@ -18,6 +18,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $Out      = Join-Path $RepoRoot "dist\CyberpunkVRPort-$Version"
+$Payload  = Join-Path $Out "Cyberpunk 2077"
 
 # Folders that exist for development and have no business in a tester's game.
 $SkipMods  = @("CyberpunkVRPort_WorldMapDiag")
@@ -49,10 +50,11 @@ if (Test-Path $Out) {
     if (-not $Force) { Remove-Item $Out -Recurse -Force } else { Remove-Item $Out -Recurse -Force }
 }
 New-Item -ItemType Directory -Path $Out -Force | Out-Null
+New-Item -ItemType Directory -Path $Payload -Force | Out-Null
 
 $manifest = @()
 function Add-File($src, $rel) {
-    $dst = Join-Path $Out $rel
+    $dst = Join-Path $Payload $rel
     New-Item -ItemType Directory -Path (Split-Path $dst -Parent) -Force | Out-Null
     Copy-Item -LiteralPath $src -Destination $dst -Force
     $script:manifest += [pscustomobject]@{ Path = $rel; Bytes = (Get-Item -LiteralPath $dst).Length }
@@ -85,17 +87,17 @@ Add-File (Need (Join-Path $RepoRoot "mods\config\openvr_api.dll") "openvr_api.dl
 # ---- CET mods, redscript, tweaks --------------------------------------------------------------
 foreach ($d in (Get-ChildItem (Join-Path $RepoRoot "mods\cet") -Directory)) {
     if ($SkipMods -contains $d.Name) { continue }
-    $n = Copy-Tree $d.FullName (Join-Path $Out "bin\x64\plugins\cyber_engine_tweaks\mods\$($d.Name)")
+    $n = Copy-Tree $d.FullName (Join-Path $Payload "bin\x64\plugins\cyber_engine_tweaks\mods\$($d.Name)")
     $manifest += [pscustomobject]@{ Path = "bin\x64\plugins\cyber_engine_tweaks\mods\$($d.Name)\  ($n files)"; Bytes = 0 }
 }
 foreach ($d in (Get-ChildItem (Join-Path $RepoRoot "mods\redscript") -Directory)) {
     if ($d.Name -eq "logs" -or $SkipMods -contains $d.Name) { continue }
-    $n = Copy-Tree $d.FullName (Join-Path $Out "r6\scripts\$($d.Name)")
+    $n = Copy-Tree $d.FullName (Join-Path $Payload "r6\scripts\$($d.Name)")
     $manifest += [pscustomobject]@{ Path = "r6\scripts\$($d.Name)\  ($n files)"; Bytes = 0 }
 }
 $tw = Join-Path $RepoRoot "mods\tweaks\vrcigarette"
 if (Test-Path $tw) {
-    $n = Copy-Tree $tw (Join-Path $Out "r6\tweaks\vrcigarette")
+    $n = Copy-Tree $tw (Join-Path $Payload "r6\tweaks\vrcigarette")
     $manifest += [pscustomobject]@{ Path = "r6\tweaks\vrcigarette\  ($n files)"; Bytes = 0 }
 }
 
@@ -106,11 +108,66 @@ foreach ($a in @("cyberpunkvrport.archive","VRCigarette.archive.xl")) {
     else { Write-Host "[!] $a is not in the repo -- run sync_assets.ps1 first" }
 }
 
-# Include a standalone uninstaller. It uses the mod's fixed names rather than build-time hashes,
-# so locally rebuilt or manually replaced plugin DLLs are still removed.
-$uninstallScriptPath = Join-Path $Out "uninstall_cyberpunkvrport.ps1"
-Copy-Item -LiteralPath (Need (Join-Path $PSScriptRoot "uninstall_cyberpunkvrport.ps1") "uninstaller") -Destination $uninstallScriptPath
-$manifest += [pscustomobject]@{ Path = "uninstall_cyberpunkvrport.ps1"; Bytes = (Get-Item $uninstallScriptPath).Length }
+# ---- Vortex FOMOD + standalone Auto Installer -----------------------------------------------
+$fomodDirectory = Join-Path $Out "fomod"
+New-Item -ItemType Directory -Path $fomodDirectory -Force | Out-Null
+
+$moduleConfig = @"
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://qconsulting.ca/fo3/ModConfig5.0.xsd">
+  <moduleName>CyberpunkVRPort</moduleName>
+  <requiredInstallFiles>
+    <folder source="Cyberpunk 2077" destination="" />
+  </requiredInstallFiles>
+</config>
+"@
+Set-Content -LiteralPath (Join-Path $fomodDirectory "ModuleConfig.xml") -Value $moduleConfig -Encoding utf8
+
+$fomodInfo = @"
+<fomod>
+  <Name>CyberpunkVRPort</Name>
+  <Version>$Version</Version>
+  <Author>dariulone and contributors</Author>
+  <Website>https://github.com/dabinn/cyberpunk-vr-port</Website>
+</fomod>
+"@
+Set-Content -LiteralPath (Join-Path $fomodDirectory "info.xml") -Value $fomodInfo -Encoding utf8
+
+$installerBuild = Join-Path $RepoRoot "tools\auto_installer\bin\Release\CyberpunkVRPort-Auto-Installer.exe"
+Copy-Item -LiteralPath (Need $installerBuild "CyberpunkVRPort-Auto-Installer.exe") -Destination $Out
+
+$installerIniTemplate = Need (Join-Path $RepoRoot "tools\auto_installer\CyberpunkVRPort-Auto-Installer.ini") "Auto Installer INI template"
+$installerIni = Get-Content -LiteralPath $installerIniTemplate -Raw
+$payloadPrefix = $Payload.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+$payloadFiles = Get-ChildItem -LiteralPath $Payload -Recurse -File | Sort-Object FullName
+$ownedDirectories = @(
+    "red4ext/plugins/CyberpunkVR_Stereo"
+    "red4ext/plugins/CyberpunkVR_Hands"
+    "r6/tweaks/vrcigarette"
+)
+foreach ($parent in @(
+    "bin\x64\plugins\cyber_engine_tweaks\mods"
+    "r6\scripts"
+)) {
+    $parentPath = Join-Path $Payload $parent
+    if (-not (Test-Path -LiteralPath $parentPath -PathType Container)) { continue }
+    foreach ($directory in (Get-ChildItem -LiteralPath $parentPath -Directory -Filter "CyberpunkVRPort_*")) {
+        $ownedDirectories += $directory.FullName.Substring($payloadPrefix.Length).Replace('\', '/')
+    }
+}
+$ownedDirectories = $ownedDirectories | Sort-Object -Unique
+$ownedDirectoryLines = for ($i = 0; $i -lt $ownedDirectories.Count; $i++) {
+    "{0:D4}={1}" -f ($i + 1), $ownedDirectories[$i]
+}
+$ownedDirectorySection = "[RemoveDirectories]`r`n" + ($ownedDirectoryLines -join "`r`n") + "`r`n`r`n"
+$installerIni = [regex]::Replace($installerIni, '(?ms)^\[RemoveDirectories\].*?(?=^\[|\z)', $ownedDirectorySection)
+$fileLines = for ($i = 0; $i -lt $payloadFiles.Count; $i++) {
+    $relative = $payloadFiles[$i].FullName.Substring($payloadPrefix.Length).Replace('\', '/')
+    "{0:D4}={1}" -f ($i + 1), $relative
+}
+$fileSection = "[Files]`r`n" + ($fileLines -join "`r`n") + "`r`n"
+$installerIni = [regex]::Replace($installerIni, '(?ms)^\[Files\].*\z', $fileSection)
+Set-Content -LiteralPath (Join-Path $Out "CyberpunkVRPort-Auto-Installer.ini") -Value $installerIni -Encoding utf8
 
 # ---- the OpenXR probe is NOT packaged ---------------------------------------------------------
 # It stays in tools\xr_probe\ and goes to a tester by hand, when there is something to measure.
@@ -124,67 +181,19 @@ $readme = @"
 CyberpunkVRPort $Version
 ========================
 
-WHAT THIS IS
-    A VR mod for Cyberpunk 2077: stereo rendering through OpenXR, 6DoF head tracking, motion
-    controllers merged into the game's own gamepad input, VRIK arms, and a set of gameplay mods
-    (HUD placement, holsters, melee, weapon handling, smoking).
-
-BEFORE YOU INSTALL -- READ THIS ONE
-    The first time the plugin starts it REPLACES your Cyberpunk settings with the ones this mod
-    was tuned against:
-
-        %LOCALAPPDATA%\CD Projekt Red\Cyberpunk 2077\UserSettings.json
-
-    Your own file is copied to UserSettings.pre-vr-<date>-<time>.json in the same folder first,
-    and if that copy fails the install is abandoned rather than forced. It happens exactly once:
-    afterwards the file is yours and nothing here looks at it again. Everything you change in the
-    game's own menus sticks.
-
-    To skip it entirely: after the first launch creates bin\x64\vrport.ini, set first_launch=1 in
-    it BEFORE starting the game a second time. To ask for it again later, set first_launch=0.
-
-REQUIREMENTS
-    Cyberpunk 2077 2.31 (this build's engine offsets are matched to it)
-    RED4ext, Cyber Engine Tweaks, redscript, TweakXL, ArchiveXL, Codeware
-    An OpenXR runtime, started BEFORE the game
-
-    Nothing else may proxy dxgi. If bin\x64\dxgi.dll exists (R.E.A.L. VR installs one), move it
-    out of the folder -- two VR paths in one process fight over the same engine hooks.
-
 INSTALL
-    Extract the contents of this folder into your Cyberpunk 2077 game root -- the folder that
-    contains bin\, r6\, red4ext\ and archive\. The paths inside already match.
+    Auto Installer:
+        Extract the archive, then run CyberpunkVRPort-Auto-Installer.exe and select Install.
 
-    Then start your OpenXR runtime, then the game. A small launcher window appears first: pick
-    your headset and per-eye render resolution there.
-
-WHAT LANDS WHERE
-    red4ext\plugins\CyberpunkVR_Stereo\   the VR plugin, its shaders, the settings template
-    red4ext\plugins\CyberpunkVR_Hands\    avatar / VRIK / weapon / smoking natives
-    bin\x64\CyberpunkVR_*Grip*.ini        captured hand poses for holding a cigarette and lighter
-    bin\x64\plugins\cyber_engine_tweaks\mods\CyberpunkVRPort_*\
-    r6\scripts\CyberpunkVRPort_*\
-    r6\tweaks\vrcigarette\
-    archive\pc\mod\                       packed assets + the ArchiveXL manifest
-
-    The player entity assets in cyberpunkvrport.archive carry one render-to-texture camera per
-    supported resolution. The launcher offers exactly the ones that exist.
-
-IF SOMETHING IS WRONG
-    bin\x64\cyberpunkvrport.log            the plugin's own log, start here
-    red4ext\logs\                          script validation errors land here
-    bin\x64\plugins\cyber_engine_tweaks\   per-mod CET logs
+    Vortex:
+        Add the original archive to Vortex and install it normally.
 
 UNINSTALL
-    Close the game, open PowerShell in the Cyberpunk 2077 game root, and run:
+    Auto Installer:
+        Run CyberpunkVRPort-Auto-Installer.exe and select Uninstall.
 
-        pwsh -File .\uninstall_cyberpunkvrport.ps1
-
-    Preview without deleting anything by adding -WhatIf. Add -KeepSettings to retain runtime
-    settings, opt-out markers, calibration data, and plugin logs.
-
-    The uninstaller does not restore UserSettings.json automatically. Nothing else is written
-    outside the game folder; the first-launch backup described above sits next to that file.
+    Vortex:
+        Remove the mod from Vortex.
 
 Built from commit $(git -C $RepoRoot rev-parse --short HEAD 2>$null) on $(Get-Date -Format "yyyy-MM-dd").
 "@

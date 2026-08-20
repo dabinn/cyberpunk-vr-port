@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{6D0B4E42-6F7D-46B8-AF59-5C86B084E44C}</ProjectGuid>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>CyberpunkVRPort.AutoInstaller</RootNamespace>
+    <AssemblyName>CyberpunkVRPort-Auto-Installer</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>assets\CyberpunkVRPort-Auto-Installer.ico</ApplicationIcon>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <OutputPath>bin\Debug\</OutputPath>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <OutputPath>bin\Release\</OutputPath>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <DefineConstants>TRACE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="src\IniDocument.cs" />
+    <Compile Include="src\InstallerEngine.cs" />
+    <Compile Include="src\Localization.cs" />
+    <Compile Include="src\MainForm.cs" />
+    <Compile Include="src\Program.cs" />
+    <Compile Include="src\SteamLocator.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="app.manifest" />
+    <Content Include="assets\CyberpunkVRPort-Auto-Installer.ico" />
+    <EmbeddedResource Include="assets\installer-background.png">
+      <LogicalName>CyberpunkVRPort.AutoInstaller.installer-background.png</LogicalName>
+    </EmbeddedResource>
+    <Content Include="CyberpunkVRPort-Auto-Installer.ini">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
