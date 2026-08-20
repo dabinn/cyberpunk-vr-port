@@ -30,6 +30,7 @@ package.json
 !.opencode/memory/*.md
 *.zip
 *.ps1
+!tools/auto_installer/tests/*.ps1
 !scripts/uninstall_cyberpunkvrport.ps1
 # ...except the probe layer install scripts, which are part of the tool,
 !tools/xr_probe/*.ps1

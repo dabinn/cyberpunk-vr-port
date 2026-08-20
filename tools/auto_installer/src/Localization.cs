@@ -76,7 +76,7 @@ namespace CyberpunkVRPort.AutoInstaller
                 ["MissingConfig"] = "CyberpunkVRPort-Auto-Installer.ini is missing beside this program.",
                 ["MissingPayload"] = "The Cyberpunk 2077 payload folder is missing beside this program.",
                 ["GameRunning"] = "Close Cyberpunk 2077 before continuing.",
-                ["ConfirmInstall"] = "Install Cyberpunk VR Port into the selected folder?",
+                ["ConfirmInstall"] = "Install {0} into the selected folder?",
                 ["ConfirmUninstall"] = "Remove the listed Cyberpunk VR Port files from the selected folder?",
                 ["InstallComplete"] = "Installation completed: {0} file(s) copied.",
                 ["UninstallComplete"] = "Uninstall completed: {0} file(s) removed.",

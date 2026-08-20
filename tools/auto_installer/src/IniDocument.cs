@@ -12,24 +12,33 @@ namespace CyberpunkVRPort.AutoInstaller
 
         internal static IniDocument Load(string path)
         {
+            using (var stream = File.OpenRead(path)) return Load(stream);
+        }
+
+        internal static IniDocument Load(Stream stream)
+        {
             var document = new IniDocument();
             var section = string.Empty;
-            foreach (var rawLine in File.ReadAllLines(path, Encoding.UTF8))
+            using (var reader = new StreamReader(stream, Encoding.UTF8, true, 4096, true))
             {
-                var line = rawLine.Trim();
-                if (line.Length == 0 || line.StartsWith("#") || line.StartsWith(";")) continue;
-                if (line.StartsWith("[") && line.EndsWith("]") && line.Length > 2)
+                string rawLine;
+                while ((rawLine = reader.ReadLine()) != null)
                 {
-                    section = line.Substring(1, line.Length - 2).Trim();
-                    document.EnsureSection(section);
-                    continue;
-                }
+                    var line = rawLine.Trim();
+                    if (line.Length == 0 || line.StartsWith("#") || line.StartsWith(";")) continue;
+                    if (line.StartsWith("[") && line.EndsWith("]") && line.Length > 2)
+                    {
+                        section = line.Substring(1, line.Length - 2).Trim();
+                        document.EnsureSection(section);
+                        continue;
+                    }
 
-                var equals = line.IndexOf('=');
-                if (equals <= 0) continue;
-                document.EnsureSection(section).Add(new KeyValuePair<string, string>(
-                    line.Substring(0, equals).Trim(),
-                    line.Substring(equals + 1).Trim().Replace("\\n", Environment.NewLine)));
+                    var equals = line.IndexOf('=');
+                    if (equals <= 0) continue;
+                    document.EnsureSection(section).Add(new KeyValuePair<string, string>(
+                        line.Substring(0, equals).Trim(),
+                        line.Substring(equals + 1).Trim().Replace("\\n", Environment.NewLine)));
+                }
             }
             return document;
         }

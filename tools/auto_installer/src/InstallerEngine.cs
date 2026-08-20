@@ -3,49 +3,63 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace CyberpunkVRPort.AutoInstaller
 {
     internal sealed class InstallerEngine
     {
-        private readonly string packageRoot;
-        private readonly string payloadRoot;
-        private readonly List<string> files;
-        private readonly List<string> removeFiles;
-        private readonly List<string> removeDirectories;
+        private const string StateRelativePath = @"bin\x64\CyberpunkVRPort-Auto-Installer.state.ini";
+        private const string BackupRelativeDirectory = @"bin\x64\CyberpunkVRPort-Auto-Installer.backups";
+        private readonly List<string> payloadFilesEver;
+        private readonly List<string> generatedFiles;
+        private readonly List<string> ownedDirectoriesEver;
 
-        internal InstallerEngine(string packageRoot, IniDocument ini)
+        internal InstallerEngine(IniDocument ini)
         {
-            this.packageRoot = Path.GetFullPath(packageRoot);
-            payloadRoot = Path.Combine(this.packageRoot, ini.Get("Installer", "PayloadDirectory", "Cyberpunk 2077"));
-            files = ReadPaths(ini, "Files");
-            removeFiles = ReadPaths(ini, "RemoveFiles");
-            removeDirectories = ReadPaths(ini, "RemoveDirectories");
-            if (files.Count == 0) throw new InvalidDataException("The [Files] section is empty.");
+            payloadFilesEver = ReadPaths(ini, "PayloadFilesEver");
+            generatedFiles = ReadPaths(ini, "GeneratedFiles");
+            ownedDirectoriesEver = ReadPaths(ini, "OwnedDirectoriesEver");
+            if (payloadFilesEver.Count == 0)
+                throw new InvalidDataException("The embedded [PayloadFilesEver] catalog is empty.");
         }
 
-        internal bool PayloadExists => Directory.Exists(payloadRoot);
-
-        internal int Install(string gameRoot)
+        internal int Install(string payloadRoot, bool directRootLayout, string gameRoot, Action<string> progress = null)
         {
             AssertGameClosed();
             var root = NormalizeGameRoot(gameRoot);
-            var copies = new List<KeyValuePair<string, string>>();
-            foreach (var relative in files)
+            var normalizedPayloadRoot = Path.GetFullPath(payloadRoot);
+            if (!Directory.Exists(normalizedPayloadRoot))
+                throw new DirectoryNotFoundException("Package payload is missing: " + normalizedPayloadRoot);
+            var copies = new List<InstallCopy>();
+            foreach (var source in EnumerateFilesSafely(normalizedPayloadRoot, normalizedPayloadRoot))
             {
-                var source = ResolveUnder(payloadRoot, relative);
+                AssertNoReparsePoint(normalizedPayloadRoot, source);
+                var relative = source.Substring(normalizedPayloadRoot.TrimEnd(Path.DirectorySeparatorChar).Length)
+                    .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (directRootLayout && !PackageSource.IsGamePayloadPath(relative)) continue;
                 var destination = ResolveUnder(root, relative);
-                if (!File.Exists(source)) throw new FileNotFoundException("Payload file is missing: " + relative, source);
-                AssertNoReparsePoint(payloadRoot, source);
                 AssertNoReparsePoint(root, destination);
-                copies.Add(new KeyValuePair<string, string>(source, destination));
+                copies.Add(new InstallCopy(source, destination, relative));
             }
+            if (copies.Count == 0) throw new InvalidDataException("The selected package contains no payload files.");
 
+            var stateExists = StateExists(root);
+            var state = LoadState(root);
+            var cleanupPaths = stateExists ? state.InstalledFilesEver : payloadFilesEver;
+            PreservePreexistingFiles(root, copies, state, cleanupPaths);
+            foreach (var copy in copies) state.AddInstalledFile(copy.RelativePath);
+            SaveState(root, state);
+
+            progress?.Invoke("Cleaning");
+            PreInstallCleanup(root, cleanupPaths, !stateExists);
+            progress?.Invoke("Installing");
             foreach (var copy in copies)
             {
-                var parent = Path.GetDirectoryName(copy.Value);
+                var parent = Path.GetDirectoryName(copy.Destination);
                 if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
-                File.Copy(copy.Key, copy.Value, true);
+                File.Copy(copy.Source, copy.Destination, true);
             }
             return copies.Count;
         }
@@ -54,24 +68,173 @@ namespace CyberpunkVRPort.AutoInstaller
         {
             AssertGameClosed();
             var root = NormalizeGameRoot(gameRoot);
+            var stateExists = StateExists(root);
+            var state = LoadState(root);
+            ValidateBackups(root, state);
+            var removed = DeleteListedFiles(root, stateExists
+                ? state.InstalledFilesEver
+                : payloadFilesEver.Concat(generatedFiles));
+            if (!stateExists)
+            {
+                foreach (var relative in ownedDirectoriesEver.OrderByDescending(path => path.Length))
+                {
+                    var target = ResolveUnder(root, relative);
+                    AssertNoReparsePoint(root, target);
+                    if (!Directory.Exists(target)) continue;
+                    Directory.Delete(target, true);
+                    removed++;
+                    RemoveEmptyParents(Path.GetDirectoryName(target), root);
+                }
+            }
+            RestoreBackups(root, state);
+            if (stateExists) DeleteState(root);
+            return removed;
+        }
+
+        private void PreInstallCleanup(string root, IEnumerable<string> cleanupPaths, bool useEmbeddedFallback)
+        {
+            DeleteListedFiles(root, cleanupPaths);
+            if (!useEmbeddedFallback) return;
+            foreach (var relative in ownedDirectoriesEver.OrderByDescending(path => path.Length))
+            {
+                var target = ResolveUnder(root, relative);
+                AssertNoReparsePoint(root, target);
+                if (Directory.Exists(target) && !Directory.EnumerateFileSystemEntries(target).Any())
+                {
+                    Directory.Delete(target);
+                    RemoveEmptyParents(Path.GetDirectoryName(target), root);
+                }
+            }
+        }
+
+        private static void PreservePreexistingFiles(string root, IEnumerable<InstallCopy> copies,
+            InstallerState state, IEnumerable<string> knownOwnedPaths)
+        {
+            var knownOwned = new HashSet<string>(knownOwnedPaths, StringComparer.OrdinalIgnoreCase);
+            foreach (var copy in copies)
+            {
+                if (!File.Exists(copy.Destination) || knownOwned.Contains(copy.RelativePath) ||
+                    state.HasBackup(copy.RelativePath)) continue;
+
+                AssertNoReparsePoint(root, copy.Destination);
+                var backupName = GetBackupName(copy.RelativePath);
+                var backupRoot = ResolveUnder(root, BackupRelativeDirectory);
+                var backupPath = ResolveUnder(backupRoot, backupName);
+                AssertNoReparsePoint(root, backupPath);
+                Directory.CreateDirectory(backupRoot);
+                if (!File.Exists(backupPath)) File.Copy(copy.Destination, backupPath, false);
+                state.AddBackup(copy.RelativePath, backupName);
+            }
+        }
+
+        private static void ValidateBackups(string root, InstallerState state)
+        {
+            var backupRoot = ResolveUnder(root, BackupRelativeDirectory);
+            foreach (var backup in state.Backups)
+            {
+                ResolveUnder(root, backup.Key);
+                var source = ResolveUnder(backupRoot, backup.Value);
+                AssertNoReparsePoint(root, source);
+                if (!File.Exists(source))
+                    throw new FileNotFoundException("A preserved pre-install file is missing: " + source, source);
+            }
+        }
+
+        private static void RestoreBackups(string root, InstallerState state)
+        {
+            var backupRoot = ResolveUnder(root, BackupRelativeDirectory);
+            foreach (var backup in state.Backups)
+            {
+                var source = ResolveUnder(backupRoot, backup.Value);
+                var destination = ResolveUnder(root, backup.Key);
+                AssertNoReparsePoint(root, destination);
+                var parent = Path.GetDirectoryName(destination);
+                if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+                File.Copy(source, destination, true);
+            }
+        }
+
+        private static InstallerState LoadState(string root)
+        {
+            var path = ResolveUnder(root, StateRelativePath);
+            AssertNoReparsePoint(root, path);
+            if (!File.Exists(path)) return new InstallerState();
+            var ini = IniDocument.Load(path);
+            var state = new InstallerState();
+            foreach (var entry in ini.GetSection("InstalledFilesEver")) state.AddInstalledFile(entry.Value);
+            foreach (var entry in ini.GetSection("Backups"))
+            {
+                var separator = entry.Value.IndexOf('|');
+                if (separator <= 0 || separator == entry.Value.Length - 1)
+                    throw new InvalidDataException("Invalid Auto Installer backup entry: " + entry.Value);
+                state.AddBackup(entry.Value.Substring(0, separator), entry.Value.Substring(separator + 1));
+            }
+            return state;
+        }
+
+        private static bool StateExists(string root)
+        {
+            var path = ResolveUnder(root, StateRelativePath);
+            AssertNoReparsePoint(root, path);
+            return File.Exists(path);
+        }
+
+        private static void SaveState(string root, InstallerState state)
+        {
+            var path = ResolveUnder(root, StateRelativePath);
+            AssertNoReparsePoint(root, path);
+            var parent = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+            var temporary = path + ".tmp";
+            var builder = new StringBuilder();
+            builder.AppendLine("; Generated by CyberpunkVRPort Auto Installer. Do not edit paths manually.");
+            builder.AppendLine("[InstalledFilesEver]");
+            var index = 1;
+            foreach (var relative in state.InstalledFilesEver.OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
+                builder.AppendLine(index++.ToString("D4") + "=" + NormalizeStatePath(relative));
+            builder.AppendLine();
+            builder.AppendLine("[Backups]");
+            index = 1;
+            foreach (var backup in state.Backups.OrderBy(value => value.Key, StringComparer.OrdinalIgnoreCase))
+                builder.AppendLine(index++.ToString("D4") + "=" + NormalizeStatePath(backup.Key) + "|" + backup.Value);
+            File.WriteAllText(temporary, builder.ToString(), new UTF8Encoding(false));
+            if (File.Exists(path)) File.Replace(temporary, path, null);
+            else File.Move(temporary, path);
+        }
+
+        private static void DeleteState(string root)
+        {
+            var statePath = ResolveUnder(root, StateRelativePath);
+            if (File.Exists(statePath)) File.Delete(statePath);
+            var backupRoot = ResolveUnder(root, BackupRelativeDirectory);
+            AssertNoReparsePoint(root, backupRoot);
+            if (Directory.Exists(backupRoot)) Directory.Delete(backupRoot, true);
+        }
+
+        private static string GetBackupName(string relative)
+        {
+            using (var sha = SHA256.Create())
+            {
+                var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(NormalizeStatePath(relative).ToLowerInvariant()));
+                return string.Concat(bytes.Select(value => value.ToString("x2"))) + ".bak";
+            }
+        }
+
+        private static string NormalizeStatePath(string relative)
+        {
+            return relative.Replace(Path.DirectorySeparatorChar, '/').Replace(Path.AltDirectorySeparatorChar, '/');
+        }
+
+        private static int DeleteListedFiles(string root, IEnumerable<string> paths)
+        {
             var removed = 0;
-            foreach (var relative in files.Concat(removeFiles).Distinct(StringComparer.OrdinalIgnoreCase))
+            foreach (var relative in paths.Distinct(StringComparer.OrdinalIgnoreCase))
             {
                 var target = ResolveUnder(root, relative);
                 AssertNoReparsePoint(root, target);
                 if (!File.Exists(target)) continue;
                 File.SetAttributes(target, FileAttributes.Normal);
                 File.Delete(target);
-                removed++;
-                RemoveEmptyParents(Path.GetDirectoryName(target), root);
-            }
-
-            foreach (var relative in removeDirectories.OrderByDescending(path => path.Length))
-            {
-                var target = ResolveUnder(root, relative);
-                AssertNoReparsePoint(root, target);
-                if (!Directory.Exists(target)) continue;
-                Directory.Delete(target, true);
                 removed++;
                 RemoveEmptyParents(Path.GetDirectoryName(target), root);
             }
@@ -89,6 +252,21 @@ namespace CyberpunkVRPort.AutoInstaller
             return paths;
         }
 
+        private static IEnumerable<string> EnumerateFilesSafely(string root, string directory)
+        {
+            AssertNoReparsePoint(root, directory);
+            foreach (var file in Directory.EnumerateFiles(directory))
+            {
+                AssertNoReparsePoint(root, file);
+                yield return file;
+            }
+            foreach (var child in Directory.EnumerateDirectories(directory))
+            {
+                AssertNoReparsePoint(root, child);
+                foreach (var file in EnumerateFilesSafely(root, child)) yield return file;
+            }
+        }
+
         private static string NormalizeGameRoot(string gameRoot)
         {
             var root = Path.GetFullPath(gameRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -96,7 +274,7 @@ namespace CyberpunkVRPort.AutoInstaller
             return root;
         }
 
-        private static string ResolveUnder(string root, string relative)
+        internal static string ResolveUnder(string root, string relative)
         {
             if (string.IsNullOrWhiteSpace(relative) || Path.IsPathRooted(relative))
                 throw new InvalidDataException("Unsafe relative path: " + relative);
@@ -108,7 +286,7 @@ namespace CyberpunkVRPort.AutoInstaller
             return target;
         }
 
-        private static void AssertNoReparsePoint(string root, string target)
+        internal static void AssertNoReparsePoint(string root, string target)
         {
             var normalizedRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             var current = normalizedRoot;
@@ -132,10 +310,54 @@ namespace CyberpunkVRPort.AutoInstaller
             }
         }
 
-        private static void AssertGameClosed()
+        internal static void AssertGameClosed()
         {
             if (Process.GetProcessesByName("Cyberpunk2077").Length > 0)
                 throw new InvalidOperationException("Cyberpunk2077.exe is running.");
+        }
+
+        private sealed class InstallCopy
+        {
+            internal string Source { get; private set; }
+            internal string Destination { get; private set; }
+            internal string RelativePath { get; private set; }
+
+            internal InstallCopy(string source, string destination, string relativePath)
+            {
+                Source = source;
+                Destination = destination;
+                RelativePath = relativePath.Replace('/', Path.DirectorySeparatorChar);
+            }
+        }
+
+        private sealed class InstallerState
+        {
+            private readonly List<string> installedFilesEver = new List<string>();
+            private readonly List<KeyValuePair<string, string>> backups = new List<KeyValuePair<string, string>>();
+
+            internal IReadOnlyList<string> InstalledFilesEver { get { return installedFilesEver; } }
+            internal IReadOnlyList<KeyValuePair<string, string>> Backups { get { return backups; } }
+
+            internal void AddInstalledFile(string relative)
+            {
+                var normalized = relative.Trim().Replace('/', Path.DirectorySeparatorChar);
+                if (normalized.Length == 0 || installedFilesEver.Contains(normalized, StringComparer.OrdinalIgnoreCase)) return;
+                installedFilesEver.Add(normalized);
+            }
+
+            internal bool HasBackup(string relative)
+            {
+                return backups.Any(value => value.Key.Equals(relative, StringComparison.OrdinalIgnoreCase));
+            }
+
+            internal void AddBackup(string relative, string backupName)
+            {
+                var normalized = relative.Trim().Replace('/', Path.DirectorySeparatorChar);
+                if (normalized.Length == 0 || Path.GetFileName(backupName) != backupName ||
+                    !backupName.EndsWith(".bak", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Invalid Auto Installer state path.");
+                if (!HasBackup(normalized)) backups.Add(new KeyValuePair<string, string>(normalized, backupName));
+            }
         }
     }
 }

@@ -7,18 +7,26 @@
 # Usage:
 #   pwsh scripts\build_dist.ps1
 #   pwsh scripts\build_dist.ps1 -Version 0.1.1 -Zip
+#   pwsh scripts\build_dist.ps1 -AutoInstallerOnly
 
 param(
     [string]$Version = "0.1.0",
     [string]$BuildDir = "build",
     [switch]$Zip,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$AutoInstallerOnly
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $Out      = Join-Path $RepoRoot "dist\CyberpunkVRPort-$Version"
 $Payload  = Join-Path $Out "Cyberpunk 2077"
+$DistRoot = Join-Path $RepoRoot "dist"
+$InstallerProject = Join-Path $RepoRoot "tools\auto_installer\CyberpunkVRPort.AutoInstaller.csproj"
+$InstallerCatalog = Join-Path $RepoRoot "tools\auto_installer\CyberpunkVRPort-Auto-Installer.ini"
+$InstallerBuild = Join-Path $RepoRoot "tools\auto_installer\bin\Release\CyberpunkVRPort-Auto-Installer.exe"
+$InstallerDist = Join-Path $DistRoot "CyberpunkVRPort-Auto-Installer.exe"
+$InstallerDevBat = Join-Path $DistRoot "CyberpunkVRPort-Auto-Installer-Dev.bat"
 
 # Folders that exist for development and have no business in a tester's game.
 $SkipMods  = @("CyberpunkVRPort_WorldMapDiag")
@@ -44,6 +52,56 @@ function Copy-Tree($src, $dst) {
 function Need($p, $what) {
     if (-not (Test-Path -LiteralPath $p)) { throw "$what not found: $p" }
     return $p
+}
+
+function Find-MSBuild {
+    $command = Get-Command msbuild -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path -LiteralPath $vswhere) {
+        $found = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" |
+            Select-Object -First 1
+        if ($found) { return $found }
+    }
+    throw "MSBuild.exe was not found. Install Visual Studio Build Tools with MSBuild."
+}
+
+function Build-AutoInstaller {
+    $msbuild = Find-MSBuild
+    & $msbuild $InstallerProject /target:Build /property:Configuration=Release /property:Platform=AnyCPU /nologo
+    if ($LASTEXITCODE -ne 0) { throw "Auto Installer build failed with exit code $LASTEXITCODE" }
+    New-Item -ItemType Directory -Path $DistRoot -Force | Out-Null
+    Copy-Item -LiteralPath (Need $InstallerBuild "CyberpunkVRPort-Auto-Installer.exe") -Destination $InstallerDist -Force
+    $devLauncher = @'
+@echo off
+start "" "%~dp0CyberpunkVRPort-Auto-Installer.exe" --dev
+exit /b
+'@
+    Set-Content -LiteralPath $InstallerDevBat -Value $devLauncher -Encoding ascii
+}
+
+function Get-IniSectionValues([string]$content, [string]$sectionName) {
+    $match = [regex]::Match($content, "(?ms)^\[$([regex]::Escape($sectionName))\]\s*\r?\n(?<body>.*?)(?=^\[|\z)")
+    if (-not $match.Success) { return @() }
+    $values = foreach ($line in ($match.Groups['body'].Value -split '\r?\n')) {
+        if ($line -match '^\s*[^;#=]+=(?<value>.+?)\s*$') { $Matches['value'].Trim() }
+    }
+    return @($values)
+}
+
+function Set-IniSectionValues([string]$content, [string]$sectionName, [string[]]$values) {
+    $lines = for ($i = 0; $i -lt $values.Count; $i++) { "{0:D4}={1}" -f ($i + 1), $values[$i] }
+    $replacement = "[$sectionName]`n" + ($lines -join "`n") + "`n"
+    $pattern = "(?ms)^\[$([regex]::Escape($sectionName))\].*?(?=^\[|\z)"
+    if ([regex]::IsMatch($content, $pattern)) { return [regex]::Replace($content, $pattern, $replacement) }
+    return $content.TrimEnd() + "`n`n" + $replacement
+}
+
+if ($AutoInstallerOnly) {
+    Build-AutoInstaller
+    Write-Host "dist\CyberpunkVRPort-Auto-Installer.exe"
+    Write-Host "dist\CyberpunkVRPort-Auto-Installer-Dev.bat"
+    return
 }
 
 if (Test-Path $Out) {
@@ -108,7 +166,7 @@ foreach ($a in @("cyberpunkvrport.archive","VRCigarette.archive.xl")) {
     else { Write-Host "[!] $a is not in the repo -- run sync_assets.ps1 first" }
 }
 
-# ---- Vortex FOMOD + standalone Auto Installer -----------------------------------------------
+# ---- Vortex FOMOD ---------------------------------------------------------------------------
 $fomodDirectory = Join-Path $Out "fomod"
 New-Item -ItemType Directory -Path $fomodDirectory -Force | Out-Null
 
@@ -133,14 +191,19 @@ $fomodInfo = @"
 "@
 Set-Content -LiteralPath (Join-Path $fomodDirectory "info.xml") -Value $fomodInfo -Encoding utf8
 
-$installerBuild = Join-Path $RepoRoot "tools\auto_installer\bin\Release\CyberpunkVRPort-Auto-Installer.exe"
-Copy-Item -LiteralPath (Need $installerBuild "CyberpunkVRPort-Auto-Installer.exe") -Destination $Out
-
-$installerIniTemplate = Need (Join-Path $RepoRoot "tools\auto_installer\CyberpunkVRPort-Auto-Installer.ini") "Auto Installer INI template"
-$installerIni = Get-Content -LiteralPath $installerIniTemplate -Raw
+# ---- cumulative embedded Auto Installer catalog ---------------------------------------------
+$installerIni = Get-Content -LiteralPath (Need $InstallerCatalog "Auto Installer embedded INI") -Raw
 $payloadPrefix = $Payload.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 $payloadFiles = Get-ChildItem -LiteralPath $Payload -Recurse -File | Sort-Object FullName
-$ownedDirectories = @(
+$currentPayloadFiles = @($payloadFiles | ForEach-Object {
+    $_.FullName.Substring($payloadPrefix.Length).Replace('\', '/')
+})
+$payloadFilesEver = @(
+    (Get-IniSectionValues $installerIni "PayloadFilesEver")
+    $currentPayloadFiles
+) | Sort-Object -Unique
+
+$currentOwnedDirectories = @(
     "red4ext/plugins/CyberpunkVR_Stereo"
     "red4ext/plugins/CyberpunkVR_Hands"
     "r6/tweaks/vrcigarette"
@@ -152,22 +215,18 @@ foreach ($parent in @(
     $parentPath = Join-Path $Payload $parent
     if (-not (Test-Path -LiteralPath $parentPath -PathType Container)) { continue }
     foreach ($directory in (Get-ChildItem -LiteralPath $parentPath -Directory -Filter "CyberpunkVRPort_*")) {
-        $ownedDirectories += $directory.FullName.Substring($payloadPrefix.Length).Replace('\', '/')
+        $currentOwnedDirectories += $directory.FullName.Substring($payloadPrefix.Length).Replace('\', '/')
     }
 }
-$ownedDirectories = $ownedDirectories | Sort-Object -Unique
-$ownedDirectoryLines = for ($i = 0; $i -lt $ownedDirectories.Count; $i++) {
-    "{0:D4}={1}" -f ($i + 1), $ownedDirectories[$i]
-}
-$ownedDirectorySection = "[RemoveDirectories]`r`n" + ($ownedDirectoryLines -join "`r`n") + "`r`n`r`n"
-$installerIni = [regex]::Replace($installerIni, '(?ms)^\[RemoveDirectories\].*?(?=^\[|\z)', $ownedDirectorySection)
-$fileLines = for ($i = 0; $i -lt $payloadFiles.Count; $i++) {
-    $relative = $payloadFiles[$i].FullName.Substring($payloadPrefix.Length).Replace('\', '/')
-    "{0:D4}={1}" -f ($i + 1), $relative
-}
-$fileSection = "[Files]`r`n" + ($fileLines -join "`r`n") + "`r`n"
-$installerIni = [regex]::Replace($installerIni, '(?ms)^\[Files\].*\z', $fileSection)
-Set-Content -LiteralPath (Join-Path $Out "CyberpunkVRPort-Auto-Installer.ini") -Value $installerIni -Encoding utf8
+$ownedDirectoriesEver = @(
+    (Get-IniSectionValues $installerIni "OwnedDirectoriesEver")
+    $currentOwnedDirectories
+) | Sort-Object -Unique
+$installerIni = Set-IniSectionValues $installerIni "OwnedDirectoriesEver" $ownedDirectoriesEver
+$installerIni = Set-IniSectionValues $installerIni "PayloadFilesEver" $payloadFilesEver
+$installerIni = $installerIni.Replace("`r`n", "`n").TrimEnd() + "`n"
+Set-Content -LiteralPath $InstallerCatalog -Value $installerIni -Encoding utf8 -NoNewline
+Build-AutoInstaller
 
 # ---- the OpenXR probe is NOT packaged ---------------------------------------------------------
 # It stays in tools\xr_probe\ and goes to a tester by hand, when there is something to measure.
@@ -183,14 +242,14 @@ CyberpunkVRPort $Version
 
 INSTALL
     Auto Installer:
-        Extract the archive, then run CyberpunkVRPort-Auto-Installer.exe and select Install.
+        Download CyberpunkVRPort-Auto-Installer.exe from the same GitHub Release and select Install.
 
     Vortex:
         Add the original archive to Vortex and install it normally.
 
 UNINSTALL
     Auto Installer:
-        Run CyberpunkVRPort-Auto-Installer.exe and select Uninstall.
+        Run CyberpunkVRPort-Auto-Installer.exe downloaded from GitHub and select Uninstall.
 
     Vortex:
         Remove the mod from Vortex.
