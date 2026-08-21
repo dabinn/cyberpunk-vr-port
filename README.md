@@ -47,6 +47,8 @@ For details and downloads, see [Cyberpunk VR Port Auto Installer](https://github
 
 If you prefer to manage all your mods with Vortex, the Tofu Express archive layout has also been adjusted so Vortex can correctly identify the files to install. Simply drag the ZIP file into Vortex to install it; Vortex will also remove all installed files correctly when uninstalling the mod.
 
+> **Note:** Vortex installation is supported starting with Tofu Express 3 (TE3).
+
 ## Controller Setup
 
 Press **F10**, open **Controls**, and adjust the options to your preference.

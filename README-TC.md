@@ -43,6 +43,8 @@
 ### Vortex Mod管理器支援
 如果你偏好使用Vortex來管理所有Mod，Tofu Express版也對壓縮包的檔案結構進行了微調，讓Vortex就能夠正確辨識需要安裝的檔案。只要將zip檔拖入Vortex即可完成安裝，並且在反安裝時能夠正確清除所有檔案。
 
+> **註：** 從 Tofu Express 3（TE3）開始支援 Vortex 安裝。
+
 
 
 ## 控制器設定
