@@ -2,63 +2,46 @@
 
 # CyberpunkVR Port - Tofu Express X
 
-**Tofu Express X** is an enhanced release of CyberpunkVR based on the original work by [dariulone](https://github.com/dariulone). It packages tested fixes and improvements from this fork that are not yet available in the upstream release.
+**Tofu Express X** is an enhanced version of CyberpunkVR Port. Its main goal is to make the whole of *Cyberpunk 2077* playable entirely in VR as soon as possible, without VR issues forcing players back to flat-screen mode, while continually polishing controls, visuals, and the overall experience.
 
-This release is based on upstream **CyberpunkVR v0.1.1** and focuses on making weapon aiming and VR controller input more stable, accurate, and comfortable to use.
+The original CyberpunkVR Port by [dariulone](https://github.com/dariulone) is the best *Cyberpunk 2077* VR mod available today. It offers excellent stereo rendering and performance, backed by a strong technical foundation with plenty of room to grow. It is well worth helping maintain and improve, and I will continue sharing improvements from Tofu Express X with the original author so that more players can benefit.
 
-### Improvements in Tofu Express 2
+## Support for Every Control Style
 
-- **The weapon laser dot no longer jumps when entering ADS.** Your aim now stays consistent when switching between hip fire and ADS, including when using high-magnification sniper scopes.
-- **The laser dot is much more stable during fast head turns.** Long trails and multiple separated dots have been greatly reduced, making the indicator easier to follow during combat.
-- **Reflex reticles and sniper-scope crosshairs now stay aligned with the laser dot.** ADS zoom no longer causes the weapon sight and the actual aiming direction to drift apart.
-- **Non-VRIK ADS aiming is more predictable.** Raising the weapon into ADS now keeps it close to the point you were aiming at before the animation started. This also lays the groundwork for improving the head-aiming—or **Gun-Face**—mode in the next release. Some players simply prefer aiming with their face instead of waving VR controllers around.
+The mod is not limited to VR controllers. If you prefer a gamepad or even keyboard and mouse, you can choose whichever control scheme suits you best.
 
-Under the hood, the weapon, sight, ADS zoom, and aiming-indicator paths now use more consistent camera and timing data. The practical result is simple: **what you see through the sight is much closer to where the weapon is actually aiming.**
+## VR Controller Improvements
 
-### Also includes everything from [controller-enhancements](https://github.com/dabinn/cyberpunk-vr-port/releases/download/v0.1.1-controller-enhancements/CyberpunkVRPort-0.1.1-controller-enhancements.zip)
-
-This release includes all changes from the previous **controller-enhancements** release:
-
-- **More flexible controller chords.** Choose L3, R3, or the right thumbrest as the chord activator, depending on your controller and preference.
-- **Complete Xbox controller button mapping through VR controllers.** Every Xbox controller button is now supported, filling in the inputs that were missing from the original mod.
-- **Optional controller shortcuts for VR recentering and the F10 menu.**
-- **More reliable L3/R3 behavior.** Normal thumbstick clicks remain usable during gameplay, while accidental actions in game menus are reduced.
-- **Added a toggle for full-stick sprint and crouch.** The original mod always enables sprint when the left stick is pushed fully forward and crouch when the right stick is pushed fully down. This behavior can now be enabled or disabled from the F10 menu.
-- **Improved right-hand grip-button routing.** It operates immersive weapon holsters while your hand is inside a holster zone and works as RB everywhere else.
-- **Safer vehicle controls.** Holster gestures are disabled while driving to prevent accidental weapon actions.
-- **Added an optional vehicle-only trigger/grip swap.** This keeps firing on the right trigger, consistent with on-foot combat, while the analog VR grip buttons control acceleration and braking. Xbox controller input is not affected.
-- **Fixed vertical camera control.** Turning off **Disable Mouse Y** now correctly restores mouse and right-stick vertical look.
-
-
-![New controller settings in the F10 menu](images/v0.1.1-controller-enhancements.png)
-
-- **RB now works normally**, so you can shoot while driving.
-- RB and the original **visual holsters** still work together: squeeze Right
-  Grip inside a holster zone to use it, or anywhere else for RB. Visual holsters
-  are temporarily disabled in vehicles so you cannot put your weapon away by
-  accident.
-- An optional driving layout automatically swaps Triggers and Grips, keeping
-  Fire on Right Trigger while the analog grips control brake and accelerator.
-- Chord controls provide every standard Xbox controller input, plus VR Recenter
-  and the F10 menu—no keyboard required. Choose L3, R3, or a Virtual
-  Desktop-style Right Thumbrest touch as the activation control.
-- **Disable Mouse Y (Pitch)** is fixed, so the right stick or mouse can freely
-  look up and down instead of being limited to horizontal turning.
-- Full-stick Sprint / Crouch is now optional. Turn both this option and Disable
-  Mouse Y (Pitch) off to use the full right-stick range for vertical look.
+- **Complete mapping for every Xbox controller button.** The inputs missing from the original mod have been added, so every Xbox controller button can now be accessed through VR controllers.
+- **Flexible chord activation.** Choose L3, R3, or the Right Thumbrest touch sensor according to your preference, while retaining the normal in-game functions of L3 and R3.
+- **Optional chord shortcuts for VR recentering and the F10 menu.** A keyboard is no longer required for these actions.
+- **Context-sensitive Right Grip routing.** This fixes the original mod's missing RB input: use immersive draw/holster actions in the shoulder or hip holster zones, or send RB everywhere else. Holster gestures are disabled while driving to prevent accidental activation.
+- **Automatic Trigger/Grip swapping while driving.** Right Trigger can remain Fire both on foot and in vehicles, while the analog VR grips control acceleration and braking. Physical Xbox controller input is unaffected.
 
 [Watch the vehicle combat demonstration on YouTube](https://www.youtube.com/watch?v=n6bx6JbvSgs)
 
+- **A toggle for full-stick sprint and crouch.** The original mod always sprints when the left stick is pushed fully forward and crouches when the right stick is pushed fully down. These behaviors can now be enabled or disabled from the F10 menu.
 
+## View Control and More Reliable Weapon Aiming
 
-### Controller setup
+- **Fixed vertical view control.** Turning off **Disable Mouse Y** now correctly restores vertical view control through the mouse or right stick, giving advanced players more control.
+- **Decoupled VR Head Aim** is designed for players who prefer a gamepad. Unlike traditional head aiming—sometimes jokingly called "gun-face"—head and body rotation are independent. You can freely aim the weapon with your head without changing the body's facing direction.
+- **Bullets now originate from the live muzzle.** Head Aim no longer uses the original "shooting with your eyes" calculation. Both Head Aim and Hand Aim now use the weapon's current muzzle position and direction, so the laser dot, weapon sight, and actual point of impact share the same firing reference.
+- **Hip-fire and ADS aim stay aligned.** Raising the weapon into ADS no longer shifts it away from the original aiming point. Even with VRIK disabled, the mod tries to preserve the aiming direction from before entering ADS.
+- **The external muzzle dot is more stable during fast head turns.** Long trails and multiple separated dots are greatly reduced.
+- **Weapon sights stay aligned with the external dot.** Reflex reticles, sniper-scope crosshairs, the external muzzle dot, and the magnified ADS view no longer drift apart as the head turns.
+- **ADS uses the right eye as the aiming eye.** When using Head Aim instead of Hand Aim, ADS automatically moves the weapon sight to the right eye rather than leaving it between both eyes. This is especially noticeable at high magnification.
+- **Physical body rotation has been rewritten.** The character now follows head rotation without the uncomfortable view jumps caused by the original implementation. It also preserves `45°` of free look to either side, so turning your head does not directly lock the body's forward movement direction.
 
-Press **F10**, open **Controls**, and choose the options you prefer. Settings are
-saved automatically.
+## Controller Setup
 
-#### Emulate D-pad and Additional Controls
+Press **F10**, open **Controls**, and adjust the options to your preference.
 
-Choose one **Chord Activation Method**. The default is the original L3 method:
+![New controller settings in the F10 menu](images/v0.1.1-controller-enhancements.png)
+
+### Emulate D-pad and Additional Controls
+
+Choose a **Chord Activation Method**. The original L3 method is selected by default:
 
 | Activation method | D-pad | Back / Select | VR Recenter | F10 Menu |
 |---|---|---|---|---|
@@ -66,30 +49,23 @@ Choose one **Chord Activation Method**. The default is the original L3 method:
 | Hold **R3** (right thumbstick click) | Left stick | Left Menu | X | Y |
 | Touch **Right Thumbrest** | Left stick | Left Menu | X | Y |
 
-Hold the activation control first, then move the stick or press the other button.
-L3 and R3 keep their normal functions.
+Hold the activation control first, then move the stick or press another button. L3 and R3 retain their normal functions.
 
-Left Menu sends Start; chord + Left Menu sends Back / Select. D-pad and Back /
-Select are always enabled. **Extra Chord Actions** adds Recenter and F10 Menu and
-is on by default.
+Left Menu sends Start; chord + Left Menu sends Back / Select. D-pad and Back / Select are always enabled. **Extra Chord Actions**, enabled by default, adds shortcuts for VR Recenter and the F10 menu.
 
-**Right Thumbrest** is the touch-sensitive area beside the face buttons where
-your thumb naturally rests, so it can activate the chord without a click. Only
-some VR controllers support it, including Quest 3; unsupported controllers fall
-back to L3.
+**Right Thumbrest** is the touch-sensitive area beside the face buttons where your thumb naturally rests. It can activate the chord without being clicked. Only some VR controllers support it, including Quest 3; use L3 if your controller does not.
 
-Keyboard shortcuts also remain available: **F7** for Recenter and **F10 /
-Insert** for the menu.
+The original keyboard shortcuts remain available: **F7** for VR Recenter and **F10 / Insert** for the menu.
 
-#### Right Grip and visual holsters
+### Right Grip and Visual Holsters
 
-- Grip inside a shoulder or hip holster zone: use the original visual holster.
-- Grip anywhere else: send **RB**.
-- In a vehicle: visual holsters are disabled.
+- Press Right Grip inside a shoulder or hip holster zone: draw or holster a weapon.
+- Press Right Grip anywhere else: send **RB**.
+- In a vehicle: holster gestures are disabled.
 
-#### Swap Triggers / Grips While Driving
+### Swap Triggers / Grips While Driving
 
-Enable this option to keep shooting on Right Trigger while driving:
+Enable this option to keep firing on Right Trigger while driving:
 
 | VR input | Emulated gamepad input |
 |---|---|
@@ -98,21 +74,18 @@ Enable this option to keep shooting on Right Trigger while driving:
 | Left analog Grip | LT |
 | Right analog Grip | RT |
 
-The analog grips become brake and accelerator. Only VR controller input is
-changed; physical gamepads are unaffected. This option is **off by default**.
+The analog grips become brake and accelerator. Only VR controller input is swapped; physical gamepads are unaffected. This option is **off by default**.
 
-#### Other options
+### Other Options
 
 | Setting | Behavior |
 |---|---|
-| **Disable Mouse Y (Pitch)** | On: HMD-only vertical look. Off: mouse and right-stick vertical look enabled. |
-| **Full-stick Sprint / Crouch** | Fully push the left stick forward to Sprint or the right stick down to Crouch. On by default. |
+| **Disable Mouse Y (Pitch)** | On: vertical view follows the HMD only. Off: mouse and right-stick vertical view are enabled. |
+| **Full-stick Sprint / Crouch** | Push the left stick fully forward to Sprint or the right stick fully down to Crouch. Enabled by default. |
 
-### Credits and upstream documentation
+## Original Author's Documentation
 
-All core VR functionality comes from
-[dariulone's CyberpunkVR Port](https://github.com/dariulone/cyberpunk-vr-port).
-The original README continues below. For controller mappings, use the guide above.
+The original author's README continues below.
 
 ---
 
