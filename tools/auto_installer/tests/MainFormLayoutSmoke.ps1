@@ -95,6 +95,36 @@ function Test-Layout([bool]$devMode) {
 Test-Layout $false
 Test-Layout $true
 
+$localPackageRoot = Join-Path ([IO.Path]::GetTempPath()) ("CyberpunkVRPort-local-package-test-" + [Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $localPackageRoot | Out-Null
+try {
+    $olderFolder = Join-Path $localPackageRoot "CyberpunkVR-older"
+    $newerZip = Join-Path $localPackageRoot "CyberpunkVR-newer.zip"
+    $ignoredFolder = Join-Path $localPackageRoot "unrelated-folder"
+    New-Item -ItemType Directory -Path $olderFolder | Out-Null
+    New-Item -ItemType Directory -Path $ignoredFolder | Out-Null
+    Set-Content -LiteralPath $newerZip -Value "zip-marker" -NoNewline
+    Set-Content -LiteralPath (Join-Path $localPackageRoot "ignored.txt") -Value "not-a-package" -NoNewline
+    [IO.Directory]::SetLastWriteTimeUtc($olderFolder, [DateTime]::UtcNow.AddMinutes(-2))
+    [IO.File]::SetLastWriteTimeUtc($newerZip, [DateTime]::UtcNow.AddMinutes(-1))
+    $findLocalPackages = $formType.GetMethod(
+        "FindLocalPackages", [Reflection.BindingFlags]"Static,NonPublic")
+    $packages = $findLocalPackages.Invoke($null, [object[]]@(
+        [string]$localPackageRoot, [string]'^CyberpunkVR-.*\.zip$'))
+    if ($packages.Count -ne 2 -or $packages[0].ToString() -ne "CyberpunkVR-newer.zip" -or
+        $packages[1].ToString() -ne "CyberpunkVR-older") {
+        throw "Local package discovery did not filter immediate folders and ZIPs by pattern in newest-first order."
+    }
+}
+finally {
+    $resolvedLocalPackageRoot = (Resolve-Path -LiteralPath $localPackageRoot).Path
+    $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+    if (-not $resolvedLocalPackageRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unsafe local package test cleanup target: $resolvedLocalPackageRoot"
+    }
+    Remove-Item -LiteralPath $resolvedLocalPackageRoot -Recurse -Force
+}
+
 $resumeForm = $constructor.Invoke([object[]]@($ini, $false,
     [string[]]@("--resume-install", "123", "C:\Games\Cyberpunk 2077", "zh-TW",
         "dariulone", "cyberpunk-vr-port")))
@@ -157,4 +187,4 @@ finally {
     $devForm.Dispose()
 }
 
-Write-Host "MainForm layout smoke test passed: layout, forks, resume state, and Installer query policy"
+Write-Host "MainForm layout smoke test passed: layout, local packages, forks, resume state, and Installer query policy"

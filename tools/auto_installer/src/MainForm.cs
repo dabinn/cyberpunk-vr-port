@@ -40,7 +40,7 @@ namespace CyberpunkVRPort.AutoInstaller
         private readonly Label localPackageLabel = new Label();
         private readonly Label gamePathLabel = new Label();
         private readonly TextBox gamePathBox = new TextBox();
-        private readonly TextBox localPathBox = new TextBox();
+        private readonly ComboBox localPathBox = new ComboBox();
         private readonly Button browseButton = new Button();
         private readonly Button refreshButton = new Button();
         private readonly Button localButton = new Button();
@@ -128,7 +128,7 @@ namespace CyberpunkVRPort.AutoInstaller
             forkBox.DropDownStyle = ComboBoxStyle.DropDownList;
             forkBox.SelectedIndexChanged += async (_, __) => await ForkChangedAsync();
             releaseBox.DropDownStyle = ComboBoxStyle.DropDownList;
-            localPathBox.ReadOnly = true;
+            localPathBox.DropDownStyle = ComboBoxStyle.DropDownList;
             localPathBox.Dock = DockStyle.Fill;
             gamePathBox.Dock = DockStyle.Fill;
 
@@ -141,7 +141,7 @@ namespace CyberpunkVRPort.AutoInstaller
             uninstallButton.MinimumSize = new Size(130, 38);
             browseButton.Click += BrowseGame;
             refreshButton.Click += async (_, __) => await LoadReleasesAsync(true, true);
-            localButton.Click += SelectLocalPackage;
+            localButton.Click += (_, __) => RefreshLocalPackages();
             installButton.Click += async (_, __) => await RunOperationAsync(true);
             uninstallButton.Click += async (_, __) => await RunOperationAsync(false);
             statusLabel.AutoSize = true;
@@ -226,6 +226,7 @@ namespace CyberpunkVRPort.AutoInstaller
             {
                 sourceBox.Items.AddRange(new object[] { "Online", "Local" });
                 sourceBox.SelectedIndex = 1;
+                RefreshLocalPackages();
             }
             controlsInitialized = true;
         }
@@ -294,7 +295,7 @@ namespace CyberpunkVRPort.AutoInstaller
             gamePathLabel.Text = T("GamePath", "Cyberpunk 2077 folder") + ":";
             browseButton.Text = T("Browse", "Browse...");
             refreshButton.Text = T("Refresh", "Refresh");
-            localButton.Text = T("SelectLocal", "Select folder or ZIP...");
+            localButton.Text = T("Refresh", "Refresh");
             installButton.Text = T("Install", "Install");
             uninstallButton.Text = T("Uninstall", "Uninstall");
             if (devMode)
@@ -319,7 +320,11 @@ namespace CyberpunkVRPort.AutoInstaller
                 SelectForkClient();
                 if (releases.Count == 0) await LoadReleasesAsync(false, false);
             }
-            else if (!IsOnline) SetStatus("DevMode", null, false);
+            else if (!IsOnline)
+            {
+                RefreshLocalPackages();
+                SetStatus("DevMode", null, false);
+            }
         }
 
         private async Task ForkChangedAsync()
@@ -412,7 +417,7 @@ namespace CyberpunkVRPort.AutoInstaller
                 ShowError(T("SelectRelease", "Select a release to install."));
                 return;
             }
-            if (install && !IsOnline && string.IsNullOrWhiteSpace(localPathBox.Text))
+            if (install && !IsOnline && !(localPathBox.SelectedItem is LocalPackageItem))
             {
                 ShowError(T("SelectPackage", "Select a local package folder or ZIP."));
                 return;
@@ -422,7 +427,7 @@ namespace CyberpunkVRPort.AutoInstaller
 
             var packageLabel = IsOnline
                 ? Convert.ToString(releaseBox.SelectedItem)
-                : Path.GetFileName(localPathBox.Text.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                : Convert.ToString(localPathBox.SelectedItem);
             var prompt = install
                 ? string.Format(T("ConfirmInstall", "Install {0} into the selected folder?"), packageLabel)
                 : T("ConfirmUninstall", "Uninstall from the selected folder?");
@@ -439,7 +444,7 @@ namespace CyberpunkVRPort.AutoInstaller
                 }
                 else
                 {
-                    var packagePath = localPathBox.Text;
+                    var packagePath = (localPathBox.SelectedItem as LocalPackageItem)?.FullPath;
                     if (IsOnline)
                     {
                         var release = (GitHubRelease)releaseBox.SelectedItem;
@@ -537,33 +542,38 @@ namespace CyberpunkVRPort.AutoInstaller
             }
         }
 
-        private void SelectLocalPackage(object sender, EventArgs eventArgs)
+        private void RefreshLocalPackages()
         {
-            var menu = new ContextMenuStrip();
-            menu.Items.Add(T("SelectLocalFolder", "Select package folder"), null, (_, __) => BrowseLocalFolder());
-            menu.Items.Add(T("SelectLocalZip", "Select package ZIP"), null, (_, __) => BrowseLocalZip());
-            menu.Show(localButton, new Point(0, localButton.Height));
+            var previousPath = (localPathBox.SelectedItem as LocalPackageItem)?.FullPath;
+            var zipPattern = ini.Get("Installer", "ReleaseZipPattern", "^CyberpunkVR-.*\\.zip$");
+            var packages = FindLocalPackages(executableDirectory, zipPattern);
+            localPathBox.Items.Clear();
+            localPathBox.Items.AddRange(packages.Cast<object>().ToArray());
+            var previous = packages.FirstOrDefault(package => package.FullPath.Equals(
+                previousPath, StringComparison.OrdinalIgnoreCase));
+            if (previous != null) localPathBox.SelectedItem = previous;
+            else if (packages.Count > 0) localPathBox.SelectedIndex = 0;
         }
 
-        private void BrowseLocalFolder()
+        private static List<LocalPackageItem> FindLocalPackages(string directory, string zipPattern)
         {
-            using (var dialog = new FolderBrowserDialog())
-            {
-                dialog.Description = T("SelectLocalFolder", "Select package folder");
-                dialog.SelectedPath = executableDirectory;
-                if (dialog.ShowDialog(this) == DialogResult.OK) localPathBox.Text = dialog.SelectedPath;
-            }
-        }
-
-        private void BrowseLocalZip()
-        {
-            using (var dialog = new OpenFileDialog())
-            {
-                dialog.Title = T("SelectLocalZip", "Select package ZIP");
-                dialog.Filter = "ZIP archive (*.zip)|*.zip";
-                dialog.InitialDirectory = executableDirectory;
-                if (dialog.ShowDialog(this) == DialogResult.OK) localPathBox.Text = dialog.FileName;
-            }
+            var pattern = new System.Text.RegularExpressions.Regex(zipPattern,
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            var packages = new List<LocalPackageItem>();
+            packages.AddRange(Directory.EnumerateDirectories(directory)
+                .Where(path =>
+                {
+                    var name = Path.GetFileName(path.TrimEnd(
+                        Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                    return pattern.IsMatch(name) || pattern.IsMatch(name + ".zip");
+                })
+                .Select(path => new LocalPackageItem(path, Directory.GetLastWriteTimeUtc(path))));
+            packages.AddRange(Directory.EnumerateFiles(directory, "*.zip")
+                .Where(path => pattern.IsMatch(Path.GetFileName(path)))
+                .Select(path => new LocalPackageItem(path, File.GetLastWriteTimeUtc(path))));
+            return packages.OrderByDescending(package => package.LastWriteTimeUtc)
+                .ThenBy(package => package.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         private void BrowseGame(object sender, EventArgs eventArgs)
@@ -625,6 +635,26 @@ namespace CyberpunkVRPort.AutoInstaller
                 InstallerLog.Write("ERROR Could not load DevForks: " + exception.Message);
             }
             return forks;
+        }
+
+        private sealed class LocalPackageItem
+        {
+            internal string FullPath { get; private set; }
+            internal string DisplayName { get; private set; }
+            internal DateTime LastWriteTimeUtc { get; private set; }
+
+            internal LocalPackageItem(string fullPath, DateTime lastWriteTimeUtc)
+            {
+                FullPath = Path.GetFullPath(fullPath);
+                DisplayName = Path.GetFileName(FullPath.TrimEnd(
+                    Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                LastWriteTimeUtc = lastWriteTimeUtc;
+            }
+
+            public override string ToString()
+            {
+                return DisplayName;
+            }
         }
 
         private static void AppendForks(List<DevForkDefinition> forks,
