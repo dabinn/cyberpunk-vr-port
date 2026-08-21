@@ -32,7 +32,16 @@
 
 
 
+## VR Mod安裝方式強化
+### Cyberpunk VR Port自動安裝工具
+(強烈推薦) 為了解決原版安裝/反安裝不易的問題，Tofu Express額外提供了獨立的 Cyberpunk VR Port 自動安裝工具，能夠一鍵完成下載安裝/反安裝！而且還不止是支援Tofu Express本身，還可以任意切換使用原版的 Cyberpunk VR Port 以及其它我目前所知道正在積極開發的其他分支，讓玩家能夠更方便自由切換嘗試不同的VR Mod版本。
 
+除此之外，安裝工具還提供了開發者模式，讓各位開發者也能夠更容易的測試本機的檔案。
+
+詳情及下載請參考 [Cyberpunk VR Port 自動安裝工具](https://github.com/dabinn/cyberpunk-vr-port/releases/tag/Cyberpunk-VR-Port-Auto-Installer)。
+
+### Vortex Mod管理器支援
+如果你偏好使用Vortex來管理所有Mod，Tofu Express版也對壓縮包的檔案結構進行了微調，讓Vortex就能夠正確辨識需要安裝的檔案。只要將zip檔拖入Vortex即可完成安裝，並且在反安裝時能夠正確清除所有檔案。
 
 
 

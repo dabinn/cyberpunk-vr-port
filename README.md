@@ -33,6 +33,20 @@ The mod is not limited to VR controllers. If you prefer a gamepad or even keyboa
 - **ADS uses the right eye as the aiming eye.** When using Head Aim instead of Hand Aim, ADS automatically moves the weapon sight to the right eye rather than leaving it between both eyes. This is especially noticeable at high magnification.
 - **Physical body rotation has been rewritten.** The character now follows head rotation without the uncomfortable view jumps caused by the original implementation. It also preserves `45°` of free look to either side, so turning your head does not directly lock the body's forward movement direction.
 
+## Improved VR Mod Installation
+
+### Cyberpunk VR Port Auto Installer
+
+**Highly recommended.** To make installation and removal easier than in the original mod, Tofu Express provides a standalone Cyberpunk VR Port Auto Installer that can download, install, or uninstall the mod with a single click. It supports not only Tofu Express, but also the original Cyberpunk VR Port and other actively developed forks known to me, making it easy to switch between and try different versions of the VR mod.
+
+The Auto Installer also includes a Developer Mode, making it easier for developers to test local files.
+
+For details and downloads, see [Cyberpunk VR Port Auto Installer](https://github.com/dabinn/cyberpunk-vr-port/releases/tag/Cyberpunk-VR-Port-Auto-Installer).
+
+### Vortex Mod Manager Support
+
+If you prefer to manage all your mods with Vortex, the Tofu Express archive layout has also been adjusted so Vortex can correctly identify the files to install. Simply drag the ZIP file into Vortex to install it; Vortex will also remove all installed files correctly when uninstalling the mod.
+
 ## Controller Setup
 
 Press **F10**, open **Controls**, and adjust the options to your preference.
