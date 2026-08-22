@@ -777,6 +777,7 @@ public:
 
     bool IsInitialized() const { return m_initialized; }
     bool IsSessionRunning() const { return m_sessionRunning.load(std::memory_order_relaxed); }
+    bool IsRightThumbrestAvailable() const { return m_rightThumbrestAvailable.load(std::memory_order_relaxed); }
 
 private:
     static DWORD WINAPI FrameThreadThunk(LPVOID param);
@@ -848,6 +849,8 @@ private:
     XrAction m_primaryButtonAction = XR_NULL_HANDLE;     // Bool, per hand (X / A)
     XrAction m_secondaryButtonAction = XR_NULL_HANDLE;   // Bool, per hand (Y / B)
     XrAction m_menuButtonAction = XR_NULL_HANDLE;        // Bool, left only on Touch
+    XrAction m_rightThumbrestAction = XR_NULL_HANDLE;    // Bool, Oculus Touch right thumbrest touch
+    std::atomic<bool> m_rightThumbrestAvailable{false};
     XrPath m_handPaths[2] = { XR_NULL_PATH, XR_NULL_PATH };
     XrSpace m_handSpaces[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
     // Latest controller snapshot, owned by the frame thread.
