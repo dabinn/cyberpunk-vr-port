@@ -15,8 +15,8 @@ bool WriteWeaponModelRotViaRightHand(uint8_t* boneBuf, int weaponIdx,
                                      const float* desiredWeaponModel,
                                      const float* weaponLocalOverride = nullptr);
 
-// Record the authored arm pose for this tick and compute eye-anchored hand/elbow targets from it.
-// A no-op unless the player is aiming under head aim or non-VRIK hand aim.
+// Record the authored arm pose for this tick and compute fixed-origin hand/elbow targets from it.
+// Head Aim applies in hip and ADS states; non-VRIK applies only to opt-in right-eye ADS alignment.
 void PrepareAimArmTargets(uint8_t* boneBuf);
 
 // Rotation-only two-bone solve onto the targets PrepareAimArmTargets computed. Runs after the weapon
