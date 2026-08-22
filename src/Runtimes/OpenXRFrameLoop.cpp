@@ -1258,6 +1258,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                     m_basePose.position = location.pose.position;
                     m_basePose.orientation = XrQuaternionf{0.0f, sinf(yaw*0.5f), 0.0f, cosf(yaw*0.5f)};
                     m_basePoseSet = true;
+                    m_recenterGeneration.fetch_add(1, std::memory_order_release);
                     baseReset = true;
                     Log("OpenXRManager: Base pose captured (yaw-only, %.1f deg).\n", yaw * 57.29578f);
                 }

@@ -46,8 +46,9 @@
 // cycle, so for one frame the view swings by the whole step. That is the camera drift this feature
 // was always reported to have.
 //
-// So the base is left alone -- recentring keeps working exactly as before -- and the cancellation is
-// done on our side, in the same frame, where the view is composed:
+// So the follower leaves the base alone and the cancellation is done on our side, in the same frame,
+// where the view is composed. An explicit recenter remains the sole owner allowed to replace that
+// base; once its capture generation advances, offsets belonging to the previous frame are cleared:
 //
 //     body   yaw = E            (engine's own, ours included: E = E0 + realign)
 //     view   yaw = E - realign  (PatchCamera, LocateCamera's head-offset recipe)
@@ -71,6 +72,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cmath>
+#include <mutex>
 
 extern void Log(const char* fmt, ...);
 
@@ -101,11 +103,13 @@ float WrapYawPi(float value) {
 // delayed or rejected delta cannot move the rendered frame ahead of the actual player entity.
 std::atomic<float> s_bodyYawPending{0.0f};
 std::atomic<float> s_bodyYawApplied{0.0f};
+std::mutex s_bodyYawStateMutex;
 bool s_followControllerActive = false;
 float s_lastHmdYaw = 0.0f;
 float s_unwrappedHmdYaw = 0.0f;
 bool s_lastEngineYawValid = false;
 float s_lastEngineYaw = 0.0f;
+uint32_t s_lastRecenterGeneration = UINT32_MAX;
 
 std::atomic<uint32_t> s_nativePairSeq{0};
 struct AtomicNativePair {
@@ -195,6 +199,21 @@ extern "C" __declspec(dllexport) int   CyberpunkVR_PlayerEntityValid = 0;
 
 namespace {
 
+// A requested recenter is not a frame boundary. Clear offsets only after OpenXR has captured the
+// new base and advanced its generation, so no state expressed in the old tracking frame survives.
+void ResetBodyYawStateForRecenterLocked() {
+    const uint32_t generation = OpenXRManager::Get().GetRecenterGeneration();
+    if (generation == s_lastRecenterGeneration) return;
+    s_lastRecenterGeneration = generation;
+    s_bodyYawPending.store(0.0f, std::memory_order_release);
+    s_bodyYawApplied.store(0.0f, std::memory_order_release);
+    s_followControllerActive = false;
+    s_lastEngineYawValid = false;
+    CyberpunkVR_BodyYawRealignRad = 0.0f;
+    CyberpunkVR_DebugBodyFollowOffsetDeg = 0.0f;
+    CyberpunkVR_DebugBodyFollowErrDeg = 0.0f;
+}
+
 // The HMD's yaw relative to the recenter base, radians, about the XR vertical (+Y).
 bool HeadYawRelBase(float* outYaw) {
     OpenXRHeadPose hp{};
@@ -206,7 +225,14 @@ bool HeadYawRelBase(float* outYaw) {
 
 }  // namespace
 
+extern "C" void BodyYawFollowSyncRecenter() {
+    std::lock_guard<std::mutex> lock(s_bodyYawStateMutex);
+    ResetBodyYawStateForRecenterLocked();
+}
+
 extern "C" void BodyYawFollowSetEnabled(int enabled) {
+    std::lock_guard<std::mutex> lock(s_bodyYawStateMutex);
+    ResetBodyYawStateForRecenterLocked();
     CyberpunkVR_BodyYawFollow = enabled ? 1 : 0;
     if (!enabled) {
         s_bodyYawPending.store(0.0f, std::memory_order_release);
@@ -230,6 +256,8 @@ extern "C" void BodyYawFollowSetEnabled(int enabled) {
 // world -- a direction cannot be judged against a rotating world.
 extern "C" float BodyYawFollowStep() {
     ++CyberpunkVR_DebugBodyFollowCalls;
+    std::lock_guard<std::mutex> lock(s_bodyYawStateMutex);
+    ResetBodyYawStateForRecenterLocked();
     if (!CyberpunkVR_BodyYawFollow) return 0.0f;
     float hmdYaw = 0.0f;
     if (!HeadYawRelBase(&hmdYaw)) return 0.0f;
@@ -285,23 +313,27 @@ extern "C" void BodyYawFollowTick(float engineZ, float engineW, const float* eng
     if (!enginePos) return;
     const float yaw = 2.0f * std::atan2(wz, ww);
 
-    if (s_lastEngineYawValid) {
-        const float observedDelta = WrapYawPi(yaw - s_lastEngineYaw);
-        const float pending = s_bodyYawPending.load(std::memory_order_acquire);
-        if (std::fabs(pending) > 0.00001f && observedDelta * pending > 0.0f) {
-            float consumed = std::fmin(std::fabs(observedDelta), std::fabs(pending));
-            if (pending < 0.0f) consumed = -consumed;
-            s_bodyYawPending.fetch_add(-consumed, std::memory_order_acq_rel);
-            const float applied = WrapYawPi(
-                s_bodyYawApplied.fetch_add(consumed, std::memory_order_acq_rel) + consumed);
-            s_bodyYawApplied.store(applied, std::memory_order_release);
-            CyberpunkVR_BodyYawRealignRad = applied;
-            CyberpunkVR_DebugBodyFollowOffsetDeg = applied * 57.2957795f;
-            ++CyberpunkVR_DebugBodyFollowApplied;
+    {
+        std::lock_guard<std::mutex> lock(s_bodyYawStateMutex);
+        ResetBodyYawStateForRecenterLocked();
+        if (s_lastEngineYawValid) {
+            const float observedDelta = WrapYawPi(yaw - s_lastEngineYaw);
+            const float pending = s_bodyYawPending.load(std::memory_order_acquire);
+            if (std::fabs(pending) > 0.00001f && observedDelta * pending > 0.0f) {
+                float consumed = std::fmin(std::fabs(observedDelta), std::fabs(pending));
+                if (pending < 0.0f) consumed = -consumed;
+                s_bodyYawPending.fetch_add(-consumed, std::memory_order_acq_rel);
+                const float applied = WrapYawPi(
+                    s_bodyYawApplied.fetch_add(consumed, std::memory_order_acq_rel) + consumed);
+                s_bodyYawApplied.store(applied, std::memory_order_release);
+                CyberpunkVR_BodyYawRealignRad = applied;
+                CyberpunkVR_DebugBodyFollowOffsetDeg = applied * 57.2957795f;
+                ++CyberpunkVR_DebugBodyFollowApplied;
+            }
         }
+        s_lastEngineYaw = yaw;
+        s_lastEngineYawValid = true;
     }
-    s_lastEngineYaw = yaw;
-    s_lastEngineYawValid = true;
     const float h = yaw * 0.5f;
     const float currentEntityQuat[4] = { 0.0f, 0.0f, std::sin(h), std::cos(h) };
 
