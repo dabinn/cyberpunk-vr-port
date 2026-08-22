@@ -135,7 +135,7 @@ extern "C" void __fastcall OnOnFootDeltaHeadCallback(float* deltaHead) {
     // the camera drift this feature was always reported to have. The cancellation now
     // happens on our side of the same frame, in the camera write and in the head-offset
     // recipe, both of which compose from (engine yaw - CyberpunkVR_BodyYawRealignRad).
-    // Recentring therefore keeps working exactly as it did with the feature off.
+    // A completed explicit recenter clears the old-frame pending/applied offsets by generation edge.
     //
     // The loop, the cone and the realign accumulator live in src/Hooks/BodyYawFollow.cpp;
     // this file is only the door into the engine's heading.
