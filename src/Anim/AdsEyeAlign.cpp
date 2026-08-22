@@ -242,7 +242,9 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
     const bool nonVrik = g_pSharedHands && g_VRBind <= 0 && CyberpunkVR_NonVrikAdsStabilizer &&
                          g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
     const bool aiming = g_isAiming;
-    const bool active = aiming && (headAim || nonVrik);
+    const bool alignmentEnabled = g_pSharedHands &&
+                                  g_pSharedHands[vrshared::kAdsRightEyeAlignment] > 0.5f;
+    const bool active = alignmentEnabled && aiming && (headAim || nonVrik);
 
     AimArmPose* pose = nullptr;
     for (auto& entry : g_aimArmPose) {
@@ -251,7 +253,10 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
         if (!pose && entry.boneBuf == nullptr) pose = &entry;
     }
     if (!active || !pose) {
-        if (!aiming) { s_headAnchorValid = false; s_nonVrikAnchorValid = false; }
+        if (!alignmentEnabled || !aiming) {
+            s_headAnchorValid = false;
+            s_nonVrikAnchorValid = false;
+        }
         s_prevHeadAim = headAim;
         s_prevAiming = aiming;
         return;
