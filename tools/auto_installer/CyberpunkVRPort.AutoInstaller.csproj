@@ -36,6 +36,7 @@
     <Reference Include="System.Windows.Forms" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="src\AssemblyInfo.cs" />
     <Compile Include="src\IniDocument.cs" />
     <Compile Include="src\InstallerEngine.cs" />
     <Compile Include="src\InstallerLog.cs" />

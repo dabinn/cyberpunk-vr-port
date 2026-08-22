@@ -44,6 +44,12 @@ function Test-Layout([bool]$devMode) {
         $local = Get-Control $form "localPathBox"
         $status = Get-Control $form "statusLabel"
         $installerStatus = Get-Control $form "installerStatusLabel"
+        $installationStatus = Get-Control $form "installationStatusLabel"
+        $vrportIniPrefix = Get-Control $form "vrportIniPrefixLabel"
+        $vrportIniStatus = Get-Control $form "vrportIniStatusLabel"
+        $releaseNotes = Get-Control $form "releaseNotesLink"
+        $install = Get-Control $form "installButton"
+        $uninstall = Get-Control $form "uninstallButton"
         $browse = Get-Control $form "browseButton"
         $refresh = Get-Control $form "refreshButton"
         $titlePoint = Get-FormPoint $title
@@ -51,6 +57,10 @@ function Test-Layout([bool]$devMode) {
         $gamePoint = Get-FormPoint $game
         $statusPoint = Get-FormPoint $status
         $installerPoint = Get-FormPoint $installerStatus
+        $installPoint = Get-FormPoint $install
+        $installationPoint = Get-FormPoint $installationStatus
+        $vrportPrefixPoint = Get-FormPoint $vrportIniPrefix
+        $vrportPoint = Get-FormPoint $vrportIniStatus
 
         if ($game.Width -lt 320) { throw "Field controls are still too narrow for release and path text." }
         if ($browse.Height -gt 40 -or $refresh.Height -gt 40) {
@@ -62,6 +72,67 @@ function Test-Layout([bool]$devMode) {
         }
         if ([Math]::Abs($statusPoint.Y - $installerPoint.Y) -gt 12 -or $installerPoint.X -le $statusPoint.X) {
             throw "Operation and Installer statuses are not aligned in the footer."
+        }
+        if (-not $installerStatus.Text.StartsWith('[v1.1] ')) {
+            throw "Installer version was not prefixed to the existing update status."
+        }
+        $setInstallerStatus = $formType.GetMethod('SetInstallerStatus',
+            [Reflection.BindingFlags]'Instance,NonPublic')
+        $setInstallerStatus.Invoke($form, [object[]]@('InstallerStatusUpdateAvailable'))
+        if (-not $installerStatus.Enabled -or -not $installerStatus.Text.StartsWith('[v1.1] ')) {
+            throw "Available Installer update status is not an enabled versioned text link."
+        }
+        $setInstallerStatus.Invoke($form, [object[]]@('InstallerStatusCurrent'))
+        if ($installerStatus.Enabled) { throw "Current Installer status unexpectedly remained clickable." }
+        if (-not ($installPoint.Y -lt $installationPoint.Y -and $installationPoint.Y -lt $vrportPoint.Y -and
+            $vrportPoint.Y -lt $statusPoint.Y)) {
+            throw "Install and vrport.ini status lines are not between the action buttons and footer."
+        }
+        if ($vrportPrefixPoint.X - $installationPoint.X -ne 12) {
+            throw "vrport.ini secondary status row does not retain its 12-pixel indent."
+        }
+        if ($vrportIniStatus.GetType() -ne [Windows.Forms.LinkLabel]) {
+            throw "vrport.ini status is not a text link."
+        }
+        if ($vrportIniPrefix.GetType() -ne [Windows.Forms.Label] -or
+            $vrportIniPrefix.GetType() -eq [Windows.Forms.LinkLabel]) {
+            throw "vrport.ini prefix unexpectedly became part of the text link."
+        }
+        $refreshInstallationStatus = $formType.GetMethod('RefreshInstallationStatus',
+            [Reflection.BindingFlags]'Instance,NonPublic')
+        $game.Text = Join-Path ([IO.Path]::GetTempPath()) ("CyberpunkVRPort-missing-ini-" + [Guid]::NewGuid().ToString("N"))
+        $refreshInstallationStatus.Invoke($form, @())
+        if ($uninstall.Text -ne 'Cleanup') {
+            throw "Uninstall button did not show Cleanup without Installer state."
+        }
+        $managedRoot = Join-Path ([IO.Path]::GetTempPath()) ("CyberpunkVRPort-managed-state-" + [Guid]::NewGuid().ToString("N"))
+        try {
+            New-Item -ItemType Directory -Path (Join-Path $managedRoot 'bin\x64') -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $managedRoot 'bin\x64\Cyberpunk2077.exe') -Value 'marker' -NoNewline
+            Set-Content -LiteralPath (Join-Path $managedRoot 'bin\x64\CyberpunkVRPort-Auto-Installer.state.ini') -Value @"
+[InstalledFilesEver]
+"@
+            $game.Text = $managedRoot
+            $refreshInstallationStatus.Invoke($form, @())
+            if ($uninstall.Text -ne 'Uninstall') {
+                throw "Uninstall button did not show Uninstall with Installer state."
+            }
+        }
+        finally {
+            if (Test-Path -LiteralPath $managedRoot) {
+                $resolvedManagedRoot = (Resolve-Path -LiteralPath $managedRoot).Path
+                $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+                if (-not $resolvedManagedRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Unsafe managed-state test cleanup target: $resolvedManagedRoot"
+                }
+                Remove-Item -LiteralPath $resolvedManagedRoot -Recurse -Force
+            }
+        }
+        $expectedVrportPrefix = [string]([char]0x2514) + [string]([char]0x2500) + ' vrport.ini:'
+        if (-not $vrportIniStatus.Enabled -or $vrportIniPrefix.Text -ne $expectedVrportPrefix -or
+            $vrportIniStatus.Text -ne 'Not present' -or
+            $vrportIniStatus.LinkColor -ne [Drawing.Color]::Gainsboro) {
+            throw "Missing vrport.ini state is not displayed as a white clickable status-only link."
         }
         if ($devMode) {
             $sourcePoint = Get-FormPoint $source
@@ -76,13 +147,37 @@ function Test-Layout([bool]$devMode) {
         }
         else {
             $forkPoint = Get-FormPoint $fork
+            $releaseType = $assembly.GetType('CyberpunkVRPort.AutoInstaller.GitHubRelease', $true)
+            $testRelease = [Activator]::CreateInstance($releaseType, $true)
+            $propertyFlags = [Reflection.BindingFlags]'Instance,NonPublic'
+            $releaseType.GetProperty('Name', $propertyFlags).SetValue($testRelease, 'Test release')
+            $releaseType.GetProperty('HtmlUrl', $propertyFlags).SetValue($testRelease, 'https://github.com/example/repo/releases/tag/test')
+            $releaseType.GetProperty('HasReleaseNotes', $propertyFlags).SetValue($testRelease, $true)
+            $release.Items.Add($testRelease) | Out-Null
+            $release.SelectedItem = $testRelease
+            $form.PerformLayout()
+            $getControlState = [Windows.Forms.Control].GetMethod('GetState',
+                [Reflection.BindingFlags]'Instance,NonPublic')
+            $releaseNotesVisible = $getControlState.Invoke($releaseNotes, [object[]]@(2))
+            if (-not $releaseNotesVisible -or $releaseNotes.Text -ne 'Notes') {
+                throw "Release notes text link was not shown for a selected release with notes."
+            }
+            $releaseNotesPoint = Get-FormPoint $releaseNotes
             $releasePoint = Get-FormPoint $release
-            if (-not ($gamePoint.Y -lt $forkPoint.Y -and $forkPoint.Y -lt $releasePoint.Y)) {
-                throw "Normal layout is not game root -> fork -> release."
+            if (-not ($gamePoint.Y -lt $forkPoint.Y -and $forkPoint.Y -lt $releasePoint.Y) -or
+                [Math]::Abs($forkPoint.Y - $releaseNotesPoint.Y) -gt 12 -or
+                $releaseNotesPoint.X -le $forkPoint.X) {
+                throw "Release notes link is not in the Fork row action column before the Version row."
             }
             if ($gamePoint.X -ne $forkPoint.X -or $forkPoint.X -ne $releasePoint.X -or
                 $game.Width -ne $fork.Width -or $fork.Width -ne $release.Width) {
                 throw "Normal field controls are not horizontally aligned."
+            }
+            $releaseType.GetProperty('HasReleaseNotes', $propertyFlags).SetValue($testRelease, $false)
+            $updateReleaseNotes = $formType.GetMethod('UpdateReleaseNotesLink', [Reflection.BindingFlags]'Instance,NonPublic')
+            $updateReleaseNotes.Invoke($form, @())
+            if ($getControlState.Invoke($releaseNotes, [object[]]@(2))) {
+                throw "Release notes link remained visible for an empty release body."
             }
         }
         if ($fork.Items.Count -ne 6 -or $fork.Items[0].ToString() -ne "Tofu Express") {
@@ -180,6 +275,15 @@ try {
     }
     if ($shouldRefreshInstaller.Invoke($devForm, [object[]]@($true, $true))) {
         throw "Dev Mode unexpectedly refreshes Installer status."
+    }
+    $shouldRequireLatestInstaller = $formType.GetMethod(
+        "ShouldRequireLatestInstaller", [Reflection.BindingFlags]"Instance,NonPublic")
+    if (-not $shouldRequireLatestInstaller.Invoke($normalForm, [object[]]@($true)) -or
+        $shouldRequireLatestInstaller.Invoke($normalForm, [object[]]@($false))) {
+        throw "Normal mode did not restrict the mandatory Installer update gate to Install."
+    }
+    if ($shouldRequireLatestInstaller.Invoke($devForm, [object[]]@($true))) {
+        throw "Dev Mode unexpectedly enabled the mandatory Installer update gate."
     }
 }
 finally {

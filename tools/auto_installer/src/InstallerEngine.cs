@@ -12,6 +12,48 @@ namespace CyberpunkVRPort.AutoInstaller
     {
         private const string StateRelativePath = @"bin\x64\CyberpunkVRPort-Auto-Installer.state.ini";
         private const string BackupRelativeDirectory = @"bin\x64\CyberpunkVRPort-Auto-Installer.backups";
+        private const string CorePluginRelativePath =
+            @"red4ext\plugins\CyberpunkVR_Stereo\CyberpunkVR_Stereo.dll";
+        private const string VrportIniRelativePath = @"bin\x64\vrport.ini";
+        private const string DefaultVrportIni =
+            "xr_head_offset_x=0.000\n" +
+            "xr_head_offset_y=0.000\n" +
+            "xr_head_offset_z=0.000\n" +
+            "xr_recenter=0\n" +
+            "xr_mono_submit=1\n" +
+            "xr_force_fov=0\n" +
+            "xr_menu_rect=0\n" +
+            "xr_menu_fov=65.0\n" +
+            "xr_menu_follow_deg=60.0\n" +
+            "xr_3dof_movement=0\n" +
+            "first_launch=1\n" +
+            "xr_motion_predict_ms=0.0\n" +
+            "xr_stereo_scale=1.0\n" +
+            "xr_world_scale=1.0\n" +
+            "xr_ipd_scale=1.0\n" +
+            "xr_sharpness=0.0\n" +
+            "xr_sharpmix=1.0\n" +
+            "xr_reuse_last_frame=0\n" +
+            "xr_hmd_smooth=0.35\n" +
+            "xr_hand_smooth=0.45\n" +
+            "xr_pair_lock=0\n" +
+            "xr_render_pose_submit=1\n" +
+            "xr_pose_lag=1\n" +
+            "xr_runtime=0\n" +
+            "xr_depth_submit=1\n" +
+            "xr_movement_control=0\n" +
+            "xr_disable_mouse_y=1\n" +
+            "xr_xinput_hook=1\n" +
+            "xr_snap_turn=0\n" +
+            "xr_snap_turn_angle_deg=30\n" +
+            "xr_movement_source=0\n" +
+            "xr_xinput_install=1\n" +
+            "xr_input_actions=1\n" +
+            "xr_chord_activation=0\n" +
+            "xr_extra_chord_actions=1\n" +
+            "xr_mono_xqueue_wait=0\n" +
+            "xr_snap_turn_pulse_ms=30\n" +
+            "xr_mono_depth_capture=1\n";
         private readonly List<string> payloadFilesEver;
         private readonly List<string> generatedFiles;
         private readonly List<string> ownedDirectoriesEver;
@@ -25,7 +67,8 @@ namespace CyberpunkVRPort.AutoInstaller
                 throw new InvalidDataException("The embedded [PayloadFilesEver] catalog is empty.");
         }
 
-        internal int Install(string payloadRoot, bool directRootLayout, string gameRoot, Action<string> progress = null)
+        internal int Install(string payloadRoot, bool directRootLayout, string gameRoot,
+            string installationSource, string installationVersion, Action<string> progress = null)
         {
             AssertGameClosed();
             var root = NormalizeGameRoot(gameRoot);
@@ -61,7 +104,37 @@ namespace CyberpunkVRPort.AutoInstaller
                 if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
                 File.Copy(copy.Source, copy.Destination, true);
             }
+            state.Source = installationSource == null ? string.Empty : installationSource.Trim();
+            state.Version = installationVersion == null ? string.Empty : installationVersion.Trim();
+            SaveState(root, state);
             return copies.Count;
+        }
+
+        internal bool ForceCreateVrportIni(string gameRoot)
+        {
+            AssertGameClosed();
+            return CreateVrportIniIfMissing(NormalizeGameRoot(gameRoot));
+        }
+
+        private static bool CreateVrportIniIfMissing(string root)
+        {
+            var path = ResolveUnder(root, VrportIniRelativePath);
+            AssertNoReparsePoint(root, path);
+            if (File.Exists(path)) return false;
+            var parent = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+            try
+            {
+                using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+                using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
+                    writer.Write(DefaultVrportIni);
+                return true;
+            }
+            catch (IOException)
+            {
+                if (!File.Exists(path)) throw;
+                return false;
+            }
         }
 
         internal int Uninstall(string gameRoot)
@@ -89,6 +162,40 @@ namespace CyberpunkVRPort.AutoInstaller
             RestoreBackups(root, state);
             if (stateExists) DeleteState(root);
             return removed;
+        }
+
+        internal InstallationStatus GetInstallationStatus(string gameRoot)
+        {
+            if (string.IsNullOrWhiteSpace(gameRoot))
+                return new InstallationStatus(false, false, false, null, null, false);
+            try
+            {
+                var root = NormalizeGameRoot(gameRoot);
+                var vrportIni = ResolveUnder(root, VrportIniRelativePath);
+                AssertNoReparsePoint(root, vrportIni);
+                var vrportIniExists = File.Exists(vrportIni);
+                if (!StateExists(root))
+                {
+                    var corePlugin = ResolveUnder(root, CorePluginRelativePath);
+                    AssertNoReparsePoint(root, corePlugin);
+                    var externalInstall = File.Exists(corePlugin);
+                    return new InstallationStatus(externalInstall, externalInstall, false, null, null, vrportIniExists);
+                }
+                try
+                {
+                    var state = LoadState(root);
+                    return new InstallationStatus(true, false, true, state.Source, state.Version, vrportIniExists);
+                }
+                catch (Exception exception)
+                {
+                    InstallerLog.Write("ERROR Could not read Installer state for status display: " + exception.Message);
+                    return new InstallationStatus(true, false, true, null, null, vrportIniExists);
+                }
+            }
+            catch
+            {
+                return new InstallationStatus(false, false, false, null, null, false);
+            }
         }
 
         private void PreInstallCleanup(string root, IEnumerable<string> cleanupPaths, bool useEmbeddedFallback)
@@ -161,6 +268,8 @@ namespace CyberpunkVRPort.AutoInstaller
             if (!File.Exists(path)) return new InstallerState();
             var ini = IniDocument.Load(path);
             var state = new InstallerState();
+            state.Source = ini.Get("Installation", "Source");
+            state.Version = ini.Get("Installation", "Version");
             foreach (var entry in ini.GetSection("InstalledFilesEver")) state.AddInstalledFile(entry.Value);
             foreach (var entry in ini.GetSection("Backups"))
             {
@@ -188,6 +297,10 @@ namespace CyberpunkVRPort.AutoInstaller
             var temporary = path + ".tmp";
             var builder = new StringBuilder();
             builder.AppendLine("; Generated by CyberpunkVRPort Auto Installer. Do not edit paths manually.");
+            builder.AppendLine("[Installation]");
+            builder.AppendLine("Source=" + NormalizeStateValue(state.Source));
+            builder.AppendLine("Version=" + NormalizeStateValue(state.Version));
+            builder.AppendLine();
             builder.AppendLine("[InstalledFilesEver]");
             var index = 1;
             foreach (var relative in state.InstalledFilesEver.OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
@@ -223,6 +336,11 @@ namespace CyberpunkVRPort.AutoInstaller
         private static string NormalizeStatePath(string relative)
         {
             return relative.Replace(Path.DirectorySeparatorChar, '/').Replace(Path.AltDirectorySeparatorChar, '/');
+        }
+
+        private static string NormalizeStateValue(string value)
+        {
+            return (value ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
         }
 
         private static int DeleteListedFiles(string root, IEnumerable<string> paths)
@@ -337,6 +455,8 @@ namespace CyberpunkVRPort.AutoInstaller
 
             internal IReadOnlyList<string> InstalledFilesEver { get { return installedFilesEver; } }
             internal IReadOnlyList<KeyValuePair<string, string>> Backups { get { return backups; } }
+            internal string Source { get; set; }
+            internal string Version { get; set; }
 
             internal void AddInstalledFile(string relative)
             {
@@ -357,6 +477,27 @@ namespace CyberpunkVRPort.AutoInstaller
                     !backupName.EndsWith(".bak", StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException("Invalid Auto Installer state path.");
                 if (!HasBackup(normalized)) backups.Add(new KeyValuePair<string, string>(normalized, backupName));
+            }
+        }
+
+        internal sealed class InstallationStatus
+        {
+            internal bool Installed { get; }
+            internal bool ExternalInstall { get; }
+            internal bool HasInstallerState { get; }
+            internal string Source { get; }
+            internal string Version { get; }
+            internal bool VrportIniExists { get; }
+
+            internal InstallationStatus(bool installed, bool externalInstall, bool hasInstallerState,
+                string source, string version, bool vrportIniExists)
+            {
+                Installed = installed;
+                ExternalInstall = externalInstall;
+                HasInstallerState = hasInstallerState;
+                Source = source;
+                Version = version;
+                VrportIniExists = vrportIniExists;
             }
         }
     }

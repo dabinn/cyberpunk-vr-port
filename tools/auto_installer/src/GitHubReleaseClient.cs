@@ -23,6 +23,8 @@ namespace CyberpunkVRPort.AutoInstaller
         internal long Id { get; set; }
         internal string TagName { get; set; }
         internal string Name { get; set; }
+        internal string HtmlUrl { get; set; }
+        internal bool HasReleaseNotes { get; set; }
         internal bool Prerelease { get; set; }
         internal DateTime PublishedAt { get; set; }
         internal ReleaseAsset ZipAsset { get; set; }
@@ -30,9 +32,10 @@ namespace CyberpunkVRPort.AutoInstaller
 
         public override string ToString()
         {
-            var label = string.IsNullOrWhiteSpace(Name) ? TagName : Name;
-            return Prerelease ? label + " (pre-release)" : label;
+            return Prerelease ? ShortName + " (pre-release)" : ShortName;
         }
+
+        internal string ShortName => string.IsNullOrWhiteSpace(Name) ? TagName : Name;
     }
 
     internal sealed class DevForkDefinition
@@ -78,7 +81,9 @@ namespace CyberpunkVRPort.AutoInstaller
             this.repository = repository;
             zipPattern = new Regex(releaseZipPattern, RegexOptions.IgnoreCase);
             this.installerAssetName = installerAssetName;
-            http.DefaultRequestHeaders.UserAgent.ParseAdd("CyberpunkVRPort-Auto-Installer/1.0");
+            var version = typeof(GitHubReleaseClient).Assembly.GetName().Version;
+            http.DefaultRequestHeaders.UserAgent.ParseAdd(
+                "CyberpunkVRPort-Auto-Installer/" + version.Major + "." + version.Minor);
             http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
             http.Timeout = TimeSpan.FromMinutes(10);
         }
@@ -119,6 +124,8 @@ namespace CyberpunkVRPort.AutoInstaller
                     Id = GetLong(item, "id"),
                     TagName = GetString(item, "tag_name"),
                     Name = GetString(item, "name"),
+                    HtmlUrl = GetString(item, "html_url"),
+                    HasReleaseNotes = !string.IsNullOrWhiteSpace(GetString(item, "body")),
                     Prerelease = GetBool(item, "prerelease"),
                     PublishedAt = publishedAt,
                     ZipAsset = zip,

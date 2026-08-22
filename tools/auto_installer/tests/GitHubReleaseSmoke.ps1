@@ -20,9 +20,14 @@ try {
     if ($releases.Count -eq 0) { throw "No compatible GitHub release assets were parsed." }
     $modReleaseCount = 0
     $installerReleaseCount = 0
+    $releaseNotesCount = 0
     foreach ($release in $releases) {
+        $releaseType = $release.GetType()
         $zip = $release.GetType().GetProperty("ZipAsset", [Reflection.BindingFlags]"Instance,NonPublic").GetValue($release)
         $installer = $release.GetType().GetProperty("InstallerAsset", [Reflection.BindingFlags]"Instance,NonPublic").GetValue($release)
+        $htmlUrl = $releaseType.GetProperty("HtmlUrl", [Reflection.BindingFlags]"Instance,NonPublic").GetValue($release)
+        $hasReleaseNotes = $releaseType.GetProperty("HasReleaseNotes", [Reflection.BindingFlags]"Instance,NonPublic").GetValue($release)
+        if (-not [string]::IsNullOrWhiteSpace($htmlUrl) -and $hasReleaseNotes) { $releaseNotesCount++ }
         if ($null -ne $zip) {
             $name = $zip.GetType().GetProperty("Name", [Reflection.BindingFlags]"Instance,NonPublic").GetValue($zip)
             if (-not $name.EndsWith(".zip", [StringComparison]::OrdinalIgnoreCase)) { throw "Invalid ZIP asset: $name" }
@@ -32,7 +37,8 @@ try {
     }
     if ($modReleaseCount -lt 3) { throw "Expected all three mod ZIP releases, got $modReleaseCount." }
     if ($installerReleaseCount -lt 1) { throw "No standalone Installer release was parsed." }
-    Write-Host "GitHub release smoke test passed: mod-releases=$modReleaseCount installer-releases=$installerReleaseCount"
+    if ($releaseNotesCount -lt 1) { throw "No release page with non-empty notes was parsed." }
+    Write-Host "GitHub release smoke test passed: mod-releases=$modReleaseCount installer-releases=$installerReleaseCount notes=$releaseNotesCount"
 }
 finally {
     $client.Dispose()

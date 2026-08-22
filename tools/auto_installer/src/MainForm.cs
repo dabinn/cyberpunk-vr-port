@@ -25,6 +25,7 @@ namespace CyberpunkVRPort.AutoInstaller
         private readonly string resumeForkRepository;
         private readonly string executableDirectory = AppDomain.CurrentDomain.BaseDirectory;
         private readonly string payloadDirectory;
+        private readonly string installerVersion;
         private readonly InstallerEngine engine;
         private readonly GitHubReleaseClient installerClient;
         private GitHubReleaseClient releaseClient;
@@ -47,7 +48,12 @@ namespace CyberpunkVRPort.AutoInstaller
         private readonly Button installButton = new Button();
         private readonly Button uninstallButton = new Button();
         private readonly Label statusLabel = new Label();
-        private readonly Label installerStatusLabel = new Label();
+        private readonly LinkLabel installerStatusLabel = new LinkLabel();
+        private readonly Label installationStatusLabel = new Label();
+        private readonly Label vrportIniPrefixLabel = new Label();
+        private readonly LinkLabel vrportIniStatusLabel = new LinkLabel();
+        private readonly FlowLayoutPanel vrportIniStatusRow = new FlowLayoutPanel();
+        private readonly LinkLabel releaseNotesLink = new LinkLabel();
         private readonly TableLayoutPanel sourceRow = new TableLayoutPanel();
         private readonly TableLayoutPanel forkRow = new TableLayoutPanel();
         private readonly TableLayoutPanel releaseRow = new TableLayoutPanel();
@@ -62,6 +68,7 @@ namespace CyberpunkVRPort.AutoInstaller
         private bool resumeSelectionPending;
         private DevForkDefinition activeFork;
         private bool controlsInitialized;
+        private bool busy;
 
         internal MainForm(IniDocument ini, bool devMode, string[] launchArguments)
         {
@@ -84,6 +91,8 @@ namespace CyberpunkVRPort.AutoInstaller
             resumeForkRepository = resumeInstall && arguments.Length >= 6 ? arguments[5] : null;
             installerStatusKey = devMode ? "InstallerStatusDev" : "InstallerStatusChecking";
             payloadDirectory = ini.Get("Installer", "PayloadDirectory", "Cyberpunk 2077");
+            var assemblyVersion = Assembly.GetExecutingAssembly().GetName().Version;
+            installerVersion = assemblyVersion.Major + "." + assemblyVersion.Minor;
             engine = new InstallerEngine(ini);
             installerClient = new GitHubReleaseClient(ini);
             releaseClient = installerClient;
@@ -95,7 +104,7 @@ namespace CyberpunkVRPort.AutoInstaller
             AutoScaleMode = AutoScaleMode.Dpi;
             Font = new Font("Segoe UI", 9F);
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(720, devMode ? 424 : 378);
+            ClientSize = new Size(720, devMode ? 476 : 430);
             MinimumSize = Size;
             MaximumSize = Size;
             MaximizeBox = false;
@@ -128,9 +137,11 @@ namespace CyberpunkVRPort.AutoInstaller
             forkBox.DropDownStyle = ComboBoxStyle.DropDownList;
             forkBox.SelectedIndexChanged += async (_, __) => await ForkChangedAsync();
             releaseBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            releaseBox.SelectedIndexChanged += (_, __) => UpdateReleaseNotesLink();
             localPathBox.DropDownStyle = ComboBoxStyle.DropDownList;
             localPathBox.Dock = DockStyle.Fill;
             gamePathBox.Dock = DockStyle.Fill;
+            gamePathBox.TextChanged += (_, __) => RefreshInstallationStatus();
 
             ConfigureButton(browseButton, Color.FromArgb(55, 67, 102));
             ConfigureButton(refreshButton, Color.FromArgb(55, 67, 102));
@@ -140,8 +151,16 @@ namespace CyberpunkVRPort.AutoInstaller
             installButton.MinimumSize = new Size(130, 38);
             uninstallButton.MinimumSize = new Size(130, 38);
             browseButton.Click += BrowseGame;
-            refreshButton.Click += async (_, __) => await LoadReleasesAsync(true, true);
-            localButton.Click += (_, __) => RefreshLocalPackages();
+            refreshButton.Click += async (_, __) =>
+            {
+                try { await LoadReleasesAsync(true, true); }
+                finally { RefreshInstallationStatus(); }
+            };
+            localButton.Click += (_, __) =>
+            {
+                RefreshLocalPackages();
+                RefreshInstallationStatus();
+            };
             installButton.Click += async (_, __) => await RunOperationAsync(true);
             uninstallButton.Click += async (_, __) => await RunOperationAsync(false);
             statusLabel.AutoSize = true;
@@ -151,6 +170,35 @@ namespace CyberpunkVRPort.AutoInstaller
             installerStatusLabel.ForeColor = Color.Gainsboro;
             installerStatusLabel.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
             installerStatusLabel.TextAlign = ContentAlignment.MiddleRight;
+            installerStatusLabel.LinkBehavior = LinkBehavior.NeverUnderline;
+            installerStatusLabel.DisabledLinkColor = Color.Gainsboro;
+            installerStatusLabel.LinkClicked += async (_, __) => await UpdateInstallerNowAsync();
+            installationStatusLabel.AutoSize = true;
+            installationStatusLabel.ForeColor = Color.Gainsboro;
+            vrportIniPrefixLabel.AutoSize = true;
+            vrportIniPrefixLabel.ForeColor = Color.Gainsboro;
+            vrportIniPrefixLabel.Margin = Padding.Empty;
+            vrportIniStatusLabel.AutoSize = true;
+            vrportIniStatusLabel.ForeColor = Color.Gainsboro;
+            vrportIniStatusLabel.LinkColor = Color.Gainsboro;
+            vrportIniStatusLabel.ActiveLinkColor = Color.White;
+            vrportIniStatusLabel.VisitedLinkColor = Color.Gainsboro;
+            vrportIniStatusLabel.LinkBehavior = LinkBehavior.NeverUnderline;
+            vrportIniStatusLabel.DisabledLinkColor = Color.Gainsboro;
+            vrportIniStatusLabel.Margin = new Padding(3, 0, 0, 0);
+            vrportIniStatusLabel.LinkClicked += ToggleForceCreateVrportIni;
+            vrportIniStatusRow.AutoSize = true;
+            vrportIniStatusRow.BackColor = Color.Transparent;
+            vrportIniStatusRow.FlowDirection = FlowDirection.LeftToRight;
+            vrportIniStatusRow.WrapContents = false;
+            vrportIniStatusRow.Margin = new Padding(15, 3, 3, 3);
+            vrportIniStatusRow.Controls.Add(vrportIniPrefixLabel);
+            vrportIniStatusRow.Controls.Add(vrportIniStatusLabel);
+            releaseNotesLink.AutoSize = true;
+            releaseNotesLink.LinkColor = Color.LightSkyBlue;
+            releaseNotesLink.ActiveLinkColor = Color.White;
+            releaseNotesLink.VisitedLinkColor = Color.LightSkyBlue;
+            releaseNotesLink.LinkClicked += OpenReleaseNotes;
 
             BuildRows();
             var actions = new FlowLayoutPanel
@@ -163,9 +211,9 @@ namespace CyberpunkVRPort.AutoInstaller
 
             var layout = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill, RowCount = 8, Padding = new Padding(22), BackColor = Color.Transparent
+                Dock = DockStyle.Fill, RowCount = 10, Padding = new Padding(22), BackColor = Color.Transparent
             };
-            for (var row = 0; row < 7; row++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            for (var row = 0; row < 9; row++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.Controls.Add(BuildTitleRow(), 0, 0);
             layout.Controls.Add(BuildGamePathRow(), 0, 1);
@@ -174,7 +222,9 @@ namespace CyberpunkVRPort.AutoInstaller
             layout.Controls.Add(releaseRow, 0, 4);
             layout.Controls.Add(localRow, 0, 5);
             layout.Controls.Add(actions, 0, 6);
-            layout.Controls.Add(BuildFooterRow(), 0, 7);
+            layout.Controls.Add(installationStatusLabel, 0, 7);
+            layout.Controls.Add(vrportIniStatusRow, 0, 8);
+            layout.Controls.Add(BuildFooterRow(), 0, 9);
 
             var backgroundHost = new TableLayoutPanel
             {
@@ -211,7 +261,7 @@ namespace CyberpunkVRPort.AutoInstaller
         private void BuildRows()
         {
             ConfigureRow(sourceRow, sourceLabel, sourceBox, null);
-            ConfigureRow(forkRow, forkLabel, forkBox, null);
+            ConfigureRow(forkRow, forkLabel, forkBox, releaseNotesLink);
             ConfigureRow(releaseRow, versionLabel, releaseBox, refreshButton);
             ConfigureRow(localRow, localPackageLabel, localPathBox, localButton);
             sourceRow.Visible = devMode;
@@ -277,9 +327,13 @@ namespace CyberpunkVRPort.AutoInstaller
             row.Controls.Add(value, 1, 0);
             if (action != null)
             {
-                action.AutoSize = false;
-                action.Height = 30;
-                action.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+                action.AutoSize = action is LinkLabel;
+                if (action is LinkLabel) action.Anchor = AnchorStyles.Left;
+                else
+                {
+                    action.Height = 30;
+                    action.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+                }
                 row.Controls.Add(action, 2, 0);
             }
         }
@@ -297,7 +351,8 @@ namespace CyberpunkVRPort.AutoInstaller
             refreshButton.Text = T("Refresh", "Refresh");
             localButton.Text = T("Refresh", "Refresh");
             installButton.Text = T("Install", "Install");
-            uninstallButton.Text = T("Uninstall", "Uninstall");
+            uninstallButton.Text = T("Cleanup", "Cleanup");
+            releaseNotesLink.Text = T("ReleaseNotes", "Notes");
             if (devMode)
             {
                 var selected = sourceBox.SelectedIndex;
@@ -309,6 +364,8 @@ namespace CyberpunkVRPort.AutoInstaller
             SetStatus(statusKey, statusArgument, false);
             SetInstallerStatus(installerStatusKey);
             UpdateSourceRows();
+            RefreshInstallationStatus();
+            UpdateReleaseNotesLink();
         }
 
         private async Task SourceChangedAsync()
@@ -342,6 +399,7 @@ namespace CyberpunkVRPort.AutoInstaller
             forkRow.Visible = online;
             releaseRow.Visible = online;
             localRow.Visible = devMode && !online;
+            UpdateReleaseNotesLink();
         }
 
         private bool IsOnline => !devMode || sourceBox.SelectedIndex == 0;
@@ -423,7 +481,7 @@ namespace CyberpunkVRPort.AutoInstaller
                 return;
             }
 
-            if (!devMode && !await EnsureLatestInstallerAsync(install)) return;
+            if (ShouldRequireLatestInstaller(install) && !await EnsureLatestInstallerAsync(true)) return;
 
             var packageLabel = IsOnline
                 ? Convert.ToString(releaseBox.SelectedItem)
@@ -456,7 +514,13 @@ namespace CyberpunkVRPort.AutoInstaller
                         ? PackageSource.OpenFolder(packagePath, payloadDirectory)
                         : PackageSource.OpenZip(packagePath, payloadDirectory))
                     {
-                        count = await Task.Run(() => engine.Install(package.PayloadRoot, package.DirectRootLayout, gamePathBox.Text,
+                        var selectedRelease = releaseBox.SelectedItem as GitHubRelease;
+                        var source = IsOnline ? activeFork.Owner : "Local";
+                        var version = IsOnline
+                            ? selectedRelease.ShortName
+                            : ((LocalPackageItem)localPathBox.SelectedItem).DisplayName;
+                        count = await Task.Run(() => engine.Install(package.PayloadRoot, package.DirectRootLayout,
+                            gamePathBox.Text, source, version,
                             key => BeginInvoke((Action)(() => SetStatus(key, null, false)))));
                     }
                 }
@@ -465,12 +529,18 @@ namespace CyberpunkVRPort.AutoInstaller
                     ? T("InstallComplete", "Installation completed: {0} file(s) copied.")
                     : T("UninstallComplete", "Uninstall completed: {0} file(s) removed."), count);
                 MessageBox.Show(this, statusLabel.Text, Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                RefreshInstallationStatus();
             }
             catch (Exception exception)
             {
                 ShowError(exception.GetBaseException().Message);
             }
             finally { SetBusy(false); }
+        }
+
+        private bool ShouldRequireLatestInstaller(bool install)
+        {
+            return install && !devMode;
         }
 
         private async Task<bool> EnsureLatestInstallerAsync(bool install)
@@ -588,6 +658,7 @@ namespace CyberpunkVRPort.AutoInstaller
 
         private void SetBusy(bool busy)
         {
+            this.busy = busy;
             UseWaitCursor = busy;
             installButton.Enabled = !busy;
             uninstallButton.Enabled = !busy;
@@ -595,6 +666,8 @@ namespace CyberpunkVRPort.AutoInstaller
             sourceBox.Enabled = !busy;
             forkBox.Enabled = !busy;
             localButton.Enabled = !busy;
+            installerStatusLabel.Enabled = !busy && installerStatusKey == "InstallerStatusUpdateAvailable";
+            RefreshVrportIniLinkState();
         }
 
         private void SelectForkClient()
@@ -723,7 +796,11 @@ namespace CyberpunkVRPort.AutoInstaller
         private void SetInstallerStatus(string key)
         {
             installerStatusKey = key;
-            installerStatusLabel.Text = T(key, key);
+            installerStatusLabel.Text = "[v" + installerVersion + "] " + T(key, key);
+            installerStatusLabel.Enabled = key == "InstallerStatusUpdateAvailable";
+            installerStatusLabel.LinkColor = key == "InstallerStatusUpdateAvailable"
+                ? Color.LightSkyBlue
+                : Color.Gainsboro;
             installerStatusLabel.ForeColor = key == "InstallerStatusCurrent"
                 ? Color.PaleGreen
                 : key == "InstallerStatusUpdateAvailable" || key == "InstallerStatusUpdating"
@@ -731,6 +808,103 @@ namespace CyberpunkVRPort.AutoInstaller
                     : key == "InstallerStatusUnavailable"
                         ? Color.LightSalmon
                         : Color.Gainsboro;
+        }
+
+        private async Task UpdateInstallerNowAsync()
+        {
+            if (installerStatusKey != "InstallerStatusUpdateAvailable") return;
+            var prompt = T("InstallerUpdatePromptNow",
+                "The Auto Installer will update and restart.");
+            if (MessageBox.Show(this, prompt, Text, MessageBoxButtons.OKCancel,
+                    MessageBoxIcon.Information) != DialogResult.OK) return;
+
+            SetBusy(true);
+            try
+            {
+                if (latestInstallerRelease == null)
+                    throw new InvalidDataException(T("InstallerStatusUnavailable", "Installer status unavailable"));
+                SetStatus("UpdatingInstaller", null, false);
+                SetInstallerStatus("InstallerStatusUpdating");
+                await SelfUpdater.StartUpdateAsync(installerClient, latestInstallerRelease);
+                Application.Exit();
+            }
+            catch (Exception exception)
+            {
+                SetInstallerStatus("InstallerStatusUnavailable");
+                ShowError(exception.GetBaseException().Message);
+            }
+            finally { SetBusy(false); }
+        }
+
+        private void RefreshInstallationStatus()
+        {
+            var status = engine.GetInstallationStatus(gamePathBox.Text);
+            uninstallButton.Text = status.HasInstallerState
+                ? T("Uninstall", "Uninstall")
+                : T("Cleanup", "Cleanup");
+            installationStatusLabel.Text = !status.Installed
+                ? T("InstalledNotYet", "Installed: Not yet")
+                : status.ExternalInstall
+                    ? T("InstalledExternal", "Installed: Yes (external install)")
+                : string.IsNullOrWhiteSpace(status.Source) || string.IsNullOrWhiteSpace(status.Version)
+                    ? T("InstalledYes", "Installed: Yes")
+                    : string.Format(T("InstalledNamed", "Installed: {0}/{1}"), status.Source, status.Version);
+            installationStatusLabel.ForeColor = status.Installed ? Color.PaleGreen : Color.Gainsboro;
+            vrportIniPrefixLabel.Text = T("VrportIniPrefix", "└─ vrport.ini:");
+            vrportIniStatusLabel.Text = status.VrportIniExists
+                ? T("VrportIniFound", "Found")
+                : T("VrportIniNotFound", "Not present");
+            vrportIniStatusLabel.ForeColor = status.VrportIniExists ? Color.PaleGreen : Color.Gainsboro;
+            RefreshVrportIniLinkState(status.VrportIniExists);
+        }
+
+        private void ToggleForceCreateVrportIni(object sender, LinkLabelLinkClickedEventArgs eventArgs)
+        {
+            var warning = T("VrportIniForceWarning",
+                "Danger! vrport.ini will be forcibly created now. Use this only if you know what you are doing.");
+            if (MessageBox.Show(this, warning, Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                return;
+            try { engine.ForceCreateVrportIni(gamePathBox.Text); }
+            catch (Exception exception) { ShowError(exception.GetBaseException().Message); }
+            finally { RefreshInstallationStatus(); }
+        }
+
+        private void RefreshVrportIniLinkState(bool? exists = null)
+        {
+            var isPresent = exists ?? engine.GetInstallationStatus(gamePathBox.Text).VrportIniExists;
+            vrportIniStatusLabel.Enabled = !busy && !isPresent;
+            vrportIniStatusLabel.LinkColor = Color.Gainsboro;
+            vrportIniStatusLabel.ActiveLinkColor = Color.White;
+            vrportIniStatusLabel.DisabledLinkColor = isPresent ? Color.PaleGreen : Color.Gainsboro;
+        }
+
+        private void UpdateReleaseNotesLink()
+        {
+            var release = releaseBox.SelectedItem as GitHubRelease;
+            releaseNotesLink.Visible = IsOnline && release != null && release.HasReleaseNotes &&
+                IsValidReleaseUrl(release.HtmlUrl);
+        }
+
+        private void OpenReleaseNotes(object sender, LinkLabelLinkClickedEventArgs eventArgs)
+        {
+            var release = releaseBox.SelectedItem as GitHubRelease;
+            if (release == null || !IsValidReleaseUrl(release.HtmlUrl)) return;
+            try
+            {
+                Process.Start(new ProcessStartInfo(release.HtmlUrl) { UseShellExecute = true });
+                releaseNotesLink.LinkVisited = true;
+            }
+            catch (Exception exception)
+            {
+                ShowError(exception.Message);
+            }
+        }
+
+        private static bool IsValidReleaseUrl(string value)
+        {
+            Uri uri;
+            return Uri.TryCreate(value, UriKind.Absolute, out uri) &&
+                (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp);
         }
 
         private string T(string key, string fallback) => language.Get(key, fallback);
