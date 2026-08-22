@@ -1436,17 +1436,18 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                                "weapon swap = Y, fire = RT, aim = LT, grenade = RG, scanner = LG).");
             ImGui::Separator();
 
-            // Weapon aim: bullets/projectiles fly down the WEAPON BARREL (controller-pointed) instead
-            // of the camera crosshair. Hooks the projectile launch orientation provider and feeds it
-            // the game's own muzzle world transform. Writes shared[58]; the RED4ext plugin applies it.
+            // Keep the established backend setting while presenting Head Aim as the positive UI
+            // choice. Both modes launch from the live muzzle; the display value is the inverse of
+            // the persisted weapon-aim value so existing configurations retain their behaviour.
             {
-                static bool s_weaponAim = true;   // default ON — backend's m_weaponAimEnable also defaults to 1
-                if (ImGui::Checkbox("Use weapon Aiming (decoupled VR Head aim)", &s_weaponAim)) {
-                    OpenXRManager::Get().SetWeaponAimEnable(s_weaponAim ? 1 : 0);
+                static bool s_headAim = OpenXRManager::Get().GetWeaponAimEnable() == 0;
+                if (ImGui::Checkbox("Decoupled VR Head Aim", &s_headAim)) {
+                    OpenXRManager::Get().SetWeaponAimEnable(s_headAim ? 0 : 1);
                 }
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Shots follow where the WEAPON points (your controller), not the\n"
-                                      "camera crosshair. Works for guns and projectiles. Free-look while aiming.");
+                    ImGui::SetTooltip("ON: Aim with your headset, decoupled from locomotion (3DoF Head Aim).\n"
+                                      "OFF: Aim with your VR controllers (6DoF Hand Aim).\n"
+                                      "Shots always fire from the actual weapon barrel.");
                 }
                 ImGui::Checkbox("Weapon Aim lasewr dot (where the bullet hits)", &g_drawBarrelCross);
                 if (ImGui::IsItemHovered()) {

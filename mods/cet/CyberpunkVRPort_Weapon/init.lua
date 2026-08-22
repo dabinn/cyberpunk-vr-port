@@ -1,7 +1,7 @@
 -- CyberpunkVRPort_Weapon -- "bullet from the weapon barrel" VR aim.
 --
--- The aim ENABLE toggle lives in the VR imgui overlay (dxgi "Controls" -> "Bullet from weapon
--- barrel", writes shared[58]). This script:
+-- The established F10 weapon-aim toggle selects controller 6DoF when enabled and HMD 3DoF Head
+-- Aim when disabled. Both modes launch from the live weapon muzzle. This script:
 --   1) installs the GetOrientation VMT instrument once (InstallVRProvInstrument) -- this ALSO
 --      installs the override hooks that redirect the shot down the barrel (slot 33 / mode 6),
 --   2) publishes the weapon muzzle world orientation each frame (SetVRMuzzleQuat) -- drives both

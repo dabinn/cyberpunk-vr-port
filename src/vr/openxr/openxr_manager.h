@@ -533,8 +533,8 @@ public:
     // full-arm IK (same as the CET button); 0 = off. 1-3 are legacy fallbacks.
     void SetVRHandTrackingMode(int mode) { m_vrHandTrackingMode.store(mode, std::memory_order_relaxed); }
     int GetVRHandTrackingMode() const { return m_vrHandTrackingMode.load(std::memory_order_relaxed); }
-    // "Bullet from weapon barrel" VR aim: published to shared[58] (enable), read by the RED4ext
-    // plugin's GetOrientation VMT override.
+    // Established F10 weapon-aim option, published to shared[58]. Enabled selects controller 6DoF;
+    // disabled selects HMD 3DoF Head Aim. Projectile launch remains muzzle-based in both modes.
     void SetWeaponAimEnable(int v) { m_weaponAimEnable.store(v, std::memory_order_relaxed); }
     int GetWeaponAimEnable() const { return m_weaponAimEnable.load(std::memory_order_relaxed); }
     // Weapon holster mode: 1 = immersive (visual-holster equip), 0 = simple slot mapping.

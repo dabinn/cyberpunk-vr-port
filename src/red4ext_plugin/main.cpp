@@ -6854,10 +6854,12 @@ static uintptr_t __fastcall ProvStub(uintptr_t rcx, uintptr_t rdx, uintptr_t r8,
                         g_provHmdQ[0]=g_pSharedHands[16]; g_provHmdQ[1]=g_pSharedHands[17]; g_provHmdQ[2]=g_pSharedHands[18]; g_provHmdQ[3]=g_pSharedHands[19];
                     }
                 }
-                // ENABLE: VR-overlay-driven via shared[58] -> override slot 33 (S==30) on ANY provider
-                // class (pistol=entFunc, grenade=entEntity), mode shared[59] (default 5 = game muzzle).
-                // Native SetVRProvOverrideSlot path kept as a manual fallback.
-                bool sharedOn = (g_pSharedHands && g_pSharedHands[58] > 0.5f && S == 30);
+                // All VR aim modes use the same live muzzle transform. Head Aim versus Hand Aim
+                // changes only who drives the weapon pose; projectile launch remains muzzle-based.
+                // Native SetVRProvOverrideSlot is retained as a manual diagnostic fallback.
+                bool sharedOn = (g_pSharedHands &&
+                    g_pSharedHands[vrshared::kWeaponFlag] > 0.5f &&
+                    g_pSharedHands[27] > 0.5f && S == 30);
                 bool nativeOn = (g_provOverrideCls == C && g_provOverrideSlot == S);
                 if ((sharedOn || nativeOn) && g_pSharedHands) {
                     // shared (VR-overlay) path defaults to mode 6 = muzzle + preserved spread.
