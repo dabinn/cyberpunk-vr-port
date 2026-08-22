@@ -117,6 +117,13 @@ function Test-Layout([bool]$devMode) {
             if ($uninstall.Text -ne 'Uninstall') {
                 throw "Uninstall button did not show Uninstall with Installer state."
             }
+            Set-Content -LiteralPath (Join-Path $managedRoot 'bin\x64\vrport.ini') -Value 'setting' -NoNewline
+            $refreshInstallationStatus.Invoke($form, @())
+            if ($vrportIniStatus.Text -ne 'Present' -or $vrportIniStatus.Enabled) {
+                throw "Existing vrport.ini state is not displayed as a disabled Present status."
+            }
+            Remove-Item -LiteralPath (Join-Path $managedRoot 'bin\x64\vrport.ini') -Force
+            $refreshInstallationStatus.Invoke($form, @())
         }
         finally {
             if (Test-Path -LiteralPath $managedRoot) {

@@ -852,7 +852,7 @@ namespace CyberpunkVRPort.AutoInstaller
             installationStatusLabel.ForeColor = status.Installed ? Color.PaleGreen : Color.Gainsboro;
             vrportIniPrefixLabel.Text = T("VrportIniPrefix", "└─ vrport.ini:");
             vrportIniStatusLabel.Text = status.VrportIniExists
-                ? T("VrportIniFound", "Found")
+                ? T("VrportIniFound", "Present")
                 : T("VrportIniNotFound", "Not present");
             vrportIniStatusLabel.ForeColor = status.VrportIniExists ? Color.PaleGreen : Color.Gainsboro;
             RefreshVrportIniLinkState(status.VrportIniExists);
