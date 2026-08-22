@@ -28,6 +28,9 @@ try {
     Set-Content -LiteralPath (Join-Path $game "bin\x64\Cyberpunk2077.exe") -Value "marker" -NoNewline
     Set-Content -LiteralPath (Join-Path $game "bin\x64\vrport.ini") -Value "player-setting" -NoNewline
     Set-Content -LiteralPath (Join-Path $game "archive\pc\mod\cyberpunkvrport.archive") -Value "old-version" -NoNewline
+    $manualNewerFile = Join-Path $game "bin\x64\plugins\cyber_engine_tweaks\mods\CyberpunkVRPort_Reload\reload\poses\unity_mag_left.lua"
+    New-Item -ItemType Directory -Path (Split-Path $manualNewerFile -Parent) -Force | Out-Null
+    Set-Content -LiteralPath $manualNewerFile -Value "manual-newer-version" -NoNewline
 
     $assembly = [Reflection.Assembly]::LoadFile((Resolve-Path $Executable).Path)
     $iniType = $assembly.GetType("CyberpunkVRPort.AutoInstaller.IniDocument", $true)
@@ -49,6 +52,9 @@ try {
     if ($installed -ne 1) { throw "Expected 1 copied file, got $installed" }
     if (Test-Path -LiteralPath (Join-Path $game "archive\pc\mod\cyberpunkvrport.archive")) {
         throw "Historical payload was not removed before install."
+    }
+    if (Test-Path -LiteralPath $manualNewerFile) {
+        throw "A manually installed newer-version payload survived fallback downgrade cleanup."
     }
     if (-not (Test-Path -LiteralPath (Join-Path $game "bin\x64\vrport.ini"))) {
         throw "Generated player setting was removed during pre-install cleanup."
