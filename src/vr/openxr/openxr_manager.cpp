@@ -1504,28 +1504,21 @@ void OpenXRManager::FlushHandsToShared() {
 void OpenXRManager::Shutdown() {
     std::lock_guard<std::mutex> initLock(m_initMutex);
     m_stopFrameThread.store(true, std::memory_order_relaxed);
+    if (m_session != XR_NULL_HANDLE && m_sessionRunning.load(std::memory_order_relaxed)) {
+        xrRequestExitSession(m_session);
+    }
     NotifySubmitThread();   // wake the parked thread so it observes the stop flag
     if (m_frameThread) {
-        WaitForSingleObject(m_frameThread, 2000);
+        const DWORD waitResult = WaitForSingleObject(m_frameThread, 5000);
+        if (waitResult != WAIT_OBJECT_0) {
+            Log("OpenXRManager: WARNING submit thread did not stop during shutdown (wait=%lu).\n",
+                waitResult);
+        }
         CloseHandle(m_frameThread);
         m_frameThread = nullptr;
     }
 
-    if (m_viewSpace != XR_NULL_HANDLE) {
-        xrDestroySpace(m_viewSpace);
-        m_viewSpace = XR_NULL_HANDLE;
-    }
-    if (m_localSpace != XR_NULL_HANDLE) {
-        xrDestroySpace(m_localSpace);
-        m_localSpace = XR_NULL_HANDLE;
-    }
-
     EndSession();
-
-    if (m_session != XR_NULL_HANDLE) {
-        xrDestroySession(m_session);
-        m_session = XR_NULL_HANDLE;
-    }
 
     for (auto& eye : m_eyeSwapchains) {
         if (eye.handle != XR_NULL_HANDLE) {
@@ -1538,6 +1531,44 @@ void OpenXRManager::Shutdown() {
         }
     }
     m_eyeSwapchains.clear();
+
+    for (int i = 0; i < 2; ++i) {
+        if (m_handSpaces[i] != XR_NULL_HANDLE) {
+            xrDestroySpace(m_handSpaces[i]);
+            m_handSpaces[i] = XR_NULL_HANDLE;
+        }
+        if (m_handAimSpaces[i] != XR_NULL_HANDLE) {
+            xrDestroySpace(m_handAimSpaces[i]);
+            m_handAimSpaces[i] = XR_NULL_HANDLE;
+        }
+    }
+    if (m_viewSpace != XR_NULL_HANDLE) {
+        xrDestroySpace(m_viewSpace);
+        m_viewSpace = XR_NULL_HANDLE;
+    }
+    if (m_localSpace != XR_NULL_HANDLE) {
+        xrDestroySpace(m_localSpace);
+        m_localSpace = XR_NULL_HANDLE;
+    }
+
+    if (m_session != XR_NULL_HANDLE) {
+        xrDestroySession(m_session);
+        m_session = XR_NULL_HANDLE;
+    }
+    if (m_actionSet != XR_NULL_HANDLE) {
+        xrDestroyActionSet(m_actionSet);
+        m_actionSet = XR_NULL_HANDLE;
+    }
+    m_handPoseAction = XR_NULL_HANDLE;
+    m_handAimPoseAction = XR_NULL_HANDLE;
+    m_thumbstickAction = XR_NULL_HANDLE;
+    m_triggerAction = XR_NULL_HANDLE;
+    m_gripAction = XR_NULL_HANDLE;
+    m_thumbstickClickAction = XR_NULL_HANDLE;
+    m_primaryButtonAction = XR_NULL_HANDLE;
+    m_secondaryButtonAction = XR_NULL_HANDLE;
+    m_menuButtonAction = XR_NULL_HANDLE;
+    m_rightThumbrestAction = XR_NULL_HANDLE;
     m_views.clear();
     m_viewConfigViews.clear();
     m_runtimeIsSteamVR.store(false, std::memory_order_relaxed);
@@ -1594,14 +1625,6 @@ void OpenXRManager::Shutdown() {
         m_lastPresentedBackBuffer->Release();
         m_lastPresentedBackBuffer = nullptr;
     }
-    if (m_d3dQueue) {
-        m_d3dQueue->Release();
-        m_d3dQueue = nullptr;
-    }
-    if (m_d3dDevice) {
-        m_d3dDevice->Release();
-        m_d3dDevice = nullptr;
-    }
     if (m_colorBlit) {
         m_colorBlit->Shutdown();
         m_colorBlit.reset();
@@ -1625,6 +1648,18 @@ void OpenXRManager::Shutdown() {
     if (m_depthWriterFence) { m_depthWriterFence->Release(); m_depthWriterFence = nullptr; }
     m_depthWriterFenceValue = 0;
     m_depthSnapshotWriterFence = 0;
+    for (int e = 0; e < 2; ++e) {
+        m_lastGoodEye[e].Reset();
+        m_lastGoodEyeInited[e] = false;
+    }
+    if (m_d3dQueue) {
+        m_d3dQueue->Release();
+        m_d3dQueue = nullptr;
+    }
+    if (m_d3dDevice) {
+        m_d3dDevice->Release();
+        m_d3dDevice = nullptr;
+    }
     m_monoCapturedFrame.width = 0;
     m_monoCapturedFrame.height = 0;
     m_monoCapturedFrame.format = 0;
