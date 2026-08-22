@@ -18,14 +18,14 @@
 //   camera (the centre), rotated by the live head delta, and re-anchored at the eye. Pre-shifting the
 //   source by half an IPD as well would cancel exactly the dominant-eye correction this exists for.
 //
-//   THE ANCHOR IS LATCHED, the live IPD orbit is not. The eye offset is captured in the vanilla
-//   camera's frame when ADS begins, so walking, crouching and vehicle motion still carry the arms
-//   with the player, while PHYSICAL head translation afterwards stays free -- that is how a player
-//   fine-adjusts a sight, by moving their head, and it must not drag the weapon along.
+//   THE GAMEPLAY ORIGIN IS FIXED IN THE RECENTER/BODY FRAME. Rendered head translation remains full
+//   6DoF, but it does not feed back into weapon/arm targets. Head aim consumes only the final HMD
+//   orientation, so physical leaning cannot introduce a second pivot or make the weapon chase the
+//   headset. The right-eye offset is fixed in the same centred frame.
 //
-//   HEAD AIM ALSO ROTATES, non-VRIK does not. Under head aim the weapon follows the HMD, so the arms
-//   must orbit the eye with it (delta = the live rotation since the anchor). In non-VRIK hand aim the
-//   game still owns the direction, so only the translation is re-anchored (delta = identity).
+//   HEAD AIM ALWAYS ROTATES, non-VRIK does not. Under head aim the weapon follows the HMD in hip and
+//   ADS states; the right-eye toggle only selects the ADS destination origin. In non-VRIK hand aim
+//   the game still owns the direction, so only the opt-in right-eye translation is applied.
 //
 // THE CENTRED CAMERA FRAME IS RECOVERED BY DIVIDING OUT THE HMD, not by reading the engine camera:
 // the render view is composed as gameHeading * mappedHmd, and the engine's camera orientation may
@@ -71,44 +71,44 @@ struct AimArmPose {
     uint8_t* boneBuf = nullptr;
     float tick = -1.0f;
     int bone[6] = {-1, -1, -1, -1, -1, -1};   // right upper/fore/hand, left upper/fore/hand
+    int clavicle[2] = {-1, -1};
     float localRot[6][4] = {};
+    float clavicleLocalRot[2][4] = {};
     float rawPos[6][3] = {};
     float rawRot[6][4] = {};
     float targetHand[2][3] = {};
     float targetElbow[2][3] = {};
     float targetLeftRot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    bool headAim = false;
     bool valid = false;
 };
 AimArmPose g_aimArmPose[4];
 
-// The right eye, and the frames needed to move a pose onto it: eye in world and in model space, the
-// view rotation in model space, the camera's model position, and the CENTRED camera rotation with the
-// HMD divided out.
-bool CurrentRightEye(float* outWorld, float* outModel, float* outViewModel,
-                     float* outCamModelPos, float* outCentreModelRot) {
+float AimDist3(const float* a, const float* b) {
+    const float x = a[0] - b[0];
+    const float y = a[1] - b[1];
+    const float z = a[2] - b[2];
+    return std::sqrt(x * x + y * y + z * z);
+}
+
+// Build the Head Aim gameplay frame. The render camera remains fully 6DoF, but weapon/arm aim
+// deliberately ignores base-relative HMD translation: the centred camera plus its fixed view
+// offsets is the head origin, and the recenter-time right-eye offset stays fixed in that body frame.
+// Only the final HMD orientation is live. This is equivalent to a virtual body that follows every
+// physical head translation, without actually moving the player entity or collision capsule.
+bool CurrentFixedAimFrame(float* outHeadCentreModel, float* outRightEyeModel,
+                          float* outViewModel, float* outCentreModelRot) {
+    float camModelPos[3];
     float unusedCamRot[4];
-    if (!g_viewPktValid || !VRIK_ComputeCamModel(outCamModelPos, unusedCamRot)) return false;
-    float headWorld[3];
-    if (!VRIK_ResolveViewPos(headWorld)) return false;
+    if (!g_viewPktValid || !VRIK_ComputeCamModel(camModelPos, unusedCamRot)) return false;
 
     float viewQ[4] = { g_viewPkt[0], g_viewPkt[1], g_viewPkt[2], g_viewPkt[3] };
     VRIK_QuatNorm(viewQ);
-    const float rightAxis[3] = {1.0f, 0.0f, 0.0f};
-    float rightWorld[3];
-    VRIK_QuatRotateVec(viewQ, rightAxis, rightWorld);
-    const float halfIpd = SharedPose(95);
-    outWorld[0] = headWorld[0] + rightWorld[0] * halfIpd;
-    outWorld[1] = headWorld[1] + rightWorld[1] * halfIpd;
-    outWorld[2] = headWorld[2] + rightWorld[2] * halfIpd;
 
     float entQ[4] = { g_VREntityQI, g_VREntityQJ, g_VREntityQK, g_VREntityQR };
     VRIK_QuatNorm(entQ);
     float invEnt[4];
     VRIK_QuatConj(entQ, invEnt);
-    const float eyeDeltaWorld[3] = { outWorld[0] - g_VREntityPosX,
-                                     outWorld[1] - g_VREntityPosY,
-                                     outWorld[2] - g_VREntityPosZ };
-    VRIK_QuatRotateVec(invEnt, eyeDeltaWorld, outModel);
     VRIK_QuatMul(invEnt, viewQ, outViewModel);
     VRIK_QuatNorm(outViewModel);
 
@@ -128,7 +128,84 @@ bool CurrentRightEye(float* outWorld, float* outModel, float* outViewModel,
     VRIK_QuatMul(viewQ, invHmdGame, centreWorld);
     VRIK_QuatMul(invEnt, centreWorld, outCentreModelRot);
     VRIK_QuatNorm(outCentreModelRot);
+
+    // [120..122] is the fixed Tracking-Camera + camera-bake + eye-bake offset in centred
+    // game-camera axes. It belongs to the recenter origin; unlike [108..110], it contains no live
+    // HMD position. Rotate it only by the centred camera frame, never by the live HMD orientation.
+    float fixedViewLocal[3] = {0.0f, 0.0f, 0.0f};
+    if (SharedPose(123) == 1.0f) {
+        fixedViewLocal[0] = SharedPose(120);
+        fixedViewLocal[1] = SharedPose(121);
+        fixedViewLocal[2] = SharedPose(122);
+    }
+    float fixedViewModel[3];
+    VRIK_QuatRotateVec(outCentreModelRot, fixedViewLocal, fixedViewModel);
+    for (int k = 0; k < 3; ++k) outHeadCentreModel[k] = camModelPos[k] + fixedViewModel[k];
+
+    // Keep the recenter-time right eye fixed in the body frame. Rotating this offset by the live
+    // HMD quaternion would reintroduce an IPD-radius positional orbit and another pivot problem.
+    const float rightEyeLocal[3] = {SharedPose(95), 0.0f, 0.0f};
+    float rightEyeOffsetModel[3];
+    VRIK_QuatRotateVec(outCentreModelRot, rightEyeLocal, rightEyeOffsetModel);
+    for (int k = 0; k < 3; ++k) {
+        outRightEyeModel[k] = outHeadCentreModel[k] + rightEyeOffsetModel[k];
+    }
     return true;
+}
+
+// Move the upper-arm socket only when the authored shoulder cannot reach the Head Aim target. The
+// socket rides the end of the clavicle at a fixed radius, so rotate that bone by the minimum
+// required angle instead of translating or stretching the shoulder girdle.
+void AssistAimShoulder(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
+                       const float* targetHand) {
+    if (upperIdx < 0 || foreIdx < 0 || handIdx < 0) return;
+    const int clavicleIdx = g_VRBoneParent[upperIdx];
+    if (clavicleIdx < 0 || clavicleIdx >= VRIK_FKCount()) return;
+    const int clavicleParent = g_VRBoneParent[clavicleIdx];
+
+    const float upperLen = AimDist3(g_fkPos[upperIdx], g_fkPos[foreIdx]);
+    const float foreLen = AimDist3(g_fkPos[foreIdx], g_fkPos[handIdx]);
+    const float armReach = upperLen + foreLen - 1e-4f;
+    if (upperLen < 1e-4f || foreLen < 1e-4f || armReach < 1e-4f) return;
+    if (AimDist3(g_fkPos[upperIdx], targetHand) <= armReach) return;
+
+    float shoulderFromPivot[3] = {g_fkPos[upperIdx][0] - g_fkPos[clavicleIdx][0],
+                                  g_fkPos[upperIdx][1] - g_fkPos[clavicleIdx][1],
+                                  g_fkPos[upperIdx][2] - g_fkPos[clavicleIdx][2]};
+    float targetFromPivot[3] = {targetHand[0] - g_fkPos[clavicleIdx][0],
+                                targetHand[1] - g_fkPos[clavicleIdx][1],
+                                targetHand[2] - g_fkPos[clavicleIdx][2]};
+    const float clavicleLen = VRIK_Norm3(shoulderFromPivot);
+    const float targetDist = VRIK_Norm3(targetFromPivot);
+    if (clavicleLen < 1e-4f || targetDist < 1e-4f) return;
+
+    float cosReach = (clavicleLen * clavicleLen + targetDist * targetDist - armReach * armReach) /
+                     (2.0f * clavicleLen * targetDist);
+    if (cosReach < -1.0f) cosReach = -1.0f;
+    if (cosReach > 1.0f) cosReach = 1.0f;
+    const float maxReachSeparation = std::acos(cosReach);
+    float cosCurrent = VRIK_Dot3(shoulderFromPivot, targetFromPivot);
+    if (cosCurrent < -1.0f) cosCurrent = -1.0f;
+    if (cosCurrent > 1.0f) cosCurrent = 1.0f;
+    const float currentSeparation = std::acos(cosCurrent);
+    float required = currentSeparation - maxReachSeparation;
+    if (required <= 1e-4f || currentSeparation <= 1e-4f) return;
+
+    constexpr float kMaxAimClavicleAssist = 0.610865238f; // 35 degrees
+    if (required > kMaxAimClavicleAssist) required = kMaxAimClavicleAssist;
+    float fullDelta[4];
+    VRIK_QuatFromTo(shoulderFromPivot, targetFromPivot, fullDelta);
+    float assistDelta[4];
+    VRIK_QuatScale(fullDelta, required / currentSeparation, assistDelta);
+    float newClavicleModel[4];
+    VRIK_QuatMul(assistDelta, g_fkRot[clavicleIdx], newClavicleModel);
+    VRIK_QuatNorm(newClavicleModel);
+    const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    VRIK_WriteLocalRot(
+        boneBuf, clavicleIdx,
+        (clavicleParent >= 0 && clavicleParent < VRIK_FKCount()) ? g_fkRot[clavicleParent] : identity,
+        newClavicleModel);
+    VRIK_ComputeFK(boneBuf, VRIK_FKCount());
 }
 
 // Rotation-only two-bone solve for an authored arm pose. Segment translations are untouched, so this
@@ -233,18 +310,15 @@ bool WriteWeaponModelRotViaRightHand(uint8_t* boneBuf, int weaponIdx,
 }
 
 void PrepareAimArmTargets(uint8_t* boneBuf) {
-    static bool s_prevHeadAim = false, s_prevAiming = false;
-    static bool s_headAnchorValid = false, s_nonVrikAnchorValid = false;
-    static float s_headCentreOffsetCam[3] = {0.0f, 0.0f, 0.0f};
-    static float s_nonVrikEyeOffsetCam[3] = {0.0f, 0.0f, 0.0f};
-
     const bool headAim = IsHeadAimWeaponActive();
     const bool nonVrik = g_pSharedHands && g_VRBind <= 0 && CyberpunkVR_NonVrikAdsStabilizer &&
                          g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
     const bool aiming = g_isAiming;
     const bool alignmentEnabled = g_pSharedHands &&
                                   g_pSharedHands[vrshared::kAdsRightEyeAlignment] > 0.5f;
-    const bool active = alignmentEnabled && aiming && (headAim || nonVrik);
+    const bool headEyeAlignment = headAim && aiming && alignmentEnabled;
+    const bool nonVrikEyeAlignment = nonVrik && aiming && alignmentEnabled;
+    const bool active = headAim || nonVrikEyeAlignment;
 
     AimArmPose* pose = nullptr;
     for (auto& entry : g_aimArmPose) {
@@ -252,20 +326,13 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
         if (entry.boneBuf == boneBuf) { pose = &entry; break; }
         if (!pose && entry.boneBuf == nullptr) pose = &entry;
     }
-    if (!active || !pose) {
-        if (!alignmentEnabled || !aiming) {
-            s_headAnchorValid = false;
-            s_nonVrikAnchorValid = false;
-        }
-        s_prevHeadAim = headAim;
-        s_prevAiming = aiming;
-        return;
-    }
+    if (!active || !pose) return;
     if (pose->boneBuf != boneBuf) { pose->boneBuf = boneBuf; pose->tick = -1.0f; }
 
     const int bone[6] = { g_VRRightUpperArmIdx, g_VRRightForeArmIdx, g_VRRightBoneIdx,
                           g_VRLeftUpperArmIdx,  g_VRLeftForeArmIdx,  g_VRLeftBoneIdx };
     for (int i = 0; i < 6; ++i) if (bone[i] < 0 || bone[i] >= VRIK_FKCount()) return;
+    const int clavicle[2] = {g_VRBoneParent[bone[0]], g_VRBoneParent[bone[3]]};
 
     // THE TICK, not a controller quaternion component. The hook visits this buffer several times per
     // tick: the first pass records the authored rotations, the repeats restore them, so every pass
@@ -273,13 +340,30 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
     const float tick = g_pSharedHands[vrshared::kEntitySeq];
     bool samePose = (pose->tick == tick);
     for (int i = 0; i < 6; ++i) samePose = samePose && pose->bone[i] == bone[i];
+    for (int side = 0; side < 2; ++side) {
+        samePose = samePose && pose->clavicle[side] == clavicle[side];
+    }
     if (samePose) {
+        for (int side = 0; side < 2; ++side) {
+            if (clavicle[side] < 0 || clavicle[side] >= VRIK_FKCount()) continue;
+            float* q = reinterpret_cast<float*>(boneBuf + clavicle[side] * 48 + VRIK_ROT_OFF);
+            q[0] = pose->clavicleLocalRot[side][0]; q[1] = pose->clavicleLocalRot[side][1];
+            q[2] = pose->clavicleLocalRot[side][2]; q[3] = pose->clavicleLocalRot[side][3];
+        }
         for (int i = 0; i < 6; ++i) {
             float* q = reinterpret_cast<float*>(boneBuf + bone[i] * 48 + VRIK_ROT_OFF);
             q[0] = pose->localRot[i][0]; q[1] = pose->localRot[i][1];
             q[2] = pose->localRot[i][2]; q[3] = pose->localRot[i][3];
         }
     } else {
+        for (int side = 0; side < 2; ++side) {
+            pose->clavicle[side] = clavicle[side];
+            if (clavicle[side] < 0 || clavicle[side] >= VRIK_FKCount()) continue;
+            const float* q =
+                reinterpret_cast<const float*>(boneBuf + clavicle[side] * 48 + VRIK_ROT_OFF);
+            pose->clavicleLocalRot[side][0] = q[0]; pose->clavicleLocalRot[side][1] = q[1];
+            pose->clavicleLocalRot[side][2] = q[2]; pose->clavicleLocalRot[side][3] = q[3];
+        }
         for (int i = 0; i < 6; ++i) {
             const float* q =
                 reinterpret_cast<const float*>(boneBuf + bone[i] * 48 + VRIK_ROT_OFF);
@@ -296,58 +380,26 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
         for (int k = 0; k < 4; ++k) pose->rawRot[i][k] = g_fkRot[bone[i]][k];
     }
 
-    float eyeWorld[3], eyeModel[3], viewModel[4], camPos[3], centreRot[4];
-    if (!CurrentRightEye(eyeWorld, eyeModel, viewModel, camPos, centreRot)) return;
+    float fixedHeadCentre[3], fixedRightEye[3], viewModel[4], centreRot[4];
+    if (!CurrentFixedAimFrame(fixedHeadCentre, fixedRightEye, viewModel, centreRot)) return;
     float invCentre[4];
     VRIK_QuatConj(centreRot, invCentre);
     float liveDelta[4];
     VRIK_QuatMul(viewModel, invCentre, liveDelta);
     VRIK_QuatNorm(liveDelta);
 
-    // The eye, and the cyclopean point it orbits, both expressed in the centred camera's frame so an
-    // anchor captured now survives the player walking and turning.
-    const float eyeFromCentre[3] = { eyeModel[0] - camPos[0], eyeModel[1] - camPos[1],
-                                     eyeModel[2] - camPos[2] };
-    float eyeOffsetCam[3];
-    VRIK_QuatRotateVec(invCentre, eyeFromCentre, eyeOffsetCam);
-    const float rightAxis[3] = {1.0f, 0.0f, 0.0f};
-    float eyeRight[3];
-    VRIK_QuatRotateVec(viewModel, rightAxis, eyeRight);
-    const float halfIpd = SharedPose(95);
-    eyeRight[0] *= halfIpd; eyeRight[1] *= halfIpd; eyeRight[2] *= halfIpd;
-    const float headCentre[3] = { eyeModel[0] - eyeRight[0], eyeModel[1] - eyeRight[1],
-                                  eyeModel[2] - eyeRight[2] };
-    const float headFromCam[3] = { headCentre[0] - camPos[0], headCentre[1] - camPos[1],
-                                   headCentre[2] - camPos[2] };
-    float headOffsetCam[3];
-    VRIK_QuatRotateVec(invCentre, headFromCam, headOffsetCam);
-
-    if (headAim && (!s_prevHeadAim || !s_prevAiming || !s_headAnchorValid)) {
-        for (int k = 0; k < 3; ++k) s_headCentreOffsetCam[k] = headOffsetCam[k];
-        s_headAnchorValid = true;
+    float rotationPivot[3];
+    float postRotationTranslation[3] = {0.0f, 0.0f, 0.0f};
+    float delta[4];
+    for (int k = 0; k < 3; ++k) rotationPivot[k] = fixedHeadCentre[k];
+    if (headEyeAlignment || nonVrikEyeAlignment) {
+        for (int k = 0; k < 3; ++k) {
+            postRotationTranslation[k] = fixedRightEye[k] - fixedHeadCentre[k];
+        }
     }
-    if (nonVrik && aiming && (!s_prevAiming || s_prevHeadAim || !s_nonVrikAnchorValid)) {
-        for (int k = 0; k < 3; ++k) s_nonVrikEyeOffsetCam[k] = eyeOffsetCam[k];
-        s_nonVrikAnchorValid = true;
-    }
-    if (!headAim) s_headAnchorValid = false;
-    if (!aiming) s_nonVrikAnchorValid = false;
-    s_prevHeadAim = headAim;
-    s_prevAiming = aiming;
-
-    float anchor[3], delta[4];
-    if (headAim && s_headAnchorValid) {
-        // Head aim: the latched head centre plus the LIVE right-eye orbit, and the arms rotate with
-        // the head so the sight stays on the eye through a head turn.
-        float headOff[3];
-        VRIK_QuatRotateVec(centreRot, s_headCentreOffsetCam, headOff);
-        for (int k = 0; k < 3; ++k) anchor[k] = camPos[k] + headOff[k] + eyeRight[k];
+    if (headAim) {
         for (int k = 0; k < 4; ++k) delta[k] = liveDelta[k];
-    } else if (nonVrik && s_nonVrikAnchorValid) {
-        // Hand aim: the game still owns the direction, so only the translation moves onto the eye.
-        float eyeOff[3];
-        VRIK_QuatRotateVec(centreRot, s_nonVrikEyeOffsetCam, eyeOff);
-        for (int k = 0; k < 3; ++k) anchor[k] = camPos[k] + eyeOff[k];
+    } else if (nonVrikEyeAlignment) {
         delta[0] = 0.0f; delta[1] = 0.0f; delta[2] = 0.0f; delta[3] = 1.0f;
     } else {
         return;
@@ -355,22 +407,25 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
 
     const int handSlot[2] = {2, 5}, elbowSlot[2] = {1, 4};
     for (int side = 0; side < 2; ++side) {
-        const float relH[3] = { pose->rawPos[handSlot[side]][0] - camPos[0],
-                                pose->rawPos[handSlot[side]][1] - camPos[1],
-                                pose->rawPos[handSlot[side]][2] - camPos[2] };
-        const float relE[3] = { pose->rawPos[elbowSlot[side]][0] - camPos[0],
-                                pose->rawPos[elbowSlot[side]][1] - camPos[1],
-                                pose->rawPos[elbowSlot[side]][2] - camPos[2] };
+        const float relH[3] = {pose->rawPos[handSlot[side]][0] - rotationPivot[0],
+                               pose->rawPos[handSlot[side]][1] - rotationPivot[1],
+                               pose->rawPos[handSlot[side]][2] - rotationPivot[2]};
+        const float relE[3] = {pose->rawPos[elbowSlot[side]][0] - rotationPivot[0],
+                               pose->rawPos[elbowSlot[side]][1] - rotationPivot[1],
+                               pose->rawPos[elbowSlot[side]][2] - rotationPivot[2]};
         float rotH[3], rotE[3];
         VRIK_QuatRotateVec(delta, relH, rotH);
         VRIK_QuatRotateVec(delta, relE, rotE);
         for (int k = 0; k < 3; ++k) {
-            pose->targetHand[side][k] = anchor[k] + rotH[k];
-            pose->targetElbow[side][k] = anchor[k] + rotE[k];
+            pose->targetHand[side][k] =
+                rotationPivot[k] + rotH[k] + postRotationTranslation[k];
+            pose->targetElbow[side][k] =
+                rotationPivot[k] + rotE[k] + postRotationTranslation[k];
         }
     }
     VRIK_QuatMul(delta, pose->rawRot[5], pose->targetLeftRot);
     VRIK_QuatNorm(pose->targetLeftRot);
+    pose->headAim = headAim;
     pose->valid = true;
 }
 
@@ -387,12 +442,31 @@ void SolvePreparedAimArms(uint8_t* boneBuf) {
     VRIK_ComputeFK(boneBuf, VRIK_FKCount());
     const float rightHandRot[4] = { g_fkRot[pose->bone[2]][0], g_fkRot[pose->bone[2]][1],
                                     g_fkRot[pose->bone[2]][2], g_fkRot[pose->bone[2]][3] };
+    if (pose->headAim) {
+        AssistAimShoulder(boneBuf, pose->bone[0], pose->bone[1], pose->bone[2],
+                          pose->targetHand[0]);
+    }
+    float rightPos[3][3], rightRot[3][4];
+    for (int joint = 0; joint < 3; ++joint) {
+        for (int k = 0; k < 3; ++k) rightPos[joint][k] = g_fkPos[pose->bone[joint]][k];
+        for (int k = 0; k < 4; ++k) rightRot[joint][k] = g_fkRot[pose->bone[joint]][k];
+    }
     SolveAimArm(boneBuf, pose->bone[0], pose->bone[1], pose->bone[2],
-                &pose->rawPos[0], &pose->rawRot[0],
+                rightPos, rightRot,
                 pose->targetHand[0], pose->targetElbow[0], rightHandRot);
     VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+    if (pose->headAim) {
+        AssistAimShoulder(boneBuf, pose->bone[3], pose->bone[4], pose->bone[5],
+                          pose->targetHand[1]);
+    }
+    float leftPos[3][3], leftRot[3][4];
+    for (int joint = 0; joint < 3; ++joint) {
+        const int boneIdx = pose->bone[joint + 3];
+        for (int k = 0; k < 3; ++k) leftPos[joint][k] = g_fkPos[boneIdx][k];
+        for (int k = 0; k < 4; ++k) leftRot[joint][k] = g_fkRot[boneIdx][k];
+    }
     SolveAimArm(boneBuf, pose->bone[3], pose->bone[4], pose->bone[5],
-                &pose->rawPos[3], &pose->rawRot[3],
+                leftPos, leftRot,
                 pose->targetHand[1], pose->targetElbow[1], pose->targetLeftRot);
 }
 
