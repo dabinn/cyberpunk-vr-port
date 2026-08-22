@@ -48,7 +48,7 @@ struct LiveControls {
     volatile int xrMovementSource;  // 0 = Game, 1 = HMD, 2 = LeftHand, 3 = RightHand
     volatile int xrXInputInstall;   // 1 = install the XInput entry-point detour at startup (default 1, set 0 in vrport.ini to fully bypass)
     volatile int xrInputActions;    // 1 = create gameplay XrActions (thumbstick/trigger/buttons). 0 = pose-only legacy behaviour
-    volatile int xrChordActivation; // 0 = left L3 + right stick, 1 = right L3 + left stick with click swap, 2 = right thumbrest + left stick
+    volatile int xrChordActivation; // 0 = left L3 + right stick, 1 = right R3 + left stick, 2 = right thumbrest + left stick
     volatile int xrExtraChordActions; // 1 = enable recenter/F10 chord actions; D-pad and Back remain unconditional
     volatile int xrFullStickSprintCrouch; // 1 = full-forward LS sends L3 and full-down RS sends R3
     volatile int xrMonoXQueueWait;  // 1 = mono path inserts cross-queue Wait before depth capture (legacy). 0 = skip it -- avoids CP2077 async-compute Wait cycle that froze present thread.

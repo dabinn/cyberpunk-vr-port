@@ -755,6 +755,12 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     auto fGetSlot = RED4ext::CGlobalFunction::Create("GetVRSharedSlot", "GetVRSharedSlot", &GetVRSharedSlot);
     fGetSlot->flags = flags; fGetSlot->AddParam("Int32", "idx"); fGetSlot->SetReturnType("Float");
     rtti->RegisterFunction(fGetSlot);
+    auto fGripRoute = RED4ext::CGlobalFunction::Create(
+        "SetVRRightGripRoute", "SetVRRightGripRoute", &SetVRRightGripRoute);
+    fGripRoute->flags = flags;
+    fGripRoute->AddParam("Int32", "route");
+    fGripRoute->SetReturnType("Int32");
+    rtti->RegisterFunction(fGripRoute);
 
     auto f61 = RED4ext::CGlobalFunction::Create("SetVRWeaponAim", "SetVRWeaponAim", &SetVRWeaponAim);
     f61->flags = flags; f61->SetReturnType("Int32");
@@ -905,4 +911,3 @@ void CyberpunkVR_RegisterHandsNatives() {
     rtti->AddRegisterCallback(RegisterTypes);
     rtti->AddPostRegisterCallback(PostRegisterTypes);
 }
-

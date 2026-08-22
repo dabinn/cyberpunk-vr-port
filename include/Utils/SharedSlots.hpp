@@ -197,4 +197,7 @@ constexpr int kTriggerOverride    = 161;   // 0 pass / 1 block / 2 force, CET ->
 constexpr int kWheelArmedMask     = 163;
 constexpr int kWheelArmedRightBit = 1;
 constexpr int kWheelArmedLeftBit  = 2;
+// Right-grip routing selected by the CET holster-zone classifier. 0 = unavailable,
+// 1 = ordinary gameplay RB, 2 = holster/reload/wheel ownership.
+constexpr int kRightGripRoute     = 164;
 } // namespace vrshared

@@ -868,7 +868,7 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             ImGui::TextUnformatted("Emulate D-pad and Additional Controls");
             ImGui::TextUnformatted("Chord Activation Method");
             changed |= ImGui::RadioButton("L3 button - left thumbstick", &state.xrChordActivation, 0);
-            changed |= ImGui::RadioButton("L3 button - right thumbstick (swap L3/R3)", &state.xrChordActivation, 1);
+            changed |= ImGui::RadioButton("R3 button - right thumbstick", &state.xrChordActivation, 1);
             const bool thumbrestAvailable = OpenXRManager::Get().IsRightThumbrestAvailable();
             changed |= ImGui::RadioButton(
                 thumbrestAvailable ? "Right thumbrest" : "Right thumbrest (unavailable)",
@@ -896,7 +896,7 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                 ImGui::BulletText(state.xrExtraChordActions != 0
                     ? "Extra actions: X = Recenter, Y = F10 Menu"
                     : "Extra actions: disabled");
-                ImGui::BulletText("Thumb clicks: left = R3, right = L3");
+                ImGui::BulletText("Thumb clicks: left = L3, right = R3 / slide release");
             } else {
                 ImGui::BulletText("Touch right thumbrest: left stick = D-pad, left Menu = Back/Select");
                 ImGui::BulletText(state.xrExtraChordActions != 0
