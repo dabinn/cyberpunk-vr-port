@@ -73,6 +73,9 @@ public:
     // must not read the cached atomics above.
     bool LocateHeadPoseAt(XrTime displayTime, OpenXRHeadPose* out);
     void RequestRecenter();
+    uint32_t GetRecenterGeneration() const {
+        return m_recenterGeneration.load(std::memory_order_acquire);
+    }
     void OnPresent(IDXGISwapChain* swapChain);
     // Run one XR frame inline on the Present thread instead of a dedicated
     // frame thread.
@@ -1074,6 +1077,9 @@ private:
     std::atomic<float> m_linVelY = 0.0f;
     std::atomic<float> m_linVelZ = 0.0f;
     std::atomic<bool> m_recenterRequested = false;
+    // Advances only after a newly requested/initial recenter base has actually been captured.
+    // Consumers use this edge to discard offsets expressed in the previous tracking frame.
+    std::atomic<uint32_t> m_recenterGeneration{0};
     std::atomic<bool> m_syncedPoseValid = false;
     std::atomic<float> m_syncedPosX = 0.0f;
     std::atomic<float> m_syncedPosY = 0.0f;

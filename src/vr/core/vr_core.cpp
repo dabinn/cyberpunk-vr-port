@@ -2368,13 +2368,14 @@ static volatile float g_headingPitchS = 0.0f;  // pitch quaternion is (s, 0, 0, 
 static volatile float g_headingPitchC = 1.0f;
 static volatile uint32_t g_headingValid = 0;   // 0 on the shot frame / native-aim mode
 
-// Physical body-follow state. Gameplay heading advances at the animation tick rate while the
-// render camera remains on the continuous HMD timeline. Pending yaw is injected but not yet
-// visible in the engine heading; applied yaw is visible and therefore removed from camera
-// composition until it is transferred into the OpenXR recenter base when the mode is disabled.
+// Physical body-follow state. Gameplay heading advances through the existing deltaHead path
+// while the render camera remains on the continuous HMD timeline. Pending yaw has been injected
+// but is not yet visible in gameYaw; applied yaw is the observed body turn and remains a
+// tracking-to-game offset until the user explicitly recenters.
 static std::atomic<int>   g_bodyFollowYawActive{0};
 static std::atomic<float> g_bodyFollowYawPending{0.0f};
 static std::atomic<float> g_bodyFollowYawApplied{0.0f};
+static std::mutex g_bodyFollowYawMutex;
 
 static float WrapYawPi(float value) {
     while (value >  3.14159265f) value -= 6.28318531f;
@@ -2383,13 +2384,22 @@ static float WrapYawPi(float value) {
 }
 
 static float ResolveBodyFollowRenderYaw(float gameYaw) {
+    std::lock_guard<std::mutex> lock(g_bodyFollowYawMutex);
     static bool haveLastGameYaw = false;
     static float lastGameYaw = 0.0f;
-    static bool wasActive = false;
-    static bool baseTransferPending = false;
-    static float transferAmount = 0.0f;
-    static float transferStartHmdYaw = 0.0f;
-    static uint64_t transferStartMs = 0;
+    static uint32_t lastRecenterGeneration = 0;
+
+    const uint32_t recenterGeneration = OpenXRManager::Get().GetRecenterGeneration();
+    if (lastRecenterGeneration == 0) {
+        lastRecenterGeneration = recenterGeneration;
+    } else if (recenterGeneration != lastRecenterGeneration) {
+        lastRecenterGeneration = recenterGeneration;
+        lastGameYaw = gameYaw;
+        haveLastGameYaw = true;
+        g_bodyFollowYawPending.store(0.0f, std::memory_order_release);
+        g_bodyFollowYawApplied.store(0.0f, std::memory_order_release);
+        return gameYaw;
+    }
 
     if (!haveLastGameYaw) {
         lastGameYaw = gameYaw;
@@ -2398,51 +2408,18 @@ static float ResolveBodyFollowRenderYaw(float gameYaw) {
     const float observedDelta = WrapYawPi(gameYaw - lastGameYaw);
     lastGameYaw = gameYaw;
 
-    const bool active = g_bodyFollowYawActive.load(std::memory_order_acquire) != 0;
-    if (active) {
-        if (!wasActive) {
-            g_bodyFollowYawApplied.store(0.0f, std::memory_order_release);
-            baseTransferPending = false;
-            wasActive = true;
-        }
-
+    if (g_bodyFollowYawActive.load(std::memory_order_acquire) != 0) {
         const float pending = g_bodyFollowYawPending.load(std::memory_order_acquire);
         if (fabsf(pending) > 0.00001f && observedDelta * pending > 0.0f) {
             float consumed = fminf(fabsf(observedDelta), fabsf(pending));
             if (pending < 0.0f) consumed = -consumed;
             g_bodyFollowYawPending.fetch_add(-consumed, std::memory_order_acq_rel);
-            g_bodyFollowYawApplied.fetch_add(consumed, std::memory_order_acq_rel);
-        }
-        return gameYaw - g_bodyFollowYawApplied.load(std::memory_order_acquire);
-    }
-
-    if (wasActive) {
-        wasActive = false;
-        g_bodyFollowYawPending.store(0.0f, std::memory_order_release);
-        transferAmount = WrapYawPi(g_bodyFollowYawApplied.load(std::memory_order_acquire));
-        if (fabsf(transferAmount) > 0.0001f) {
-            transferStartHmdYaw = OpenXRManager::Get().GetHmdYawRelToBody();
-            transferStartMs = GetTickCount64();
-            OpenXRManager::Get().RotateBaseYaw(transferAmount);
-            baseTransferPending = true;
-        } else {
-            g_bodyFollowYawApplied.store(0.0f, std::memory_order_release);
+            const float applied = g_bodyFollowYawApplied.load(std::memory_order_acquire);
+            g_bodyFollowYawApplied.store(WrapYawPi(applied + consumed), std::memory_order_release);
         }
     }
 
-    if (baseTransferPending) {
-        const float hmdDelta = WrapYawPi(
-            OpenXRManager::Get().GetHmdYawRelToBody() - transferStartHmdYaw);
-        const float transferError = WrapYawPi(hmdDelta + transferAmount);
-        if (fabsf(transferError) < 0.02f || GetTickCount64() - transferStartMs > 250) {
-            baseTransferPending = false;
-            g_bodyFollowYawApplied.store(0.0f, std::memory_order_release);
-            return gameYaw;
-        }
-        return gameYaw - g_bodyFollowYawApplied.load(std::memory_order_acquire);
-    }
-
-    return gameYaw;
+    return gameYaw - g_bodyFollowYawApplied.load(std::memory_order_acquire);
 }
 
 // The product actually written into both cameras, composed once per present interval.
@@ -6170,6 +6147,7 @@ extern "C" void __fastcall OnOnFootDeltaHeadCallback(float* deltaHead) {
     if (!deltaHead) return;
     if (g_isInVehicle) {
         g_bodyFollowYawActive.store(0, std::memory_order_release);
+        g_bodyFollowYawPending.store(0.0f, std::memory_order_release);
         return;
     }
 
@@ -6178,6 +6156,13 @@ extern "C" void __fastcall OnOnFootDeltaHeadCallback(float* deltaHead) {
     static bool s_bodyFollowControlActive = false;
     static float s_bodyFollowLastHmdYaw = 0.0f;
     static float s_bodyFollowUnwrappedHmdYaw = 0.0f;
+    static uint32_t s_bodyFollowRecenterGeneration = UINT32_MAX;
+    const uint32_t recenterGeneration = OpenXRManager::Get().GetRecenterGeneration();
+    if (s_bodyFollowRecenterGeneration != recenterGeneration) {
+        s_bodyFollowRecenterGeneration = recenterGeneration;
+        s_bodyFollowControlActive = false;
+        g_bodyFollowYawPending.store(0.0f, std::memory_order_release);
+    }
     if (!bodyFollow) s_bodyFollowControlActive = false;
 
     int idx = GetSnapTurnYawIndex();
@@ -6223,6 +6208,7 @@ extern "C" void __fastcall OnOnFootDeltaHeadCallback(float* deltaHead) {
     // Physical body rotation OFF keeps camera and body independent. Snap turn remains a
     // separate explicit gameplay-heading input.
     if (!bodyFollow) {
+        g_bodyFollowYawPending.store(0.0f, std::memory_order_release);
         deltaHead[idx] += snap;
         return;
     }
@@ -6726,9 +6712,9 @@ extern "C" void OnOnFootMoveXYCallback(void* moveStruct) {
         case 3: yaw = OpenXRManager::Get().GetHandYawRelToBody(1); break;
         default: return;
     }
-    if (g_bodyFollowYawActive.load(std::memory_order_acquire) != 0) {
-        yaw -= g_bodyFollowYawApplied.load(std::memory_order_acquire);
-    }
+    // Applied body-follow yaw remains part of the tracking-to-game transform until an
+    // explicit recenter, even if the F10 option is toggled off in the meantime.
+    yaw -= g_bodyFollowYawApplied.load(std::memory_order_acquire);
     float c = cosf(yaw);
     float s = sinf(yaw);
     p[0] = x * c - y * s;
