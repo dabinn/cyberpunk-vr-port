@@ -3,6 +3,7 @@
 #include "Runtimes/OpenXRManager.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -139,6 +140,7 @@ HWND g_hwnd = nullptr;
 WNDPROC g_originalWndProc = nullptr;
 bool g_imguiInitialized = false;
 bool g_menuVisible = false;
+std::atomic<uint32_t> g_menuToggleRequests{0};
 bool g_drawHandLocator = false;
 bool g_drawHandProxy3D = false;
 bool g_drawHandDebugAxes = false;
@@ -443,6 +445,14 @@ bool IsBlockedInputMessage(UINT msg) {
     }
 }
 
+void ToggleOverlayMenu() {
+    g_menuVisible = !g_menuVisible;
+    if (g_menuVisible) {
+        ReleaseGameMouseCapture();
+    }
+    if (g_verboseLog) Log("ImGui overlay %s.\n", g_menuVisible ? "shown" : "hidden");
+}
+
 LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static int totalMsgCount = 0;
     if (g_verboseLog && totalMsgCount++ % 5000 == 0) {
@@ -482,11 +492,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     // 2. Handle menu toggle
     if ((msg == WM_KEYUP || msg == WM_SYSKEYUP) && (wParam == VK_F10 || wParam == VK_INSERT)) {
-        g_menuVisible = !g_menuVisible;
-        if (g_menuVisible) {
-            ReleaseGameMouseCapture();
-        }
-        if (g_verboseLog) Log("ImGui overlay %s.\n", g_menuVisible ? "shown" : "hidden");
+        ToggleOverlayMenu();
         return 0;
     }
 
@@ -504,6 +510,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 }
 }  // namespace overlay
 using namespace overlay;
+
+extern "C" void RequestOverlayToggle() {
+    g_menuToggleRequests.fetch_add(1, std::memory_order_release);
+}
 
 void OverlaySetDeviceAndQueue(ID3D12Device* device, ID3D12CommandQueue* queue) {
     if (device == g_device && queue == g_queue) return;
@@ -536,6 +546,11 @@ void OverlaySetWindow(HWND hwnd) {
 
 void OverlayRender(IDXGISwapChain* swapChain) {
     if (!EnsureImGui(swapChain)) return;
+
+    const uint32_t toggleRequests = g_menuToggleRequests.exchange(0, std::memory_order_acq_rel);
+    if ((toggleRequests & 1u) != 0u) {
+        ToggleOverlayMenu();
+    }
 
     DXGI_SWAP_CHAIN_DESC desc{};
     if (FAILED(swapChain->GetDesc(&desc))) return;
@@ -835,4 +850,3 @@ bool OverlayRecordIntoTarget(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
     if (anything) ++CyberpunkVR_DebugOverlaySecondEyeDraws;
     return anything;
 }
-

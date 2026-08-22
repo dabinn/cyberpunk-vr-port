@@ -50,6 +50,13 @@ struct LiveControlsUiState {
     // OpenXR binding or XInput entry-point patch can't keep CP2077 from booting.
     int xrXInputInstall;
     int xrInputActions;
+    // Controller chord layout. 0 = left L3 + right stick D-pad (upstream default),
+    // 1 = right L3 + left stick D-pad with L3/R3 click swap, 2 = right
+    // thumbrest + left stick D-pad.
+    int xrChordActivation;
+    // Optional chord actions only: VR recenter and F10 overlay toggle. D-pad
+    // and Back/Select remain active regardless of this value.
+    int xrExtraChordActions;
     // Mono submit safety flags. Defaults 0 keep CP2077 mono mode from hanging on
     // the menu (see cybervrport-controller-bindings memory for the trace).
     int xrMonoXQueueWait;

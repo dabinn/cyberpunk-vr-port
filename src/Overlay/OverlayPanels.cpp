@@ -865,6 +865,47 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
 
             ImGui::Separator();
+            ImGui::TextUnformatted("Emulate D-pad and Additional Controls");
+            ImGui::TextUnformatted("Chord Activation Method");
+            changed |= ImGui::RadioButton("L3 button - left thumbstick", &state.xrChordActivation, 0);
+            changed |= ImGui::RadioButton("L3 button - right thumbstick (swap L3/R3)", &state.xrChordActivation, 1);
+            const bool thumbrestAvailable = OpenXRManager::Get().IsRightThumbrestAvailable();
+            changed |= ImGui::RadioButton(
+                thumbrestAvailable ? "Right thumbrest" : "Right thumbrest (unavailable)",
+                &state.xrChordActivation,
+                2);
+            if (!thumbrestAvailable && state.xrChordActivation == 2) {
+                ImGui::TextDisabled("Using L3 button - left thumbstick until right thumbrest is available.");
+            }
+            changed |= CheckboxInt("Extra Chord Actions", &state.xrExtraChordActions);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Enable extra chord actions for VR Recenter and the F10 Menu.\n"
+                                  "D-pad emulation and Back/Select remain available when this option is disabled.");
+            }
+            ImGui::TextDisabled("Current chord binding:");
+            const int effectiveChord = (state.xrChordActivation == 2 && !thumbrestAvailable)
+                ? 0 : state.xrChordActivation;
+            if (effectiveChord == 0) {
+                ImGui::BulletText("Hold left thumb click: right stick = D-pad, left Menu = Back/Select");
+                ImGui::BulletText(state.xrExtraChordActions != 0
+                    ? "Extra actions: A = Recenter, B = F10 Menu"
+                    : "Extra actions: disabled");
+                ImGui::BulletText("Thumb clicks: left = L3, right = R3");
+            } else if (effectiveChord == 1) {
+                ImGui::BulletText("Hold right thumb click: left stick = D-pad, left Menu = Back/Select");
+                ImGui::BulletText(state.xrExtraChordActions != 0
+                    ? "Extra actions: X = Recenter, Y = F10 Menu"
+                    : "Extra actions: disabled");
+                ImGui::BulletText("Thumb clicks: left = R3, right = L3");
+            } else {
+                ImGui::BulletText("Touch right thumbrest: left stick = D-pad, left Menu = Back/Select");
+                ImGui::BulletText(state.xrExtraChordActions != 0
+                    ? "Extra actions: X = Recenter, Y = F10 Menu"
+                    : "Extra actions: disabled");
+                ImGui::BulletText("Thumb clicks: left = L3, right = R3");
+            }
+
+            ImGui::Separator();
             ImGui::TextUnformatted("Current binding (on foot):");
             ImGui::BulletText("Left stick    - walk / jog | FULL forward, HELD 0.2 s = sprint");
             ImGui::BulletText("Right stick X - turn camera (Y = pitch unless Disable Mouse Y is on)");
@@ -881,10 +922,6 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             ImGui::BulletText("Left  grip    - grab the magazine during a reload");
             ImGui::BulletText("Left  grip at the LEFT EAR - scanner, held as long as the gesture is");
             ImGui::BulletText("Left  menu button - pause menu");
-            ImGui::Spacing();
-            ImGui::TextUnformatted("D-Pad, as a chord: HOLD the LEFT stick click, pick with the RIGHT stick");
-            ImGui::BulletText("Right stick UP / DOWN / LEFT / RIGHT -> D-Pad UP / DOWN / LEFT / RIGHT");
-            ImGui::BulletText("Released with no direction = the vanilla left stick click (L3)");
             ImGui::Spacing();
             ImGui::TextUnformatted("In a vehicle (the gestures above do not apply):");
             ImGui::BulletText("HOLD X        - get out. B is never the exit here, so no stray press ejects you");

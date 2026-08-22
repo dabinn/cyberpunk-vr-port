@@ -54,6 +54,8 @@ extern "C" float GetPoseBlend();
 extern "C" float GetFlowSmooth();
 extern "C" float GetHmdTrackingSmooth();
 extern "C" int GetInputActionsEnabled();
+extern "C" int GetChordActivationMethod();
+extern "C" int GetExtraChordActionsEnabled();
 extern "C" int GetMonoXQueueWait();
 extern "C" int GetMonoDepthCapture();
 // GPU cross-queue barrier helper (defined in swapchain_hooks.cpp).
