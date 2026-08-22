@@ -1449,6 +1449,11 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                                       "OFF: Aim with your VR controllers (6DoF Hand Aim).\n"
                                       "Shots always fire from the actual weapon barrel.");
                 }
+                changed |= CheckboxInt("Align ADS sights to right eye", &state.xrAdsRightEyeAlignment);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Move the vanilla ADS arm pose from the centre-eye axis toward the right eye.\n"
+                                      "Applies to non-VRIK and Head Aim ADS. Off by default for comparison.");
+                }
                 ImGui::Checkbox("Weapon Aim lasewr dot (where the bullet hits)", &g_drawBarrelCross);
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Red dot projected from the actual weapon muzzle direction through the\n"

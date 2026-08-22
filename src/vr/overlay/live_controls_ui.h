@@ -120,6 +120,9 @@ struct LiveControlsUiState {
     // free-look band; locomotion still uses the independently selected source. 0 (default) =
     // classic stick / snap-turn heading. Vehicles are unaffected either way. F10 -> VRIK tab.
     int xrPhysicalBodyRotation;
+    // Move the authored ADS arm pose from the cyclopean camera axis toward the right eye.
+    // Off by default so the vanilla pose remains the baseline for comparisons.
+    int xrAdsRightEyeAlignment;
 };
 
 // Read-only snapshot for the in-headset compact ADS camera diagnostic. Positions

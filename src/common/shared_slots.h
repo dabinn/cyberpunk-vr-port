@@ -123,6 +123,7 @@
 //  [162]       PublicSafeToReady transition active (0/1)      redscript -> plugin -> overlay
 //  [163]       body-follow yaw removed from render heading (rad)  dxgi -> full VRIK
 //              (part of the [143] view packet; full VRIK adds it back only for world-to-model)
+//  [164]       right-eye ADS arm alignment enabled             dxgi -> plugin
 // ============================================================================
 
 namespace vrshared {
@@ -164,4 +165,5 @@ constexpr int kWeaponPsmState    = 160;
 constexpr int kAimInRemaining    = 161;
 constexpr int kSafeToReady       = 162;
 constexpr int kBodyFollowAppliedYaw = 163;
+constexpr int kAdsRightEyeAlignment = 164;
 } // namespace vrshared
