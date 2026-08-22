@@ -251,11 +251,11 @@ extern volatile int       g_VRCamPairValid;
 // accept [108..110] only if it (or its half) lands within 2m of the known-good
 // render camera position; otherwise report failure so the caller falls back to
 // the legacy composition instead of solving toward garbage.
-// VIEW PACKET (audit fix): [104..111] + [141] latched ONCE per solve under the dxgi
+// VIEW PACKET (audit fix): [104..111] + [141] + [163] latched ONCE per solve under the dxgi
 // seqlock [143], so BOTH arms and the view-pos resolver consume ONE render frame.
 // Mixing a latched vq (previous frame) with a directly-read fresh yaw produced the
 // snap-turn arm double; per-arm direct reads produced the left-only head-turn ghost.
-inline float g_viewPkt[17] = { 0,0,0,1, 0,0,0, 0, 0, 0, 0,0,0, 0,0,0,1 }; // +[13..16]=head ori the view was built with
+inline float g_viewPkt[18] = { 0,0,0,1, 0,0,0, 0, 0, 0, 0,0,0, 0,0,0,1, 0 }; // +[13..16]=head ori, [17]=body-follow yaw
 inline bool  g_viewPktValid = false;
 
 // Shared snap-window trace writer (bin\x64\cyberpunkvr_snapwin.log). Used by the
@@ -288,7 +288,7 @@ inline void VRIK_LatchViewPacket() {
         const uint32_t s0 = *seq;
         if (s0 == 0u) return;                    // writer absent (older dxgi)
         if (s0 & 1u) continue;                   // write in progress
-        float tmp[17];
+        float tmp[18];
         tmp[0] = g_pSharedHands[104]; tmp[1] = g_pSharedHands[105];
         tmp[2] = g_pSharedHands[106]; tmp[3] = g_pSharedHands[107];
         tmp[4] = g_pSharedHands[108]; tmp[5] = g_pSharedHands[109];
@@ -300,9 +300,10 @@ inline void VRIK_LatchViewPacket() {
         tmp[12] = g_pSharedHands[220];
         tmp[13] = g_pSharedHands[227]; tmp[14] = g_pSharedHands[228];
         tmp[15] = g_pSharedHands[229]; tmp[16] = g_pSharedHands[230];
+        tmp[17] = g_pSharedHands[vrshared::kBodyFollowAppliedYaw];
         const float ok142 = g_pSharedHands[142];
         if (*seq == s0) {
-            for (int k = 0; k < 17; ++k) g_viewPkt[k] = tmp[k];
+            for (int k = 0; k < 18; ++k) g_viewPkt[k] = tmp[k];
             g_viewPktValid = (ok142 == 1.0f);
             // SNAP EVENT SYNC (trace-driven; replaces both entity/camera comparators --
             // snap_trace PROVED the puppet yaw sits up to ~10deg off the heading
@@ -3655,7 +3656,11 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
                                     // frame. Fallback (older dxgi): yaw extracted from vq.
                                     float vyaw;
                                       if (g_viewPktValid) {
-                                        vyaw = g_viewPkt[8];
+                                        // Physical body follow rotates the avatar entity while
+                                        // leaving tracked HMD/controller world poses fixed. Add
+                                        // back the yaw removed from the render heading so the
+                                        // model-space hand target counter-rotates the entity.
+                                        vyaw = g_viewPkt[8] + g_viewPkt[17];
                                     } else {
                                         const float fX = 2.0f*(vq[0]*vq[1] - vq[3]*vq[2]);
                                         const float fY = 1.0f - 2.0f*(vq[0]*vq[0] + vq[2]*vq[2]);
@@ -3945,7 +3950,9 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
                                     // frame. Fallback (older dxgi): yaw extracted from vq.
                                     float vyaw;
                                       if (g_viewPktValid) {
-                                        vyaw = g_viewPkt[8];
+                                        // Keep the left controller in the same tracked world frame
+                                        // as the right controller when body follow turns the entity.
+                                        vyaw = g_viewPkt[8] + g_viewPkt[17];
                                     } else {
                                         const float fX = 2.0f*(vq[0]*vq[1] - vq[3]*vq[2]);
                                         const float fY = 1.0f - 2.0f*(vq[0]*vq[0] + vq[2]*vq[2]);

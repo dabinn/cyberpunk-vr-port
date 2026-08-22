@@ -14,7 +14,7 @@
 // Cross-thread rules:
 //  * [127] seqlock (odd = write in progress) brackets the OpenXR hand/HMD
 //    publish; the plugin latches a whole coherent frame (RefreshHandsSnapshot).
-//  * [143] seqlock brackets the dxgi render-view packet [104..111] + [141..142].
+//  * [143] seqlock brackets the dxgi render-view packet [104..111], [141..142], and [163].
 //  * Everything else is single-writer / relaxed (float-atomic on x64).
 //
 // ---------------------------------------------------------------------------
@@ -121,6 +121,8 @@
 //  [160]       PlayerStateMachine.Weapon value                redscript -> plugin -> overlay
 //  [161]       ADS AimInTimeRemaining                         redscript -> plugin -> overlay
 //  [162]       PublicSafeToReady transition active (0/1)      redscript -> plugin -> overlay
+//  [163]       body-follow yaw removed from render heading (rad)  dxgi -> full VRIK
+//              (part of the [143] view packet; full VRIK adds it back only for world-to-model)
 // ============================================================================
 
 namespace vrshared {
@@ -161,4 +163,5 @@ constexpr int kAiming            = 159;
 constexpr int kWeaponPsmState    = 160;
 constexpr int kAimInRemaining    = 161;
 constexpr int kSafeToReady       = 162;
+constexpr int kBodyFollowAppliedYaw = 163;
 } // namespace vrshared
