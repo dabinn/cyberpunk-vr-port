@@ -82,19 +82,31 @@ extern "C" __declspec(dllexport) int   CyberpunkVR_BodyYawFollow        = 0;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugVrikNativePairPublished = 0;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugVrikNativePairRejected = 0;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugVrikNativePairPhaseMiss = 0;
-// 25 DEGREES OF FREE LOOK, and that is the only number this feature has.
-//
-// Inside the cone nothing is issued: you can glance around without the character turning, which is
-// what a neck is for. Outside it the WHOLE residual goes in the frame it appears -- no rate limit, no
-// hold timer, no per-frame ceiling, no stepping. The body therefore never lags the head by more than
-// the cone, and it settles exactly on the cone edge rather than oscillating across it, because only
-// the part beyond the edge is ever asked for.
-//
-// Tried at 5, which tracked the head almost rigidly, and at 0, where the body faces exactly where the
-// head faces at all times. Both work; 25 is the one that leaves a neck.
-extern "C" __declspec(dllexport) float CyberpunkVR_BodyYawFollowDeadDeg = 25.0f;
+// Keep a generous free-look band. The body follows only the part outside it, so seated players can
+// glance around without continuously rotating the avatar under the headset.
+extern "C" __declspec(dllexport) float CyberpunkVR_BodyYawFollowDeadDeg = 45.0f;
 
 namespace {
+constexpr float kPi = 3.14159265f;
+constexpr float kTwoPi = 6.28318531f;
+
+float WrapYawPi(float value) {
+    while (value >  kPi) value -= kTwoPi;
+    while (value < -kPi) value += kTwoPi;
+    return value;
+}
+
+// A request is not camera compensation until the engine's own body-yaw census confirms it. This
+// split is the essential difference from v0.1.2's original requested-yaw accumulator: a clamped,
+// delayed or rejected delta cannot move the rendered frame ahead of the actual player entity.
+std::atomic<float> s_bodyYawPending{0.0f};
+std::atomic<float> s_bodyYawApplied{0.0f};
+bool s_followControllerActive = false;
+float s_lastHmdYaw = 0.0f;
+float s_unwrappedHmdYaw = 0.0f;
+bool s_lastEngineYawValid = false;
+float s_lastEngineYaw = 0.0f;
+
 std::atomic<uint32_t> s_nativePairSeq{0};
 struct AtomicNativePair {
     std::atomic<float> camQuat[4]{};
@@ -194,6 +206,14 @@ bool HeadYawRelBase(float* outYaw) {
 
 }  // namespace
 
+extern "C" void BodyYawFollowSetEnabled(int enabled) {
+    CyberpunkVR_BodyYawFollow = enabled ? 1 : 0;
+    if (!enabled) {
+        s_bodyYawPending.store(0.0f, std::memory_order_release);
+        s_followControllerActive = false;
+    }
+}
+
 // THE STEP TO INJECT INTO THE ENGINE'S HEADING THIS FRAME, radians. Called once per frame from the
 // on-foot heading hook, which is the game's own turn channel.
 //
@@ -210,19 +230,23 @@ bool HeadYawRelBase(float* outYaw) {
 // world -- a direction cannot be judged against a rotating world.
 extern "C" float BodyYawFollowStep() {
     ++CyberpunkVR_DebugBodyFollowCalls;
-    if (!CyberpunkVR_BodyYawFollow) {
-        // Give the realign back when the feature is switched off, or the view would keep the
-        // subtraction for as long as the session lasts.
-        CyberpunkVR_BodyYawRealignRad = 0.0f;
-        CyberpunkVR_DebugBodyFollowOffsetDeg = 0.0f;
-        return 0.0f;
-    }
+    if (!CyberpunkVR_BodyYawFollow) return 0.0f;
     float hmdYaw = 0.0f;
     if (!HeadYawRelBase(&hmdYaw)) return 0.0f;
 
-    float resid = hmdYaw - CyberpunkVR_BodyYawRealignRad;
-    while (resid >  3.14159265f) resid -= 6.28318531f;
-    while (resid < -3.14159265f) resid += 6.28318531f;
+    if (!s_followControllerActive) {
+        s_lastHmdYaw = hmdYaw;
+        s_unwrappedHmdYaw = hmdYaw;
+        s_bodyYawPending.store(0.0f, std::memory_order_release);
+        s_followControllerActive = true;
+        return 0.0f;
+    }
+    s_unwrappedHmdYaw += WrapYawPi(hmdYaw - s_lastHmdYaw);
+    s_lastHmdYaw = hmdYaw;
+
+    const float ownedYaw = s_bodyYawApplied.load(std::memory_order_acquire) +
+                           s_bodyYawPending.load(std::memory_order_acquire);
+    const float resid = s_unwrappedHmdYaw - ownedYaw;
     CyberpunkVR_DebugBodyFollowErrDeg = resid * 57.2957795f;
 
     // Asymmetric on purpose, and that is what keeps it stable: only the part beyond the cone is
@@ -235,18 +259,12 @@ extern "C" float BodyYawFollowStep() {
     else if (resid < -cone) step = resid + cone;
     if (step == 0.0f) return 0.0f;
 
-    // NO CEILING, NO RATE, NO HOLD. The whole residual outside the cone goes in this frame, on the
-    // user's call: the body is to be as fast as the channel can carry it. A 45 deg per-frame clamp
-    // lived here briefly; the snap turn puts that much through this same channel in one frame anyway,
-    // so the clamp only ever limited how fast a big head turn could be answered. If the engine ever
-    // refuses part of a large delta the view would drift by the refused part -- that would show up as
-    // the view creeping during fast turns, and nothing else looks like it.
+    constexpr float kMaxStep = 0.523598776f; // 30 degrees per gameplay callback
+    if (step > kMaxStep) step = kMaxStep;
+    if (step < -kMaxStep) step = -kMaxStep;
+    if (std::fabs(step) <= 0.0001f) return 0.0f;
 
-    CyberpunkVR_BodyYawRealignRad += step;
-    while (CyberpunkVR_BodyYawRealignRad >  3.14159265f) CyberpunkVR_BodyYawRealignRad -= 6.28318531f;
-    while (CyberpunkVR_BodyYawRealignRad < -3.14159265f) CyberpunkVR_BodyYawRealignRad += 6.28318531f;
-    CyberpunkVR_DebugBodyFollowOffsetDeg = CyberpunkVR_BodyYawRealignRad * 57.2957795f;
-    ++CyberpunkVR_DebugBodyFollowApplied;
+    s_bodyYawPending.fetch_add(step, std::memory_order_acq_rel);
     return step;
 }
 
@@ -266,6 +284,24 @@ extern "C" void BodyYawFollowTick(float engineZ, float engineW, const float* eng
     if (wz == 0.0f && ww == 0.0f) return;
     if (!enginePos) return;
     const float yaw = 2.0f * std::atan2(wz, ww);
+
+    if (s_lastEngineYawValid) {
+        const float observedDelta = WrapYawPi(yaw - s_lastEngineYaw);
+        const float pending = s_bodyYawPending.load(std::memory_order_acquire);
+        if (std::fabs(pending) > 0.00001f && observedDelta * pending > 0.0f) {
+            float consumed = std::fmin(std::fabs(observedDelta), std::fabs(pending));
+            if (pending < 0.0f) consumed = -consumed;
+            s_bodyYawPending.fetch_add(-consumed, std::memory_order_acq_rel);
+            const float applied = WrapYawPi(
+                s_bodyYawApplied.fetch_add(consumed, std::memory_order_acq_rel) + consumed);
+            s_bodyYawApplied.store(applied, std::memory_order_release);
+            CyberpunkVR_BodyYawRealignRad = applied;
+            CyberpunkVR_DebugBodyFollowOffsetDeg = applied * 57.2957795f;
+            ++CyberpunkVR_DebugBodyFollowApplied;
+        }
+    }
+    s_lastEngineYaw = yaw;
+    s_lastEngineYawValid = true;
     const float h = yaw * 0.5f;
     const float currentEntityQuat[4] = { 0.0f, 0.0f, std::sin(h), std::cos(h) };
 
