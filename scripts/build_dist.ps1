@@ -106,6 +106,12 @@ foreach ($a in @("cyberpunkvrport.archive","VRCigarette.archive.xl")) {
     else { Write-Host "[!] $a is not in the repo -- run sync_assets.ps1 first" }
 }
 
+# Include a standalone uninstaller. It uses the mod's fixed names rather than build-time hashes,
+# so locally rebuilt or manually replaced plugin DLLs are still removed.
+$uninstallScriptPath = Join-Path $Out "uninstall_cyberpunkvrport.ps1"
+Copy-Item -LiteralPath (Need (Join-Path $PSScriptRoot "uninstall_cyberpunkvrport.ps1") "uninstaller") -Destination $uninstallScriptPath
+$manifest += [pscustomobject]@{ Path = "uninstall_cyberpunkvrport.ps1"; Bytes = (Get-Item $uninstallScriptPath).Length }
+
 # ---- the OpenXR probe is NOT packaged ---------------------------------------------------------
 # It stays in tools\xr_probe\ and goes to a tester by hand, when there is something to measure.
 # Registering a MACHINE-WIDE OpenXR API layer is not a thing to ship to everyone who installs a
@@ -169,8 +175,16 @@ IF SOMETHING IS WRONG
     red4ext\logs\                          script validation errors land here
     bin\x64\plugins\cyber_engine_tweaks\   per-mod CET logs
 
-    Uninstall: delete the files listed above. Nothing is written outside the game folder except
-    the settings file named at the top, and its backup sits next to it.
+UNINSTALL
+    Close the game, open PowerShell in the Cyberpunk 2077 game root, and run:
+
+        pwsh -File .\uninstall_cyberpunkvrport.ps1
+
+    Preview without deleting anything by adding -WhatIf. Add -KeepSettings to retain runtime
+    settings, opt-out markers, calibration data, and plugin logs.
+
+    The uninstaller does not restore UserSettings.json automatically. Nothing else is written
+    outside the game folder; the first-launch backup described above sits next to that file.
 
 Built from commit $(git -C $RepoRoot rev-parse --short HEAD 2>$null) on $(Get-Date -Format "yyyy-MM-dd").
 "@
