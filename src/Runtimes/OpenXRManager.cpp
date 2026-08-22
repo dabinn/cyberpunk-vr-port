@@ -736,6 +736,8 @@ bool OpenXRManager::Init() {
             makeAction(m_primaryButtonAction,   XR_ACTION_TYPE_BOOLEAN_INPUT,  "primary_button",   "Primary Button (A/X)", true);
             makeAction(m_secondaryButtonAction, XR_ACTION_TYPE_BOOLEAN_INPUT,  "secondary_button", "Secondary Button (B/Y)", true);
             makeAction(m_menuButtonAction,      XR_ACTION_TYPE_BOOLEAN_INPUT,  "menu",             "Menu Button",          false);
+            makeAction(m_rightThumbrestAction,  XR_ACTION_TYPE_BOOLEAN_INPUT,  "right_thumbrest",  "Right Thumbrest",      false);
+            xrStringToPath(m_instance, "/interaction_profiles/oculus/touch_controller", &m_oculusTouchProfilePath);
         }
         Log("OpenXRManager[Input]: gameplay action set %s (xr_input_actions=%d)\n",
             inputActionsEnabled ? "ENABLED" : "DISABLED (pose-only)", (int)inputActionsEnabled);
@@ -798,6 +800,7 @@ bool OpenXRManager::Init() {
             { m_secondaryButtonAction, "/user/hand/left/input/y/click" },
             { m_secondaryButtonAction, "/user/hand/right/input/b/click" },
             { m_menuButtonAction,      "/user/hand/left/input/menu/click" },
+            { m_rightThumbrestAction,  "/user/hand/right/input/thumbrest/touch" },
         });
 
         // -- Valve Index: A/B on both hands, system as menu --
@@ -1015,6 +1018,8 @@ void OpenXRManager::EndSession() {
     if (m_session == XR_NULL_HANDLE || !m_sessionRunning.load(std::memory_order_relaxed)) return;
     xrEndSession(m_session);
     m_sessionRunning.store(false, std::memory_order_relaxed);
+    m_rightThumbrestProfileKnown.store(false, std::memory_order_relaxed);
+    m_rightThumbrestAvailable.store(false, std::memory_order_relaxed);
     Log("OpenXRManager: Session ended.\n");
 }
 
@@ -1035,6 +1040,9 @@ void OpenXRManager::PollEvents() {
             } else if (m_sessionState == XR_SESSION_STATE_EXITING || m_sessionState == XR_SESSION_STATE_LOSS_PENDING) {
                 m_stopFrameThread.store(true, std::memory_order_relaxed);
             }
+        } else if (event.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED) {
+            m_rightThumbrestProfileKnown.store(false, std::memory_order_relaxed);
+            RefreshRightThumbrestAvailability();
         } else if (event.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
             // Native OpenXR recenter (user held the home / system button, or used the runtime menu) —
             // the runtime is about to remap "forward" of its tracking space at changed->changeTime.
@@ -1048,6 +1056,22 @@ void OpenXRManager::PollEvents() {
         }
 
         event = {XR_TYPE_EVENT_DATA_BUFFER};
+    }
+}
+
+void OpenXRManager::RefreshRightThumbrestAvailability() {
+    if (m_session == XR_NULL_HANDLE || m_handPaths[1] == XR_NULL_PATH
+        || m_oculusTouchProfilePath == XR_NULL_PATH) {
+        return;
+    }
+
+    XrInteractionProfileState profile{XR_TYPE_INTERACTION_PROFILE_STATE};
+    if (XR_SUCCEEDED(xrGetCurrentInteractionProfile(m_session, m_handPaths[1], &profile))
+        && profile.interactionProfile != XR_NULL_PATH) {
+        m_rightThumbrestAvailable.store(
+            profile.interactionProfile == m_oculusTouchProfilePath,
+            std::memory_order_relaxed);
+        m_rightThumbrestProfileKnown.store(true, std::memory_order_relaxed);
     }
 }
 
@@ -2015,6 +2039,10 @@ void OpenXRManager::Shutdown() {
     m_primaryButtonAction = XR_NULL_HANDLE;
     m_secondaryButtonAction = XR_NULL_HANDLE;
     m_menuButtonAction = XR_NULL_HANDLE;
+    m_rightThumbrestAction = XR_NULL_HANDLE;
+    m_oculusTouchProfilePath = XR_NULL_PATH;
+    m_rightThumbrestProfileKnown.store(false, std::memory_order_relaxed);
+    m_rightThumbrestAvailable.store(false, std::memory_order_relaxed);
 
     m_views.clear();
     m_viewConfigViews.clear();
