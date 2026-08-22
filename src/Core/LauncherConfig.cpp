@@ -107,6 +107,8 @@ void InitRuntimePaths() {
     // the binding/entry-point patch keeps the game from reaching its main menu.
     g_liveControls.xrXInputInstall = 1;
     g_liveControls.xrInputActions = 1;
+    g_liveControls.xrChordActivation = 0;
+    g_liveControls.xrExtraChordActions = 1;
 
     // Capture the recenter-request baseline NOW (before CET could write), so the
     // first OnGameAttached this session is seen as a change and triggers a recenter,
@@ -189,6 +191,8 @@ void EnsureLiveControlFileExists() {
     // from reaching its main menu.
     fprintf(file, "xr_xinput_install=1\n");
     fprintf(file, "xr_input_actions=1\n");
+    fprintf(file, "xr_chord_activation=0\n");
+    fprintf(file, "xr_extra_chord_actions=1\n");
     fprintf(file, "xr_mono_xqueue_wait=0\n");
     fprintf(file, "xr_snap_turn_pulse_ms=30\n");
     fprintf(file, "xr_mono_depth_capture=1\n");
@@ -246,4 +250,3 @@ void SaveLauncherConfig(int width, int height) {
     fprintf(file, "debug=%d\n", g_launcherDebug);
     fclose(file);
 }
-
