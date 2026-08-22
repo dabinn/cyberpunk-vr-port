@@ -200,4 +200,7 @@ constexpr int kWheelArmedLeftBit  = 2;
 // Right-grip routing selected by the CET holster-zone classifier. 0 = unavailable,
 // 1 = ordinary gameplay RB, 2 = holster/reload/wheel ownership.
 constexpr int kRightGripRoute     = 164;
+// Persistent opt-in for the authored ADS pose's right-eye translation. Slot 164 was used by the
+// curated v0.1.1 implementation but belongs to kRightGripRoute in this tree.
+constexpr int kAdsRightEyeAlignment = 165;
 } // namespace vrshared

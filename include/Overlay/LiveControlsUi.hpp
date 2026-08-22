@@ -73,6 +73,9 @@ struct LiveControlsUiState {
     // camera to full head-look + head-relative movement). 0 (default) = classic
     // stick / snap-turn heading. Vehicles are unaffected either way. F10 -> VRIK tab.
     int xrPhysicalBodyRotation;
+    // Move the authored ADS arm pose from the cyclopean camera axis toward the right eye.
+    // Off by default so the vanilla pose remains the baseline for comparisons.
+    int xrAdsRightEyeAlignment;
     // Cutscene VRIK suspend (PR #40). The minimum GameplayTier at which the plugin fully suspends
     // the body+arm solve (leaving the engine authored cinematic pose): -1 = never suspend, 0..4 =
     // Tier1..Tier5. Default 3 (Tier4_FPPCinematic = true cinematics). F10 -> VRIK tab.

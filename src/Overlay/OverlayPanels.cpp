@@ -695,6 +695,11 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                                       "the weapon arm. Either way the shot leaves the real muzzle, for guns and\n"
                                       "projectiles alike, and free-look while aiming is preserved.");
                 }
+                changed |= CheckboxInt("Align ADS sights to right eye", &state.xrAdsRightEyeAlignment);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Move the vanilla ADS arm pose from the centre-eye axis toward the right eye.\n"
+                                      "Applies to non-VRIK and Head Aim ADS. Off by default for comparison.");
+                }
                 ImGui::Checkbox("Weapon Aim lasewr dot (where the bullet hits)", &g_drawBarrelCross);
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Red dot projected from the actual weapon muzzle direction through the\n"
