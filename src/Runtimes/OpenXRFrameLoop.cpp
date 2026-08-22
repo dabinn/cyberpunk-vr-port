@@ -1411,7 +1411,12 @@ DWORD OpenXRManager::FrameThreadMain() {
                 constexpr uint16_t XB_Y           = 0x8000;
 
                 bool rightThumbrestTouched = false;
-                bool rightThumbrestAvailable = false;
+                bool rightThumbrestAvailable = m_rightThumbrestAvailable.load(std::memory_order_relaxed);
+                if (gameplayInputActive
+                    && !m_rightThumbrestProfileKnown.load(std::memory_order_relaxed)) {
+                    RefreshRightThumbrestAvailability();
+                    rightThumbrestAvailable = m_rightThumbrestAvailable.load(std::memory_order_relaxed);
+                }
                 if (gameplayInputActive && m_rightThumbrestAction != XR_NULL_HANDLE) {
                     XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
                     gi.action = m_rightThumbrestAction;
@@ -1419,10 +1424,10 @@ DWORD OpenXRManager::FrameThreadMain() {
                     XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
                     if (XR_SUCCEEDED(xrGetActionStateBoolean(m_session, &gi, &st)) && st.isActive) {
                         rightThumbrestAvailable = true;
+                        m_rightThumbrestProfileKnown.store(true, std::memory_order_relaxed);
                         rightThumbrestTouched = st.currentState != XR_FALSE;
                     }
                 }
-                m_rightThumbrestAvailable.store(rightThumbrestAvailable, std::memory_order_relaxed);
 
                 std::lock_guard<std::mutex> handLock(m_handMutex);
                 // ONE INSTANT: the head position that goes with these controller poses, plus the
@@ -1675,13 +1680,16 @@ DWORD OpenXRManager::FrameThreadMain() {
                 struct ChordRuntimeState {
                     int effectiveMode = -1;
                     bool modifierHeld = false;
-                    bool modifierUsed = false;
                     bool modifierPassthrough = false;
+                    bool modifierDeferred = false;
+                    bool chordConsumed = false;
                     bool dpadArmed = false;
                     bool menuDown = false;
                     bool menuChorded = false;
                     bool faceWasDown[4]{};       // X, Y, A, B
                     bool faceChordLatched[4]{};  // suppress until the physical button is released
+                    uint16_t deferredTapButton = 0;
+                    uint64_t deferredTapUntilMs = 0;
                 };
                 static ChordRuntimeState s_chord{};
 
@@ -1713,11 +1721,22 @@ DWORD OpenXRManager::FrameThreadMain() {
                     const int overlayButton = effectiveMode == 0 ? 3 : 1;
                     const bool modifierPressed = effectiveMode == 0 ? stickClicked[0]
                         : (effectiveMode == 1 ? stickClicked[1] : rightThumbrestTouched);
+                    // Native menu mode covers ordinary game menus; shared slot 81 is the
+                    // world-map fallback. The F10 overlay is intentionally excluded so its
+                    // controller shortcut remains available while the overlay is open.
+                    const bool gameMenuActive = GetMenuMode() != 0 || GetSharedSlot(81) != 0.0f;
+                    const bool thumbModifier = effectiveMode == 0 || effectiveMode == 1;
                     const bool modifierWasHeld = s_chord.effectiveMode == effectiveMode
                         && s_chord.modifierHeld;
                     const bool chordInputAlreadyActive =
                         std::abs(stickX[dpadStick]) >= dpadNeutralThreshold
                         || std::abs(stickY[dpadStick]) >= dpadNeutralThreshold
+                        || (effectiveMode == 0
+                            && (std::abs(stickX[0]) >= dpadNeutralThreshold
+                                || std::abs(stickY[0]) >= dpadNeutralThreshold))
+                        || (effectiveMode == 1
+                            && (std::abs(stickX[1]) >= dpadNeutralThreshold
+                                || std::abs(stickY[1]) >= dpadNeutralThreshold))
                         || menuPressed
                         || (extraChordActionsEnabled
                             && (facePressed[recenterButton] || facePressed[overlayButton]));
@@ -1725,38 +1744,51 @@ DWORD OpenXRManager::FrameThreadMain() {
                     if (s_chord.effectiveMode != effectiveMode) {
                         s_chord.effectiveMode = effectiveMode;
                         s_chord.modifierHeld = modifierPressed;
-                        s_chord.modifierUsed = modifierPressed;
                         s_chord.modifierPassthrough = false;
+                        s_chord.modifierDeferred = modifierPressed && thumbModifier && gameMenuActive;
+                        s_chord.chordConsumed = false;
                         s_chord.dpadArmed = false;
+                        s_chord.deferredTapButton = 0;
+                        s_chord.deferredTapUntilMs = 0;
                     } else if (modifierPressed) {
                         if (!s_chord.modifierHeld) {
                             s_chord.modifierHeld = true;
-                            s_chord.modifierUsed = chordInputAlreadyActive;
                             s_chord.modifierPassthrough = chordInputAlreadyActive;
+                            s_chord.modifierDeferred = thumbModifier && gameMenuActive;
+                            s_chord.chordConsumed = false;
                             s_chord.dpadArmed = false;
+                            s_chord.deferredTapButton = 0;
+                            s_chord.deferredTapUntilMs = 0;
                         }
                     } else if (s_chord.modifierHeld) {
-                        if (!s_chord.modifierUsed && effectiveMode != 2) {
-                            ctrl.buttons |= XB_LEFT_THUMB;
+                        if (s_chord.modifierDeferred && !s_chord.chordConsumed) {
+                            s_chord.deferredTapButton = effectiveMode == 0
+                                ? XB_LEFT_THUMB : XB_RIGHT_THUMB;
+                            s_chord.deferredTapUntilMs = GetTickCount64() + 50;
                         }
                         s_chord.modifierHeld = false;
-                        s_chord.modifierUsed = false;
                         s_chord.modifierPassthrough = false;
+                        s_chord.modifierDeferred = false;
+                        s_chord.chordConsumed = false;
                         s_chord.dpadArmed = false;
                     }
                     const bool chordReady = modifierPressed && modifierWasHeld
                         && !s_chord.modifierPassthrough;
 
-                    if (effectiveMode == 0) {
-                        if (stickClicked[1]) ctrl.buttons |= XB_RIGHT_THUMB;
-                    } else if (effectiveMode == 1) {
-                        if (stickClicked[0]) ctrl.buttons |= XB_RIGHT_THUMB;
-                    } else {
-                        if (stickClicked[0]) ctrl.buttons |= XB_LEFT_THUMB;
-                        if (stickClicked[1]) ctrl.buttons |= XB_RIGHT_THUMB;
-                    }
-                    if (modifierPressed && s_chord.modifierPassthrough && effectiveMode != 2) {
-                        ctrl.buttons |= XB_LEFT_THUMB;
+                    // Gameplay keeps both thumb clicks on their standard L3/R3 meanings. A
+                    // modifier press that begins in a game menu is deferred until release so
+                    // a completed chord cannot also fire that menu's native thumb-click action.
+                    const bool suppressLeftThumb = effectiveMode == 0 && s_chord.modifierDeferred;
+                    const bool suppressRightThumb = effectiveMode == 1 && s_chord.modifierDeferred;
+                    if (stickClicked[0] && !suppressLeftThumb) ctrl.buttons |= XB_LEFT_THUMB;
+                    if (stickClicked[1] && !suppressRightThumb) ctrl.buttons |= XB_RIGHT_THUMB;
+                    if (s_chord.deferredTapButton != 0) {
+                        if (GetTickCount64() < s_chord.deferredTapUntilMs) {
+                            ctrl.buttons |= s_chord.deferredTapButton;
+                        } else {
+                            s_chord.deferredTapButton = 0;
+                            s_chord.deferredTapUntilMs = 0;
+                        }
                     }
 
                     if (chordReady) {
@@ -1768,11 +1800,22 @@ DWORD OpenXRManager::FrameThreadMain() {
                             s_chord.dpadArmed = true;
                         }
                         if (s_chord.dpadArmed) {
-                            bool dpadUsed = false;
-                            if (sy > dpadThreshold)  { ctrl.buttons |= XB_DPAD_UP;    dpadUsed = true; }
-                            if (sy < -dpadThreshold) { ctrl.buttons |= XB_DPAD_DOWN;  dpadUsed = true; }
-                            if (sx < -dpadThreshold) { ctrl.buttons |= XB_DPAD_LEFT;  dpadUsed = true; }
-                            if (sx > dpadThreshold)  { ctrl.buttons |= XB_DPAD_RIGHT; dpadUsed = true; }
+                            if (sy > dpadThreshold) {
+                                ctrl.buttons |= XB_DPAD_UP;
+                                s_chord.chordConsumed = true;
+                            }
+                            if (sy < -dpadThreshold) {
+                                ctrl.buttons |= XB_DPAD_DOWN;
+                                s_chord.chordConsumed = true;
+                            }
+                            if (sx < -dpadThreshold) {
+                                ctrl.buttons |= XB_DPAD_LEFT;
+                                s_chord.chordConsumed = true;
+                            }
+                            if (sx > dpadThreshold) {
+                                ctrl.buttons |= XB_DPAD_RIGHT;
+                                s_chord.chordConsumed = true;
+                            }
                             if (dpadStick == 0) {
                                 ctrl.leftThumbX = 0.0f;
                                 ctrl.leftThumbY = 0.0f;
@@ -1780,13 +1823,12 @@ DWORD OpenXRManager::FrameThreadMain() {
                                 ctrl.rightThumbX = 0.0f;
                                 ctrl.rightThumbY = 0.0f;
                             }
-                            if (dpadUsed) s_chord.modifierUsed = true;
                         }
                     }
 
                     if (menuPressed && !s_chord.menuDown) {
                         s_chord.menuChorded = chordReady;
-                        if (s_chord.menuChorded) s_chord.modifierUsed = true;
+                        if (s_chord.menuChorded) s_chord.chordConsumed = true;
                     }
                     if (menuPressed) {
                         ctrl.buttons |= s_chord.menuChorded ? XB_BACK : XB_START;
@@ -1802,12 +1844,12 @@ DWORD OpenXRManager::FrameThreadMain() {
                     if (extraChordActionsEnabled && chordReady) {
                         if (facePressed[recenterButton] && !s_chord.faceWasDown[recenterButton]) {
                             s_chord.faceChordLatched[recenterButton] = true;
-                            s_chord.modifierUsed = true;
+                            s_chord.chordConsumed = true;
                             RequestRecenter();
                         }
                         if (facePressed[overlayButton] && !s_chord.faceWasDown[overlayButton]) {
                             s_chord.faceChordLatched[overlayButton] = true;
-                            s_chord.modifierUsed = true;
+                            s_chord.chordConsumed = true;
                             RequestOverlayToggle();
                         }
                     }
@@ -1820,7 +1862,6 @@ DWORD OpenXRManager::FrameThreadMain() {
                     }
                 } else {
                     s_chord = {};
-                    m_rightThumbrestAvailable.store(false, std::memory_order_relaxed);
                 }
 
                 // Always publish a fresh snapshot so disabling gameplay actions cannot
