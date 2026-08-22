@@ -576,7 +576,8 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         // puts the old outright block back.
         const bool crouchBlocks = (CyberpunkVR_SprintFromCrouch == 0) && crouched;
 
-        const bool detent = (lyDetent > 0.90f) && !g_isInVehicle && !crouchBlocks;
+        const bool detent = (g_liveControls.xrFullStickSprintCrouch != 0)
+            && (lyDetent > 0.90f) && !g_isInVehicle && !crouchBlocks;
         if (detent) s_detentMs += dtMs; else s_detentMs = 0.0;
         const double holdMs = (CyberpunkVR_SprintHoldMs >= 0) ? CyberpunkVR_SprintHoldMs : 200;
         const bool want = detent && (s_detentMs >= holdMs);
@@ -658,7 +659,8 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // ON FOOT ONLY, for the same reason the dash below is: crouching means nothing in a car, and
     // R3 there is VehicleInverseCameraToggle_Button -- so the right stick pushed down was
     // flipping the driving camera. Found while fixing the exit button; same family of bug.
-    const bool wantCrouch = (ry < -0.90f) && !g_isInVehicle;
+    const bool wantCrouch = (g_liveControls.xrFullStickSprintCrouch != 0)
+        && (ry < -0.90f) && !g_isInVehicle;
     if (wantCrouch) ry = 0.0f;
 
     // Right stick pushed near FULL UP => DASH (the game's Dodge_Button, pad B). The mirror image of

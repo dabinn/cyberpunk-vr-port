@@ -906,11 +906,23 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
 
             ImGui::Separator();
+            ImGui::TextUnformatted("Stick edge actions");
+            changed |= CheckboxInt("Full-stick Sprint / Crouch", &state.xrFullStickSprintCrouch);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Enable the full-forward left-stick sprint detent and the\n"
+                                  "full-down right-stick crouch gesture.");
+            }
+
+            ImGui::Separator();
             ImGui::TextUnformatted("Current binding (on foot):");
-            ImGui::BulletText("Left stick    - walk / jog | FULL forward, HELD 0.2 s = sprint");
+            if (state.xrFullStickSprintCrouch != 0)
+                ImGui::BulletText("Left stick    - walk / jog | FULL forward, HELD 0.2 s = sprint");
+            else
+                ImGui::BulletText("Left stick    - walk / jog");
             ImGui::BulletText("Right stick X - turn camera (Y = pitch unless Disable Mouse Y is on)");
             ImGui::BulletText("Right stick FULL up   - DASH / dodge (once per push)");
-            ImGui::BulletText("Right stick FULL down - crouch (R3)");
+            if (state.xrFullStickSprintCrouch != 0)
+                ImGui::BulletText("Right stick FULL down - crouch (R3)");
             ImGui::BulletText("Right thumb click - slide release: racks the weapon");
             ImGui::BulletText("Right A       - JUMP");
             ImGui::BulletText("Right B       - drop the magazine (weapon in hand)");

@@ -57,6 +57,7 @@ struct LiveControlsUiState {
     // Optional chord actions only: VR recenter and F10 overlay toggle. D-pad
     // and Back/Select remain active regardless of this value.
     int xrExtraChordActions;
+    int xrFullStickSprintCrouch;
     // Mono submit safety flags. Defaults 0 keep CP2077 mono mode from hanging on
     // the menu (see cybervrport-controller-bindings memory for the trace).
     int xrMonoXQueueWait;
