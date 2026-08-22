@@ -157,7 +157,10 @@ static void SyncAdsWeaponZoomToWorld() {
     s_prevAiming = aiming;
 }
 
+extern "C" void BodyYawFollowSyncRecenter();
+
 extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val) {
+    BodyYawFollowSyncRecenter();
     (void)xmm0_val;
     g_locateCameraHits++;
     if (g_telemetry) {

@@ -37,7 +37,10 @@
 #include <cstdint>
 #include <cstddef>
 
+extern "C" void BodyYawFollowSyncRecenter();
+
 extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* ownerState) {
+    BodyYawFollowSyncRecenter();
     g_patchCameraHits++;
 
     const int camKind = ClassifyPatchCameraOwner(ownerState);
