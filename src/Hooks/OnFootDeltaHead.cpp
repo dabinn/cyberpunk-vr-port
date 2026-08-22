@@ -19,6 +19,7 @@
 
 // The follow loop and the realign accumulator (src/Hooks/BodyYawFollow.cpp).
 extern "C" float BodyYawFollowStep();
+extern "C" void BodyYawFollowSetEnabled(int enabled);
 extern "C" double RecoilLastShotMs();
 // Peak |heading delta| seen within 150 ms of a shot, degrees. Non-zero means the game kicks the
 // camera through THIS channel, which is also the channel the body follower writes -- and then the
@@ -35,14 +36,17 @@ extern "C" void __fastcall OnOnFootDeltaHeadCallback(float* deltaHead) {
         g_telemetry->deltaHeadRcx = reinterpret_cast<uintptr_t>(deltaHead);
     }
     if (!deltaHead) return;
-    if(g_isInVehicle) return;
+    if (g_isInVehicle) {
+        BodyYawFollowSetEnabled(0);
+        return;
+    }
 
     // Physical body rotation (F10 -> VRIK). OFF (default): no continuous body-yaw
     // tracking from the HMD -- only the discrete snap-turn is applied (classic heading).
     // ONE GATE for the whole feature. The plugin-side mirror is what the camera write and the pose
     // path test on their hot paths, and it is set from here so the two can never disagree.
     const bool bodyRot = g_liveControls.xrPhysicalBodyRotation != 0;
-    CyberpunkVR_BodyYawFollow = bodyRot ? 1 : 0;
+    BodyYawFollowSetEnabled(bodyRot ? 1 : 0);
 
     // MEASUREMENT ONLY. Cancelling the weapon's camera kick HERE was built and taken out again on the
     // user's call: hiding it in the view leaves the game still applying it to the character, and the
