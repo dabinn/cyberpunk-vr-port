@@ -1,3 +1,5 @@
+<p align="right"><a href="README-TC.md">繁體中文</a></p>
+
 # CyberpunkVR Port
 
 A 6-DoF **VR mod for Cyberpunk 2077**, built as a **RED4ext plugin** -
