@@ -1485,7 +1485,7 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             ImGui::TextUnformatted("Emulate D-pad and Additional Controls");
             ImGui::TextUnformatted("Chord Activation Method");
             changed |= ImGui::RadioButton("L3 button - left thumbstick", &state.xrChordActivation, 0);
-            changed |= ImGui::RadioButton("L3 button - right thumbstick (swap L3/R3)", &state.xrChordActivation, 1);
+            changed |= ImGui::RadioButton("R3 button - right thumbstick", &state.xrChordActivation, 1);
             const bool thumbrestAvailable = OpenXRManager::Get().IsRightThumbrestAvailable();
             changed |= ImGui::RadioButton(
                 thumbrestAvailable ? "Right thumbrest" : "Right thumbrest (unavailable)",
@@ -1515,7 +1515,7 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                     ImGui::BulletText("Extra actions: X = Recenter, Y = F10 Menu");
                 else
                     ImGui::BulletText("Extra actions: disabled");
-                ImGui::BulletText("Thumb clicks: left = R3, right = L3");
+                ImGui::BulletText("Thumb clicks: left = L3, right = R3");
             } else {
                 ImGui::BulletText("Touch right thumbrest: left stick = D-pad, left Menu = Back/Select");
                 if (state.xrExtraChordActions != 0)
@@ -1536,6 +1536,16 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                     "OFF - ignore visual holsters, fixed slot per zone:\n"
                     "      over-shoulder = EquipmentSlot1, right hip = Slot2, left hip = Slot3.\n"
                     "Reach to the zone and squeeze the RIGHT grip to equip / unequip.");
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Vehicle controls");
+            changed |= CheckboxInt("Swap Triggers / Grips While Driving", &state.xrSwapTriggersGripsDriving);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("While driving, use the VR controller triggers as LB/RB and the\n"
+                                  "analog grips as LT/RT. This keeps Fire on the right trigger\n"
+                                  "while mapping brake and accelerate to the grips. Physical\n"
+                                  "gamepad inputs are not remapped. Off preserves the original controls.");
             }
 
             ImGui::Separator();

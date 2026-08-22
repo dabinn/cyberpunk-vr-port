@@ -96,13 +96,16 @@ struct LiveControlsUiState {
     int xrXInputInstall;
     int xrInputActions;
     // Controller chord layout. 0 = left L3 + right stick D-pad (original),
-    // 1 = right L3 + left stick D-pad with L3/R3 click swap, 2 = right
+    // 1 = right R3 + left stick D-pad, 2 = right
     // thumbrest + left stick D-pad.
     int xrChordActivation;
     // Optional chord actions only: VR recenter and F10 overlay toggle. D-pad
     // and Back/Select remain active regardless of this value.
     int xrExtraChordActions;
     int xrFullStickSprintCrouch;
+    // In vehicles only, map VR triggers to LB/RB and analog grips to LT/RT.
+    // Physical XInput controller state is never remapped.
+    int xrSwapTriggersGripsDriving;
     // Mono submit safety flags. Defaults 0 keep CP2077 mono mode from hanging on
     // the menu (see cybervrport-controller-bindings memory for the trace).
     int xrMonoXQueueWait;

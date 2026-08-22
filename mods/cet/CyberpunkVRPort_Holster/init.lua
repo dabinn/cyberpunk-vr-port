@@ -41,6 +41,26 @@ local rightGripPrev = 0
 local cooldown = 0.0
 local lastZone = nil
 
+local function getCurrentZone()
+    local dR = GetVRSharedSlot(20)
+    local dL = GetVRSharedSlot(21)
+    local dB = GetVRSharedSlot(22)
+    if dR < 0 then dR = 1e9 end
+    if dL < 0 then dL = 1e9 end
+    if dB < 0 then dB = 1e9 end
+
+    -- B needs a CLEAR win over the right hip: the shoulder anchor sits close to a
+    -- raised wrist, and a fuzzy B-vs-R call was swapping weapon slots 1<->2.
+    if dB < PROX_BACK and (dB + BACK_MARGIN) < math.min(dL, dR) then
+        return "B", dR, dL, dB
+    elseif dL < PROX_L and dL <= dR then
+        return "L", dR, dL, dB
+    elseif dR < PROX_R then
+        return "R", dR, dL, dB
+    end
+    return nil, dR, dL, dB
+end
+
 local function classify(name)
     local lc = name:lower()
     for _, kw in ipairs(MELEE_KW)  do if lc:find(kw, 1, true) then return "melee"  end end
@@ -78,15 +98,25 @@ registerForEvent('onUpdate', function(dt)
     cooldown = math.max(0.0, cooldown - dt)
 
     if type(GetVRSharedSlot) ~= 'function' then return end
+    local canPublishGripRoute = type(SetVRRightGripRoute) == 'function'
     local pl = Game.GetPlayer()
-    if not pl then return end
+    if not pl then
+        if canPublishGripRoute then SetVRRightGripRoute(0) end
+        return
+    end
 
     -- While a cigarette is in the hands it occupies the WeaponRight slot -- which this mod would
     -- read as a held weapon -- and the right grip is what puts the cig in the mouth. Both of those
     -- collide, so suspend every holster gesture until the cig is put away. pcall because
     -- VRSmokeHasCig only exists when the smoking mod is installed.
     local okSmoke, smoking = pcall(function() return pl:VRSmokeHasCig() end)
-    if okSmoke and smoking then return end
+    if okSmoke and smoking then
+        if canPublishGripRoute then SetVRRightGripRoute(2) end
+        return
+    end
+
+    local zone, dR, dL, dB = getCurrentZone()
+    if canPublishGripRoute then SetVRRightGripRoute(zone and 2 or 1) end
 
     sinceScan = sinceScan + dt
     if sinceScan >= 1.0 then sinceScan = 0.0; rescan(pl) end
@@ -96,24 +126,6 @@ registerForEvent('onUpdate', function(dt)
     rightGripPrev = g
     if not edge or cooldown > 0 then return end
 
-    local dR = GetVRSharedSlot(20)
-    local dL = GetVRSharedSlot(21)
-    local dB = GetVRSharedSlot(22)
-    if dR < 0 then dR = 1e9 end
-    if dL < 0 then dL = 1e9 end
-    if dB < 0 then dB = 1e9 end
-
-    -- Which body zone is the right hand reaching to? (shared by both modes)
-    -- B needs a CLEAR win over the right hip: the shoulder anchor sits close to a
-    -- raised wrist, and a fuzzy B-vs-R call was swapping weapon slots 1<->2.
-    local zone
-    if dB < PROX_BACK and (dB + BACK_MARGIN) < math.min(dL, dR) then
-        zone = "B"
-    elseif dL < PROX_L and dL <= dR then
-        zone = "L"
-    elseif dR < PROX_R then
-        zone = "R"
-    end
     if not zone then return end
 
     -- Reliable "is a weapon in the right hand": read the WeaponRight slot directly. GetActiveWeapon()
