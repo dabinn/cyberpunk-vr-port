@@ -199,23 +199,29 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     pState->Gamepad.wButtons |=
         (vr.buttons & static_cast<uint16_t>(~ownedNow));
 
-    // MENU-ONLY: right grip = RB (right shoulder) for tab navigation to the RIGHT,
-    // symmetric with the left grip's LB. The right grip is deliberately NEVER merged as
-    // RB in gameplay -- there it is reserved for the hand-to-holster equip (published as
-    // shared[49] above) and the D-pad modifier, and RB is a gameplay action that would
-    // misfire on every holster reach. Menus run no holster logic and can't fire gameplay
-    // actions, so the grip is safe as RB while one is open. Menu state = the native
-    // menu-mode hook OR the redscript world-map bridge flag (shared[81]).
+    // Route one complete right-grip press to either RB or the virtual holster. The CET
+    // holster classifier publishes whether the hand is inside a holster zone; latch that
+    // decision on the press edge so moving across a boundary while held cannot switch paths.
+    // Wheel, smoke and unavailable-classifier states publish a non-RB route. Menus retain
+    // their unconditional RB tab navigation even if they open after the grip was pressed.
     {
+        static bool s_rightGripWasDown = false;
+        static bool s_rightGripRoutesToRb = false;
         bool menuOpenForRb = (g_menuModeValue != 0);
+        float* sh = GetShotShared();
         if (!menuOpenForRb) {
-            if (float* sh = GetShotShared()) {
-                if (reinterpret_cast<volatile uint32_t*>(sh)[81] != 0u) menuOpenForRb = true;
-            }
+            if (sh && reinterpret_cast<volatile uint32_t*>(sh)[81] != 0u) menuOpenForRb = true;
         }
-        if (menuOpenForRb && vr.rightGrip >= 0.7f) {
+        const bool rightGripDown = vr.rightGrip >= 0.7f;
+        if (rightGripDown && !s_rightGripWasDown) {
+            const int route = sh ? static_cast<int>(sh[vrshared::kRightGripRoute]) : 0;
+            s_rightGripRoutesToRb = !mounted && route == 1;
+        }
+        if (rightGripDown && (menuOpenForRb || s_rightGripRoutesToRb)) {
             pState->Gamepad.wButtons |= 0x0200; // XINPUT_GAMEPAD_RIGHT_SHOULDER
         }
+        if (!rightGripDown) s_rightGripRoutesToRb = false;
+        s_rightGripWasDown = rightGripDown;
         // And the LEFT grip's LB, on the same terms. It used to be emitted unconditionally from the frameloop,
         // which meant every gameplay squeeze of the left grip opened the SCANNER -- LB's gameplay binding. That
         // hand now grabs the magazine for the reload, so the two cannot share the input.
