@@ -183,6 +183,7 @@ void PollLiveControls() {
     int xrSnapTurnYawIndex = g_liveControls.xrSnapTurnYawIndex >= 0 && g_liveControls.xrSnapTurnYawIndex <= 3 ? g_liveControls.xrSnapTurnYawIndex : 1;
     int xrImmersiveHolsters = g_liveControls.xrImmersiveHolsters;
     int xrPhysicalBodyRotation = g_liveControls.xrPhysicalBodyRotation;
+    int xrAdsRightEyeAlignment = g_liveControls.xrAdsRightEyeAlignment;
     int xrCutsceneSuspendTier = g_liveControls.xrCutsceneSuspendTier;
     float xrVehHeadOffsetX = g_liveControls.xrVehHeadOffsetX;
     float xrVehHeadOffsetY = g_liveControls.xrVehHeadOffsetY;
@@ -424,6 +425,11 @@ void PollLiveControls() {
             xrPhysicalBodyRotation = intValue;
             continue;
         }
+        if (sscanf_s(line, "xr_ads_right_eye_alignment=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_ads_right_eye_alignment = %d", &intValue) == 1) {
+            xrAdsRightEyeAlignment = intValue;
+            continue;
+        }
         if (sscanf_s(line, "xr_xinput_install=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_xinput_install = %d", &intValue) == 1) {
             xrXInputInstall = intValue;
@@ -591,6 +597,7 @@ void PollLiveControls() {
     g_liveControls.xrMovementSource = xrMovementSource;
     g_liveControls.xrMovementControl = xrMovementSource != 0 ? 1 : 0;
     g_liveControls.xrPhysicalBodyRotation = xrPhysicalBodyRotation != 0 ? 1 : 0;
+    g_liveControls.xrAdsRightEyeAlignment = xrAdsRightEyeAlignment != 0 ? 1 : 0;
     g_liveControls.xrCutsceneSuspendTier =
         (xrCutsceneSuspendTier < -1) ? -1 : (xrCutsceneSuspendTier > 4 ? 4 : xrCutsceneSuspendTier);
     g_liveControls.xrDisableMouseY = xrDisableMouseY != 0 ? 1 : 0;
@@ -717,6 +724,7 @@ LiveControlsUiState MakeLiveControlsUiState() {
     state.xrSnapTurnAngleDeg = g_liveControls.xrSnapTurnAngleDeg;
     state.xrMovementSource = g_liveControls.xrMovementSource;
     state.xrPhysicalBodyRotation = g_liveControls.xrPhysicalBodyRotation;
+    state.xrAdsRightEyeAlignment = g_liveControls.xrAdsRightEyeAlignment;
     state.xrCutsceneSuspendTier = g_liveControls.xrCutsceneSuspendTier;
     state.xrXInputInstall = g_liveControls.xrXInputInstall;
     state.xrInputActions = g_liveControls.xrInputActions;
@@ -790,6 +798,7 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_snap_turn_angle_deg=%.2f\n", state.xrSnapTurnAngleDeg > 0.0f ? state.xrSnapTurnAngleDeg : 30.0f);
     fprintf(file, "xr_movement_source=%d\n", state.xrMovementSource < 0 ? 0 : (state.xrMovementSource > 3 ? 3 : state.xrMovementSource));
     fprintf(file, "xr_physical_body_rotation=%d\n", state.xrPhysicalBodyRotation != 0 ? 1 : 0);
+    fprintf(file, "xr_ads_right_eye_alignment=%d\n", state.xrAdsRightEyeAlignment != 0 ? 1 : 0);
     fprintf(file, "xr_cutscene_suspend_tier=%d\n",
             state.xrCutsceneSuspendTier < -1 ? -1 : (state.xrCutsceneSuspendTier > 4 ? 4 : state.xrCutsceneSuspendTier));
     fprintf(file, "xr_xinput_install=%d\n", state.xrXInputInstall != 0 ? 1 : 0);
@@ -865,6 +874,7 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
         g_liveControls.xrMovementControl = src != 0 ? 1 : 0;
     }
     g_liveControls.xrPhysicalBodyRotation = state->xrPhysicalBodyRotation != 0 ? 1 : 0;
+    g_liveControls.xrAdsRightEyeAlignment = state->xrAdsRightEyeAlignment != 0 ? 1 : 0;
     g_liveControls.xrCutsceneSuspendTier =
         (state->xrCutsceneSuspendTier < -1) ? -1
                                            : (state->xrCutsceneSuspendTier > 4 ? 4 : state->xrCutsceneSuspendTier);
