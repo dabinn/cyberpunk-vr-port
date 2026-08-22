@@ -31,7 +31,7 @@
 //  [23]       holster mode simple/immersive  openxr -> Holster Lua (RAW idx!)
 //  [24..26]   muzzle forward             plugin (SetVRMuzzleQuat) -> overlay
 //  [27]       muzzle valid               plugin -> overlay
-//  [28]       zoom level                 plugin -> overlay
+//  [28]       camera GetZoom diagnostic  plugin -> overlay telemetry ONLY; never scale projection
 //  [29]       melee impulse              dxgi reads/decrements
 //  [30]       right trigger held (bool)  dxgi -> plugin native
 //  [31]       in-vehicle flag            dxgi -> plugin hook (arms-only VRIK in vehicles)
@@ -116,6 +116,11 @@
 //  [155]       left grip pressed (0/1)        plugin -> Smoking CET bridge
 //  [156]       DEBUG logging on (0/1)         plugin -> every CET bridge
 //  [157]       right-grip route (0=legacy, 1=RB, 2=holster)  Holster Lua -> dxgi
+//  [158]       non-VRIK ADS muzzle stabilizer enabled         dxgi -> plugin
+//  [159]       player aiming state                            dxgi -> plugin
+//  [160]       PlayerStateMachine.Weapon value                redscript -> plugin -> overlay
+//  [161]       ADS AimInTimeRemaining                         redscript -> plugin -> overlay
+//  [162]       PublicSafeToReady transition active (0/1)      redscript -> plugin -> overlay
 // ============================================================================
 
 namespace vrshared {
@@ -151,4 +156,9 @@ constexpr int kLeftGripPressed   = 155;
 // open is a log nobody reads.
 constexpr int kDebugLog          = 156;
 constexpr int kRightGripRoute    = 157;
+constexpr int kNonVrikAdsMuzzleStabilizer = 158;
+constexpr int kAiming            = 159;
+constexpr int kWeaponPsmState    = 160;
+constexpr int kAimInRemaining    = 161;
+constexpr int kSafeToReady       = 162;
 } // namespace vrshared

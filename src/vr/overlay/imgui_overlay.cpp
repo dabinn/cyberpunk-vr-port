@@ -1,4 +1,5 @@
 #include "imgui_overlay.h"
+#include "../../common/shared_slots.h"
 #include "live_controls_ui.h"
 #include "openxr_manager.h"
 
@@ -23,9 +24,9 @@ extern void Log(const char* fmt, ...);
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-// located (HMD-injected) game-world camera quaternion, defined in vr_core.cpp. Declared at GLOBAL
-// scope (NOT inside the anonymous namespace below) so it keeps external linkage.
-extern volatile float g_lastLocateQuat[4];
+// Coherent MAIN render-camera + muzzle snapshot, published by vr_core.cpp.
+extern "C" int GetBarrelDotRenderSnapshot(float outCameraQuat[4], float outMuzzleFwd[3],
+                                            uint64_t* outId);
 
 // ---- sync_stereo tunables (stereo/sync_stereo.cpp, all dllexported) ------------------------
 // Live values, not part of LiveControlsUiState: the engine hooks read these globals directly
@@ -55,10 +56,8 @@ extern "C" uint64_t CyberpunkVR_DebugMirrorRtvHits;
 extern "C" int CyberpunkVR_IsVrcamViewActive();
 extern "C" float CyberpunkVR_DebugMainProjYY;
 extern "C" float CyberpunkVR_DebugMainCamFov;
-extern "C" float CyberpunkVR_DebugVrcamZoomFactor;
-// 1 = everything the overlay projects (the sight mark above all) follows the weapon's ADS
-// magnification. 0 = the old behaviour, projected from the lens FOV alone.
-extern "C" __declspec(dllexport) int CyberpunkVR_OverlayFollowAds = 1;
+// Effective ADS magnification recovered from MAIN's live world projection.
+extern "C" float CyberpunkVR_MainAdsZoomFactor;
 extern "C" float CyberpunkVR_DebugVrcamWantFov;
 extern "C" float CyberpunkVR_DebugVrcamBaseFov;
 // per-node CPU profiler
@@ -120,9 +119,8 @@ float g_handLocatorScale = 1.0f;
 // gun barrel looks" line). Reuses the same head-relative projection as the hand proxy.
 bool g_drawAimRay = true;
 float g_aimRayLenM = 8.0f;
-// EXACT barrel crosshair: project the GAME muzzle forward (plugin publishes it to shared[24..26])
-// through the located game camera (= the eye view) -> a dot exactly where the bullet goes.
-bool g_drawBarrelCross = true;   // g_lastLocateQuat is declared above, at global scope
+// Barrel-direction overlay toggle.
+bool g_drawBarrelCross = true;
 
 void MapAbstractHandPoint(bool isLeftHand, float hx, float hy, float hz, float* cx, float* cy, float* cz) {
     if (isLeftHand) {
@@ -184,24 +182,24 @@ static bool GetOverlayProjTans(const ImVec2& displaySize, float* tanHalfX, float
     float tx = tanf((hfovDeg * 0.5f) * (3.1415926535f / 180.0f));
     float ty = tx * (displaySize.y / displaySize.x);
 
-    // AIMING MAGNIFIES THE IMAGE WITHOUT TOUCHING THE FOV, so a projection built from the FOV alone
-    // stops matching the picture the moment the player raises the sights.
+    // ADS changes MAIN's projection matrix without changing the scalar FOV used above. Therefore
+    // tx/ty still describe the unzoomed frustum until we apply the ratio recovered by sync_stereo:
     //
-    // Measured on the MAIN view context: the fov scalar at +0x90 reads 68.238 both at rest and
-    // while aiming -- ADS does not go through it. It goes through the projection matrix, +0x214,
-    // and sync_stereo already recovers the ratio from there: g_ads_factor = projYY * tan(fov/2),
-    // which comes out 1.0000 at rest and 1.4998 aiming. The world grows by that; everything drawn
-    // here from the unzoomed tangents does not, so the sight mark sat at two thirds of its proper
-    // distance from centre and the shot went somewhere else. Dividing the tangents by the factor
-    // is the same magnification applied to us.
+    //     ads = MAIN projYY * tan(baseFov / 2)
     //
-    // Guarded rather than trusted: the factor is sampled from a live engine matrix, so anything
-    // outside a plausible zoom range means the sample is stale or the field moved, and the honest
-    // response is to draw as if unzoomed rather than to throw the mark across the screen.
-    if (CyberpunkVR_OverlayFollowAds) {
-        const float ads = CyberpunkVR_DebugVrcamZoomFactor;
-        if (ads > 0.5f && ads < 4.0f) { tx /= ads; ty /= ads; }
-    }
+    // Measured examples are 1.0x at hip, ~1.3-1.5x for ordinary ADS, and 4.25x for a sniper
+    // scope. Dividing both tangents by `ads` is the ONE projection correction: because screen
+    // NDC is proportional to 1/tanHalfFov, this magnifies every projected offset by `ads` and
+    // makes the overlay match the pixels MAIN actually rendered.
+    //
+    // Do not add shared-memory slot [28] on top. It is an independently timed CET GetZoom sample
+    // kept for telemetry only; multiplying by it again produced the confirmed 1.3x * 1.3x SMG
+    // error. The old `ads < 4` guard merely hid that bug for 4.25x sniper scopes by skipping this
+    // correct projection step and leaving [28] as their accidental sole multiplier. There is no
+    // weapon-class boundary at 4x and no justified finite upper limit here. Accept every finite,
+    // positive factor; reject only values that cannot represent a projection scale.
+    const float ads = CyberpunkVR_MainAdsZoomFactor;
+    if (std::isfinite(ads) && ads > 0.0f) { tx /= ads; ty /= ads; }
 
     if (tx <= 0.0001f || ty <= 0.0001f) return false;
     *tanHalfX = tx;
@@ -649,12 +647,11 @@ extern "C" __declspec(dllexport) uint64_t CyberpunkVR_BarrelDotTick = 0;
 extern "C" __declspec(dllexport) int32_t  CyberpunkVR_BarrelDotSecondEye = 1;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugBarrelDotDraws = 0;
 
-// EXACT barrel crosshair. The plugin publishes the weapon muzzle WORLD forward (shared[24..26]); we
-// rotate it into the located game camera's local frame (inv(camQuat) * fwd) and project that
-// direction with the SAME view/FOV the eye renders through -> the dot lands exactly where the bullet
-// goes (both derive from the same muzzle + camera). No controller-space guessing.
+// Project the weapon muzzle's world-forward direction through MAIN's render camera. Camera and
+// muzzle are read from one final-camera snapshot: the historical Present-time path mixed a latest
+// Locate quaternion with an independently timed CET muzzle and produced velocity-dependent trails
+// during fast head turns. This is a direction indicator, not a collision raycast or guaranteed hit.
 void DrawBarrelCrosshair() {
-    
     const float enableLaser = OpenXRManager::Get().GetSharedSlot(144);   // weapon flag (was [126]: HMD-Z collision)
     
     float rad = 3.0f;
@@ -670,24 +667,12 @@ void DrawBarrelCrosshair() {
         return;
     } 
 
-    if (OpenXRManager::Get().GetSharedSlot(27) < 0.5f) return;   // muzzle fwd not published yet
-    // Latched like the position, and for the same reason. With no weapon the muzzle quaternion
-    // is identity, and SetVRMuzzleQuat then publishes its +Y as (0, 1, 0) exactly -- a direction
-    // that is not the barrel and that dragged the aim point behind the camera (measured
-    // ly = -13.3, and the projection duly refused). Anything that is exactly the identity default
-    // is not an answer, so the last real barrel direction is kept instead.
-    static float s_mf[3] = {0.0f, 0.0f, 0.0f};
-    {
-        const float rx = OpenXRManager::Get().GetSharedSlot(24);
-        const float ry = OpenXRManager::Get().GetSharedSlot(25);
-        const float rz = OpenXRManager::Get().GetSharedSlot(26);
-        const bool isDefault = (rx == 0.0f && ry == 1.0f && rz == 0.0f);
-        if (!isDefault && rx*rx + ry*ry + rz*rz > 0.25f) { s_mf[0]=rx; s_mf[1]=ry; s_mf[2]=rz; }
-    }
-    const float mfx = s_mf[0], mfy = s_mf[1], mfz = s_mf[2];
-    if (mfx*mfx + mfy*mfy + mfz*mfz < 0.25f) return;
-
-    const float cqx = g_lastLocateQuat[0], cqy = g_lastLocateQuat[1], cqz = g_lastLocateQuat[2], cqw = g_lastLocateQuat[3];
+    float cameraQuat[4] = {};
+    float muzzleFwd[3] = {};
+    if (!GetBarrelDotRenderSnapshot(cameraQuat, muzzleFwd, nullptr)) return;
+    const float mfx = muzzleFwd[0], mfy = muzzleFwd[1], mfz = muzzleFwd[2];
+    const float cqx = cameraQuat[0], cqy = cameraQuat[1];
+    const float cqz = cameraQuat[2], cqw = cameraQuat[3];
 
     // A DIRECTION CANNOT MARK AN IMPACT POINT except for an eye that lies on the bullet's line.
     //
@@ -797,33 +782,14 @@ void DrawBarrelCrosshair() {
     // With world data present the direction path is not a fallback, it is a wrong answer.
     if (CyberpunkVR_BarrelDotWorld && haveWorld && !worldOk) return;
     if (worldOk || ProjectHeadSpacePointToScreen(vx, vz, -vy, displaySize, &sc)) {
-        // ZOOM COMPENSATION (scope/ADS): the bullet leaves the barrel regardless of zoom, but
-        // a scope magnifies the on-screen image by ~Z around the view center while our dot was
-        // projected at the un-zoomed HMD FOV. Published zoom factor lives in shared[28] (CET
-        // pushes PlayerStateMachine.ZoomLevel). For small angles the screen offset scales ~linearly
-        // with Z, so push the dot's offset-from-center out by Z so it tracks the magnified barrel.
-        // shared[28] = live camera GetZoom (1.0 normal, ~5.25 scoped) -- the REAL scope magnification
-        // (the scope changes GetZoom, not FOV). Scale the dot's offset from screen center by it so the
-        // dot tracks the magnified impact while scoped. Published by the CET weapon mod each frame.
-        const float zoom = OpenXRManager::Get().GetSharedSlot(28);
-        if (zoom > 1.05f) {
-            const float cx = displaySize.x * 0.5f, cy = displaySize.y * 0.5f;
-            sc.x = cx + (sc.x - cx) * zoom;
-            sc.y = cy + (sc.y - cy) * zoom;
-        }
+        // ADS is already part of GetOverlayProjTans() through MAIN's actual projection
+        // matrix. Do NOT multiply the screen offset by shared[28] here: that independent
+        // CET sample double-zooms ordinary ADS and can be a frame out of sync.
         // PUBLISH IT FOR THE SECOND EYE. The overlay draws into the backbuffer, which is eye 0
         // only -- eye 1 is the VRCAM view and no ImGui list ever reaches it. Rather than repeat
         // this projection there (and risk the two disagreeing for a reason of my own making),
         // hand the finished screen position over in NDC and let the eye pass stamp the same
-        // point. Published AFTER the zoom compensation, so both dots carry it.
-        if (worldOk) {
-            const float z2 = OpenXRManager::Get().GetSharedSlot(28);
-            if (z2 > 1.05f) {
-                const float cx2 = displaySize.x * 0.5f, cy2 = displaySize.y * 0.5f;
-                scRight.x = cx2 + (scRight.x - cx2) * z2;
-                scRight.y = cy2 + (scRight.y - cy2) * z2;
-            }
-        }
+        // point. Both eye projections already use the same effective ADS frustum.
         CyberpunkVR_BarrelDotNdcX = (sc.x / displaySize.x) * 2.0f - 1.0f;
         CyberpunkVR_BarrelDotNdcY = 1.0f - (sc.y / displaySize.y) * 2.0f;
         {
@@ -839,8 +805,6 @@ void DrawBarrelCrosshair() {
                     // The offset eye is on the other side once MAIN moves eyes.
                     dx = -(ipd / zeroM) / thx;
                     if (CyberpunkVR_MainIsRightEye) dx = -dx;
-                    const float z = OpenXRManager::Get().GetSharedSlot(28);
-                    if (z > 1.05f) dx *= z;
                 }
             }
             CyberpunkVR_BarrelDotNdcX2 = (worldOk
@@ -1299,13 +1263,12 @@ void DrawStereoControls() {
     if (ImGui::Checkbox("VRCAM Mirror  (separate window, for capture)", &mirrorOn))
         CyberpunkVR_MirrorOutput = mirrorOn ? 1u : 0u;
 
-    // Weapon ADS is not a toggle: the vrcam eye always follows MAIN's vertical FOV, narrowed by
-    // the aim zoom. Read-only here because the numbers are the quickest way to tell a wrong FOV
-    // from a stale one.
+    // VRCAM follows MAIN's effective vertical projection, including ADS magnification. These
+    // read-only values distinguish a projection mismatch from stale camera state.
     ImGui::TextDisabled("vrcam fov %.2f  (asset %.2f)   main yy %.5f  fov %.2f   ADS x%.3f",
                         CyberpunkVR_DebugVrcamWantFov, CyberpunkVR_DebugVrcamBaseFov,
                         CyberpunkVR_DebugMainProjYY, CyberpunkVR_DebugMainCamFov,
-                        CyberpunkVR_DebugVrcamZoomFactor);
+                        CyberpunkVR_MainAdsZoomFactor);
 
     if (ImGui::CollapsingHeader("Diagnostics")) {
         bool slog = CyberpunkVR_StereoLog != 0;
@@ -1649,8 +1612,6 @@ bool DrawLiveControls(LiveControlsUiState& state) {
 void DrawCompactAdsCameraTelemetry() {
     if (!g_showCompactAdsTelemetry) return;
 
-    AdsCameraTelemetryUiState t{};
-    GetAdsCameraTelemetryUiState(&t);
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos(
         ImVec2(display.x * g_compactAdsTelemetryX, display.y * g_compactAdsTelemetryY),
@@ -1662,35 +1623,19 @@ void DrawCompactAdsCameraTelemetry() {
         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
         ImGuiWindowFlags_NoInputs;
     if (ImGui::Begin("ADS camera telemetry##compact", nullptr, flags)) {
-        if (!t.available) {
-            ImGui::TextUnformatted("ADS CAM  waiting for gameplay camera...");
-        } else {
-            const ImVec4 stateColor = t.aiming
-                ? ImVec4(1.0f, 0.78f, 0.24f, 1.0f)
-                : ImVec4(0.45f, 0.9f, 0.55f, 1.0f);
-            const float expectedZoom = CyberpunkVR_DebugVrcamZoomFactor;
-            const float sharedZoomRaw = OpenXRManager::Get().GetSharedSlot(28);
-            const float projectionZoom = (CyberpunkVR_OverlayFollowAds &&
-                                          expectedZoom > 0.5f && expectedZoom < 4.0f)
-                ? expectedZoom : 1.0f;
-            const float extraZoom = sharedZoomRaw > 1.05f ? sharedZoomRaw : 1.0f;
-            const float finalZoom = projectionZoom * extraZoom;
-            ImGui::TextColored(stateColor, "ADS CAM  %s", t.aiming ? "ON" : "HIP");
-            ImGui::Text("zoom expected %.3fx   final %.3fx", expectedZoom, finalZoom);
-            ImGui::TextDisabled("shared[28] %.3fx", sharedZoomRaw);
-            if (!t.baselineValid) {
-                ImGui::TextUnformatted("Hold hip-fire briefly to capture baseline");
-            } else {
-                ImGui::Text("delta cm  R %+6.2f  F %+6.2f  U %+6.2f",
-                            t.deltaRight * 100.0f, t.deltaForward * 100.0f, t.deltaUp * 100.0f);
-                ImGui::Text("peak  cm  R %6.2f  F %6.2f  U %6.2f   n=%u",
-                            t.peakRight * 100.0f, t.peakForward * 100.0f,
-                            t.peakUp * 100.0f, t.samples);
-                ImGui::TextDisabled("raw   cm  R %+6.2f  F %+6.2f  U %+6.2f",
-                                    t.residualRight * 100.0f, t.residualForward * 100.0f,
-                                    t.residualUp * 100.0f);
-            }
-        }
+        const bool adsProperty = OpenXRManager::Get().GetSharedSlot(vrshared::kAiming) > 0.5f;
+        const ImVec4 stateColor = adsProperty
+            ? ImVec4(1.0f, 0.78f, 0.24f, 1.0f)
+            : ImVec4(0.45f, 0.9f, 0.55f, 1.0f);
+        const int weaponPsm = static_cast<int>(std::lround(
+            OpenXRManager::Get().GetSharedSlot(vrshared::kWeaponPsmState)));
+        const char* weaponPsmName = weaponPsm == 5 ? "READY" :
+                                    weaponPsm == 6 ? "SAFE" : "OTHER";
+        ImGui::TextColored(stateColor, "ADS: %s", adsProperty ? "ON" : "OFF");
+        ImGui::Text("Weapon: %s (%d)", weaponPsmName, weaponPsm);
+        ImGui::Text("Aim-in running: %s   Safe->Ready: %s",
+                    OpenXRManager::Get().GetSharedSlot(vrshared::kAimInRemaining) > 0.001f ? "YES" : "NO",
+                    OpenXRManager::Get().GetSharedSlot(vrshared::kSafeToReady) > 0.5f ? "YES" : "NO");
     }
     ImGui::End();
 }

@@ -4387,7 +4387,7 @@ extern "C" __declspec(dllexport) uint32_t CyberpunkVR_DistantReuseMode = 1;
 // view fail validation at init -> VRCAM never renders (absent from Nsight). To
 // change VRCAM resolution, resize the RTT TEXTURE (dynamicTextureRes asset) so the
 // dims derive correctly. ForceVrcamCam copies MAIN's camera SCALARS (fov/zoom/near/
-// far) into the vrcam view-ctx so both eyes match under gameplay fov + weapon ZOOM.
+// far) into the VRCAM view context so both eyes use matching gameplay camera scalars.
 // Live-confirmed ctx layout: +0x90 fovV, +0x9C zoom, +0xB0 nearZ, +0xB4 farZ. It does
 // NOT touch orientation (+0x80..0x8C) or aspect (+0x98, vrcam
 // keeps its own for its square RTT dims) and copies NO proj matrix. Default ON.
@@ -4540,23 +4540,25 @@ static std::atomic<uint32_t> g_vrcam_view_h{0};
 // is a later step.
 extern "C" __declspec(dllexport) int32_t CyberpunkVR_OverlayVisible = 1;
 
-// Captured from MAIN's camera ctx (slot 0) and applied to vrcam (slot 1) in the same
-// per-frame camera writer -> smooth fov + weapon ZOOM match (fov@0x90, zoom@0x9C).
+// Captured from MAIN's camera ctx (slot 0) and applied to VRCAM (slot 1) in the same
+// per-frame camera writer to keep the second view's camera scalars and culling in sync.
 static float g_main_cam_fov  = 0.f;
 static float g_main_cam_zoom = 0.f;
 static float g_main_cam_near = 0.f;
 static float g_main_cam_far  = 0.f;
 // MAIN's forward-projection vertical scale (ctx+0x214 = cot(fovV/2)) -- the field that
-// actually carries weapon ADS, and the source the vrcam fov is derived from.
+// carries the effective world ADS magnification and the source the VRCAM FOV is derived from.
 static float g_main_proj_yy = 0.f;
-static float g_ads_factor   = 1.0f;   // ADS as a scale factor, 1.0 = no zoom
+static float g_main_ads_zoom_factor = 1.0f;   // MAIN/world ADS scale; 1.0 = no zoom
 extern "C" __declspec(dllexport) float CyberpunkVR_DebugMainCamFov      = 0.f;
 extern "C" __declspec(dllexport) float CyberpunkVR_DebugMainProjYY      = 0.f;
-extern "C" __declspec(dllexport) float CyberpunkVR_DebugVrcamZoomFactor = 0.f;
+// Live MAIN/world ADS magnification. This production value keeps overlay projection and the
+// first-person weapon/body projection on the same angular scale; it is not VRCAM telemetry.
+extern "C" __declspec(dllexport) float CyberpunkVR_MainAdsZoomFactor     = 0.f;
 extern "C" __declspec(dllexport) float CyberpunkVR_DebugVrcamWantFov    = 0.f;
-// Explicit vertical FOV in degrees for the vrcam eye. 0 = follow MAIN, which is what the
+// Explicit vertical FOV in degrees for the VRCAM eye. 0 = follow MAIN, which is what the
 // flat-screen testbed wants. This is the hook for the headset: once the HMD drives the eye,
-// put its FOV here and weapon ADS keeps applying on top of it.
+// put its FOV here and MAIN's ADS magnification keeps applying on top of it.
 extern "C" __declspec(dllexport) float CyberpunkVR_VrcamFovDeg = 0.f;
 // Last fov/zoom we forced a vrcam view-rebuild for -> only re-dirty on an actual change
 // (avoids a per-frame RTT view rebuild when fov/zoom are stable; the game already
@@ -12663,10 +12665,10 @@ static __int64 __fastcall Detour_SlConstants(void* a1, void* a2, void* a3) {
     // choice A: main = LEFT (-IPD/2), vrcam = RIGHT (+IPD/2). Applied BEFORE g_orig and
     // NOT restored so the whole frame (incl. the once-per-frame prev-camera capture) sees
     // the same camera -> motion vectors stay consistent (no shimmer).
-    // Force vrcam camera fov + weapon ZOOM = MAIN via the CAMERA ctx (this writer runs
-    // many times per frame -> smooth, exactly like the IPD transform above). Capture
-    // MAIN (slot 0), apply to vrcam (slot 1). Same ctx: fov@0x90, zoom@0x9C. Orientation
-    // (@0x80/0xC0) is left to the engine; aspect stays vrcam's own.
+    // Force VRCAM's camera scalars to match MAIN via the camera context (this writer runs
+    // many times per frame, exactly like the IPD transform above). Capture MAIN (slot 0),
+    // apply to VRCAM (slot 1): FOV@0x90, camera zoom@0x9C, near@0xB0 and far@0xB4.
+    // Orientation (@0x80/0xC0) is left to the engine; aspect stays VRCAM's own.
     if (CyberpunkVR_ForceVrcamCam && a2) {
         __try {
             uintptr_t ctx = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(a2) + 0x18);
@@ -12679,7 +12681,8 @@ static __int64 __fastcall Detour_SlConstants(void* a1, void* a2, void* a3) {
                     g_main_cam_near = c[0xB0 / 4];
                     g_main_cam_far  = c[0xB4 / 4];
                     g_main_proj_yy  = c[0x214 / 4];
-                    // Weapon ADS as a plain scale factor. MAIN's fov scalar is provably NOT
+                    // Effective MAIN/world ADS magnification as a plain scale factor. MAIN's
+                    // FOV scalar is provably NOT
                     // touched by ADS (measured: 68.238 both at rest and while aiming), so it
                     // still describes the UNZOOMED frustum -- which makes cot(fovV/2) the
                     // baseline the live vertical scale divides by. No guessed reference.
@@ -12688,8 +12691,8 @@ static __int64 __fastcall Detour_SlConstants(void* a1, void* a2, void* a3) {
                     if (g_main_cam_fov > 0.f) {
                         const float t = tanf(g_main_cam_fov * 0.5f * 0.01745329252f);
                         if (t > 0.f) {
-                            g_ads_factor = g_main_proj_yy * t;
-                            CyberpunkVR_DebugVrcamZoomFactor = g_ads_factor;
+                            g_main_ads_zoom_factor = g_main_proj_yy * t;
+                            CyberpunkVR_MainAdsZoomFactor = g_main_ads_zoom_factor;
                         }
                     }
                     CyberpunkVR_DebugMainCamFov = g_main_cam_fov;
@@ -12718,7 +12721,7 @@ static __int64 __fastcall Detour_SlConstants(void* a1, void* a2, void* a3) {
                     // fov -> cot -> projection, and doing the trig in float left ~0.002 deg
                     // of drift against the authored value.
                     double src_fov = 0.0;              // vertical FOV in degrees, pre-ADS
-                    double ads = static_cast<double>(g_ads_factor);
+                    double ads = static_cast<double>(g_main_ads_zoom_factor);
                     if (CyberpunkVR_VrcamFovDeg > 1.0f) {
                         // Explicit override -- this is where the headset's own FOV goes once
                         // the HMD drives the eye. ADS still applies on top of it.

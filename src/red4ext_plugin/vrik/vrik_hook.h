@@ -724,6 +724,211 @@ static inline void VRIK_WriteLocalPos(uint8_t* boneBuf, int idx,
     t[0]=local[0]; t[1]=local[1]; t[2]=local[2];
 }
 
+// Keeps the vanilla non-VRIK ADS raise animation, but removes the direction change it adds.
+// Hip fire records the last trustworthy muzzle direction in game-heading space. While aiming,
+// a small closed-loop correction rotates only WeaponRight during the ADS transition. Once the
+// aim-in ends, the final correction is converted to a weapon-local delta so normal ADS breathing,
+// sway and RS aim remain live. Hip capture is gated only by the engine's Ready/Safe/ADS states.
+// Heading space excludes physical HMD motion while preserving ordinary mouse/stick turns.
+static inline void VRIK_ApplyNonVrikAdsMuzzleStabilizer(uint8_t* boneBuf) {
+    struct RawWeaponPoseCache {
+        uint8_t* boneBuf = nullptr;
+        float tick = -1.0f;
+        int weaponIdx = -1;
+        float localRot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    };
+    static float s_hipAimHeading[3] = {0.0f, 1.0f, 0.0f};
+    static float s_totalModelCorrection[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    static float s_frozenWeaponLocalCorrection[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    static float s_lastTick = -1.0f;
+    static bool s_hipAimValid = false;
+    static bool s_prevAiming = false;
+    static bool s_adsCorrectionFrozen = false;
+    static bool s_adsSawAimIn = false;
+    static bool s_freezeLocalCorrectionPending = false;
+    static int s_adsTransitionTicks = 0;
+    static int s_adsConvergedTicks = 0;
+    static RawWeaponPoseCache s_rawPoseCache[4];
+    static int s_rawPoseReplace = 0;
+
+    if (!g_pSharedHands || g_VRBind > 0 ||
+        g_pSharedHands[vrshared::kNonVrikAdsMuzzleStabilizer] <= 0.5f ||
+        g_pSharedHands[vrshared::kWeaponFlag] <= 0.5f ||
+        g_pSharedHands[27] <= 0.5f) {
+        s_totalModelCorrection[0]=0.0f; s_totalModelCorrection[1]=0.0f;
+        s_totalModelCorrection[2]=0.0f; s_totalModelCorrection[3]=1.0f;
+        s_frozenWeaponLocalCorrection[0]=0.0f; s_frozenWeaponLocalCorrection[1]=0.0f;
+        s_frozenWeaponLocalCorrection[2]=0.0f; s_frozenWeaponLocalCorrection[3]=1.0f;
+        s_prevAiming = false;
+        s_adsCorrectionFrozen = false;
+        s_freezeLocalCorrectionPending = false;
+        return;
+    }
+
+    const int weaponIdx = static_cast<int>(g_VRSmokeCigIdx);
+    if (weaponIdx < 0 || weaponIdx >= VRIK_FKCount()) {
+        return;
+    }
+
+    float muzzle[3] = { g_pSharedHands[24], g_pSharedHands[25], g_pSharedHands[26] };
+    if (VRIK_Norm3(muzzle) < 0.5f) {
+        return;
+    }
+    float entQ[4] = { g_VREntityQI, g_VREntityQJ, g_VREntityQK, g_VREntityQR };
+    VRIK_QuatNorm(entQ);
+
+    const bool aiming = g_pSharedHands[vrshared::kAiming] > 0.5f;
+    const float tick = g_pSharedHands[vrshared::kEntitySeq];
+    if (tick != s_lastTick) {
+        s_lastTick = tick;
+        const int weaponPsm = static_cast<int>(std::lround(
+            g_pSharedHands[vrshared::kWeaponPsmState]));
+        const bool weaponPsmReady = weaponPsm == 5;
+        const bool safeToReady = g_pSharedHands[vrshared::kSafeToReady] > 0.5f;
+        const bool aimInRunning = g_pSharedHands[vrshared::kAimInRemaining] > 0.001f;
+        if (aiming && !s_prevAiming) {
+            s_totalModelCorrection[0]=0.0f; s_totalModelCorrection[1]=0.0f;
+            s_totalModelCorrection[2]=0.0f; s_totalModelCorrection[3]=1.0f;
+            s_frozenWeaponLocalCorrection[0]=0.0f; s_frozenWeaponLocalCorrection[1]=0.0f;
+            s_frozenWeaponLocalCorrection[2]=0.0f; s_frozenWeaponLocalCorrection[3]=1.0f;
+            s_adsCorrectionFrozen = false;
+            s_adsSawAimIn = aimInRunning;
+            s_freezeLocalCorrectionPending = false;
+            s_adsTransitionTicks = 0;
+            s_adsConvergedTicks = 0;
+        } else if (!aiming && s_prevAiming) {
+            s_adsCorrectionFrozen = false;
+            s_adsSawAimIn = false;
+            s_freezeLocalCorrectionPending = false;
+            s_adsTransitionTicks = 0;
+            s_adsConvergedTicks = 0;
+        }
+        if (!aiming) {
+            s_totalModelCorrection[0]=0.0f; s_totalModelCorrection[1]=0.0f;
+            s_totalModelCorrection[2]=0.0f; s_totalModelCorrection[3]=1.0f;
+
+            if (!weaponPsmReady || safeToReady) {
+                // Weapon PSM 5 is the actual ranged Ready state. Preserve the normal hip
+                // reference in Safe and during PublicSafeToReady instead of learning either
+                // lowered pose or the raise transition.
+            } else {
+                // [141] is the render-fresh game heading: it follows mouse/stick turning but
+                // excludes physical HMD rotation. This is the correct frame for a hip aim that
+                // should move with RS while remaining fixed when only the player's head moves.
+                const float heading = g_pSharedHands[vrshared::kHeading];
+                const float hs = std::sin(heading * 0.5f);
+                const float hc = std::cos(heading * 0.5f);
+                const float invHeadingQ[4] = {0.0f, 0.0f, -hs, hc};
+                float local[3]; VRIK_QuatRotateVec(invHeadingQ, muzzle, local);
+                if (VRIK_Norm3(local) > 0.5f) {
+                    // Ready is the authority: capture exactly what the external barrel dot shows
+                    // this tick. Combat motion and turn sway are valid aim samples, not outliers.
+                    s_hipAimHeading[0]=local[0]; s_hipAimHeading[1]=local[1];
+                    s_hipAimHeading[2]=local[2];
+                    s_hipAimValid = true;
+                }
+            }
+        } else if (s_hipAimValid && !s_adsCorrectionFrozen) {
+            if (aimInRunning) s_adsSawAimIn = true;
+            const float heading = g_pSharedHands[vrshared::kHeading];
+            const float headingQ[4] = {
+                0.0f, 0.0f, std::sin(heading * 0.5f), std::cos(heading * 0.5f)};
+            float desiredWorld[3]; VRIK_QuatRotateVec(headingQ, s_hipAimHeading, desiredWorld);
+            VRIK_Norm3(desiredWorld);
+
+            float errorWorld[4]; VRIK_QuatFromTo(muzzle, desiredWorld, errorWorld);
+            float alignment = muzzle[0]*desiredWorld[0] + muzzle[1]*desiredWorld[1] +
+                              muzzle[2]*desiredWorld[2];
+            if (alignment > 1.0f) alignment = 1.0f;
+            if (alignment < -1.0f) alignment = -1.0f;
+            const float errorRadians = std::acos(alignment);
+            ++s_adsTransitionTicks;
+            if (errorRadians < 0.2f * 0.01745329252f) {
+                if (s_adsConvergedTicks < 1000) ++s_adsConvergedTicks;
+            } else {
+                s_adsConvergedTicks = 0;
+            }
+
+            float stepWorld[4]; VRIK_QuatScale(errorWorld, 0.35f, stepWorld);
+            float invEnt[4]; VRIK_QuatConj(entQ, invEnt);
+            float tmp[4], stepModel[4];
+            VRIK_QuatMul(invEnt, stepWorld, tmp);
+            VRIK_QuatMul(tmp, entQ, stepModel);
+            VRIK_QuatNorm(stepModel);
+
+            float next[4]; VRIK_QuatMul(stepModel, s_totalModelCorrection, next);
+            VRIK_QuatNorm(next);
+            constexpr float kMaxCorrectionRadians = 15.0f * 0.01745329252f;
+            float w = std::fabs(next[3]); if (w > 1.0f) w = 1.0f;
+            const float angle = 2.0f * std::acos(w);
+            if (angle > kMaxCorrectionRadians) {
+                VRIK_QuatScale(next, kMaxCorrectionRadians / angle, next);
+            }
+            s_totalModelCorrection[0]=next[0]; s_totalModelCorrection[1]=next[1];
+            s_totalModelCorrection[2]=next[2]; s_totalModelCorrection[3]=next[3];
+            // AimInTimeRemaining is authored by AimingStateEvents for the actual weapon ADS
+            // transition. Freeze as soon as that transition ends. The convergence fallback is
+            // only for weapons with a zero/missing AimInTime.
+            if ((s_adsSawAimIn && !aimInRunning) ||
+                (!s_adsSawAimIn && s_adsTransitionTicks >= 20 && s_adsConvergedTicks >= 3)) {
+                s_adsCorrectionFrozen = true;
+                s_freezeLocalCorrectionPending = true;
+            }
+        }
+        s_prevAiming = aiming;
+    }
+
+    if (!aiming || !s_hipAimValid) return;
+
+    // Hooked_AnimPoseApply can visit the same player pose buffer several times in one entity
+    // tick. Cache that tick's unmodified WeaponRight local rotation and always compose from it;
+    // multiplying the correction into the already-corrected pass accumulates rotation and can
+    // eventually skew both ADS and the following hip pose.
+    RawWeaponPoseCache* rawPose = nullptr;
+    for (auto& entry : s_rawPoseCache) {
+        if (entry.boneBuf == boneBuf) {
+            rawPose = &entry;
+            break;
+        }
+    }
+    if (!rawPose) {
+        rawPose = &s_rawPoseCache[s_rawPoseReplace++ & 3];
+        rawPose->boneBuf = boneBuf;
+        rawPose->tick = -1.0f;
+    }
+    if (rawPose->tick != tick || rawPose->weaponIdx != weaponIdx) {
+        const float* rawLocal = reinterpret_cast<const float*>(
+            boneBuf + weaponIdx * 48 + VRIK_ROT_OFF);
+        rawPose->localRot[0]=rawLocal[0]; rawPose->localRot[1]=rawLocal[1];
+        rawPose->localRot[2]=rawLocal[2]; rawPose->localRot[3]=rawLocal[3];
+        VRIK_QuatNorm(rawPose->localRot);
+        rawPose->tick = tick;
+        rawPose->weaponIdx = weaponIdx;
+    }
+
+    VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+    const int parent = g_VRBoneParent[weaponIdx];
+    if (parent < 0 || parent >= weaponIdx) return;
+    float rawModel[4];
+    VRIK_QuatMul(g_fkRot[parent], rawPose->localRot, rawModel);
+    VRIK_QuatNorm(rawModel);
+    float correctedModel[4];
+    if (s_adsCorrectionFrozen && !s_freezeLocalCorrectionPending) {
+        VRIK_QuatMul(rawModel, s_frozenWeaponLocalCorrection, correctedModel);
+    } else {
+        VRIK_QuatMul(s_totalModelCorrection, rawModel, correctedModel);
+        if (s_freezeLocalCorrectionPending) {
+            float invRawModel[4];
+            VRIK_QuatConj(rawModel, invRawModel);
+            VRIK_QuatMul(invRawModel, correctedModel, s_frozenWeaponLocalCorrection);
+            VRIK_QuatNorm(s_frozenWeaponLocalCorrection);
+            s_freezeLocalCorrectionPending = false;
+        }
+    }
+    VRIK_QuatNorm(correctedModel);
+    VRIK_WriteLocalRot(boneBuf, weaponIdx, g_fkRot[parent], correctedModel);
+}
+
 static inline void VRIK_DampenTorsoWeaponPose(uint8_t* boneBuf) {
     // Weapon-ready upper-body poses bend the Spine* chain before VRIK runs. Neutralize only spine
     // local rotations here; clavicle/upper-arm identity is not the rig rest pose and corrupts FK.
@@ -2120,7 +2325,10 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
     // No VirtualQuery here -- that syscall per call was the FPS killer. a2 is always
     // a valid pose-apply argument, so a single __try guards the dereferences.
     if (!(g_PlayerTrackBufA || g_PlayerTrackBufB)) return result;
-    if (g_VRBind <= 0 && g_AnimPoseDebug == 0 && g_VRDiagCapture == 0 &&
+    const bool nonVrikAdsWork = g_pSharedHands &&
+        g_pSharedHands[vrshared::kNonVrikAdsMuzzleStabilizer] > 0.5f &&
+        g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
+    if (g_VRBind <= 0 && !nonVrikAdsWork && g_AnimPoseDebug == 0 && g_VRDiagCapture == 0 &&
         g_VRSmokeFingerActive == 0 && g_VRSmokeFingerCapture == 0 &&
         g_VRSmokeFingerActiveL == 0 && g_VRSmokeFingerCaptureL == 0) return result;
 
@@ -2139,6 +2347,8 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
                 // player apply (this runs on the animation thread; dxgi writes on the
                 // present thread).
                 RefreshHandsSnapshot();
+
+                VRIK_ApplyNonVrikAdsMuzzleStabilizer(boneBuf);
 
                 // SMOKE FINGER-HOLD (fingers-only grip). Runs on EVERY player pass, BEFORE
                 // the solve/replay split, so the curl is bit-identical across the 4-5
@@ -3685,4 +3895,3 @@ inline bool InstallAnimPoseHook() {
         return false;
     return true;
 }
-

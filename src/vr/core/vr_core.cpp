@@ -24,6 +24,9 @@
 #include "swapchain_hooks.h"
 #include "../../common/log_throttle.h"
 
+// MAIN/world ADS magnification measured from the live projection in sync_stereo.cpp.
+extern "C" float CyberpunkVR_MainAdsZoomFactor;
+
 static FILE* g_logFile = nullptr;
 static char g_gameDir[MAX_PATH] = {};
 static char g_liveControlPath[MAX_PATH] = {};
@@ -2268,7 +2271,7 @@ volatile int32_t g_lastLocatePosFP[3] = {};   // world head CENTRE, fixed point 
 // non-jittering head. OnFinalCameraCallback adds this shift to the final render
 // camera only — post-IK, just before projection.
 static volatile int32_t g_lastIpdShiftFP[3] = {};
-volatile float g_lastLocateQuat[4] = { 0.0f, 0.0f, 0.0f, 1.0f };  // located (HMD-injected) game-world cam quat; read by the overlay barrel crosshair
+volatile float g_lastLocateQuat[4] = { 0.0f, 0.0f, 0.0f, 1.0f };  // latest located (HMD-injected) game-world camera quaternion
 
 // The head orientation LocateCamera composed this frame: heading (mouse/stick) * HMD pose.
 // Written by PatchCamera into BOTH cameras. Kept separate from g_lastLocateQuat, which is a
@@ -2701,6 +2704,48 @@ static volatile uint32_t g_renderedSeq = 0;
 static volatile uint8_t g_locateEyeBySeq[256] = {};
 static volatile int g_renderedEye = 0;
 
+// Coherent MAIN final-camera sample consumed by the barrel-direction overlay. The old overlay
+// read the latest Locate quaternion at Present while sampling the CET muzzle independently.
+// Fast head turns could therefore combine different moments (and even straddle the four-float
+// quaternion write), producing the long velocity-dependent dot trail seen in-headset. Publish
+// the camera quaternion actually used by MAIN together with the muzzle available at that same
+// callback. This fixes data coherence; it deliberately adds no smoothing or pose prediction.
+static std::atomic<uint32_t> g_barrelDotRenderLock{0}; // even = stable, odd = writer active
+static float g_barrelDotRenderQuat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+static float g_barrelDotRenderMuzzleFwd[3] = {};
+static uint64_t g_barrelDotRenderId = 0;
+static std::atomic<uint64_t> g_barrelDotRenderCounter{0};
+
+static void PublishBarrelDotRenderSnapshot(const float cameraQuat[4], const float muzzleFwd[3]) {
+    const uint64_t id = g_barrelDotRenderCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+    g_barrelDotRenderLock.fetch_add(1, std::memory_order_acq_rel);
+    std::atomic_thread_fence(std::memory_order_release);
+    for (int i = 0; i < 4; ++i) g_barrelDotRenderQuat[i] = cameraQuat[i];
+    for (int i = 0; i < 3; ++i) g_barrelDotRenderMuzzleFwd[i] = muzzleFwd[i];
+    g_barrelDotRenderId = id;
+    std::atomic_thread_fence(std::memory_order_release);
+    g_barrelDotRenderLock.fetch_add(1, std::memory_order_release);
+}
+
+extern "C" int GetBarrelDotRenderSnapshot(float outCameraQuat[4], float outMuzzleFwd[3],
+                                            uint64_t* outId) {
+    if (!outCameraQuat || !outMuzzleFwd) return 0;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const uint32_t begin = g_barrelDotRenderLock.load(std::memory_order_acquire);
+        if (begin & 1u) continue;
+        for (int i = 0; i < 4; ++i) outCameraQuat[i] = g_barrelDotRenderQuat[i];
+        for (int i = 0; i < 3; ++i) outMuzzleFwd[i] = g_barrelDotRenderMuzzleFwd[i];
+        const uint64_t id = g_barrelDotRenderId;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const uint32_t end = g_barrelDotRenderLock.load(std::memory_order_acquire);
+        if (begin == end && !(end & 1u)) {
+            if (outId) *outId = id;
+            return id != 0 ? 1 : 0;
+        }
+    }
+    return 0;
+}
+
 extern "C" uint32_t GetRenderedCameraSeq() {
     return g_renderedSeq;
 }
@@ -2807,6 +2852,52 @@ bool g_hasWeaponEquipped = false;
 static std::mutex g_adsCameraTelemetryMutex;
 static AdsCameraTelemetryUiState g_adsCameraTelemetry{};
 
+// CP2077 renders the world and the first-person weapon/body layer with independent ADS zooms.
+// That is harmless on a flat screen because the sight is held at screen centre, but in VR an
+// off-axis hand-held sight is projected to two different screen positions.  Drive the weapon
+// override from MAIN's live projection zoom so the rendered sight, scope reticle and world ray
+// remain collinear.  Only the weapon override is touched; MAIN/world projection is left native.
+static void SyncAdsWeaponZoomToWorld() {
+    static uintptr_t s_savedCam = 0;
+    static float s_savedWeaponWeight = 0.0f;
+    static float s_savedWeaponValue = 1.0f;
+    static bool s_saved = false;
+    static bool s_prevAiming = false;
+
+    const bool aiming = g_isAiming;
+    const uintptr_t camObj = g_camObjMain.load(std::memory_order_acquire);
+    if (!camObj) {
+        s_prevAiming = aiming;
+        return;
+    }
+
+    __try {
+        float* const weaponWeight = reinterpret_cast<float*>(camObj + 0x280);
+        float* const weaponValue  = reinterpret_cast<float*>(camObj + 0x284);
+        if (aiming) {
+            if (!s_prevAiming || !s_saved || s_savedCam != camObj) {
+                s_savedCam = camObj;
+                s_savedWeaponWeight = *weaponWeight;
+                s_savedWeaponValue = *weaponValue;
+                s_saved = std::isfinite(s_savedWeaponWeight) &&
+                          std::isfinite(s_savedWeaponValue);
+            }
+
+            const float liveWorldZoom = CyberpunkVR_MainAdsZoomFactor;
+            if (std::isfinite(liveWorldZoom) && liveWorldZoom > 0.5f && liveWorldZoom < 12.0f) {
+                *weaponWeight = 1.0f;
+                *weaponValue = liveWorldZoom;
+            }
+        } else if (s_prevAiming && s_saved && s_savedCam == camObj) {
+            *weaponWeight = s_savedWeaponWeight;
+            *weaponValue = s_savedWeaponValue;
+            s_saved = false;
+        }
+
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    s_prevAiming = aiming;
+}
+
 extern "C" void GetAdsCameraTelemetryUiState(AdsCameraTelemetryUiState* outState) {
     if (!outState) return;
     std::lock_guard<std::mutex> lock(g_adsCameraTelemetryMutex);
@@ -2865,6 +2956,8 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         }
     }
 
+    SyncAdsWeaponZoomToWorld();
+
     // 1. Inizializza la cache RTTI solo al primissimo frame
     if (!g_isRTTIInitialized) {
         InitializeMountedVehicleCache();
@@ -2912,10 +3005,10 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
             // the vehicle drives the puppet, body IK fights it and breaks the
             // character/camera position. Arms-only in vehicles.
             OpenXRManager::Get().SetSharedSlot(31, g_isInVehicle ? 1.0f : 0.0f);
+            OpenXRManager::Get().SetSharedSlot(vrshared::kNonVrikAdsMuzzleStabilizer, 1.0f);
+            OpenXRManager::Get().SetSharedSlot(vrshared::kAiming, g_isAiming ? 1.0f : 0.0f);
         }
     }
-    
-
     // SNAP HOLDBACK, second life — now on the CLEAN baseline (its first test was polluted by
     // the since-reverted re-yaw fixes flashing on their own). The snapdiag log proved: [141]
     // jumps the FULL snap delta in one frame in sprint too, and standing snaps are clean —
@@ -4408,24 +4501,45 @@ extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
     // the placed component, carried through the view producer, so finding it in the write ring
     // tells us exactly which XR sample is in this frame.
     //
-    // MAIN only: both views carry the same orientation, so taking both would push two entries
-    // for one presented frame and the queue would run at double rate.
-    if (CyberpunkVR_PoseReadBack && CyberpunkVR_StereoModuleLoaded) {
+    // MAIN only: the overlay is drawn into MAIN's backbuffer, and VRCAM receives the published
+    // NDC result separately. Publishing VRCAM here would overwrite MAIN's render-camera sample.
+    if (CyberpunkVR_StereoModuleLoaded) {
         const bool isVrcam = CyberpunkVR_IsVrcamViewActive() != 0;
         const bool isMain  = !isVrcam && CyberpunkVR_IsMainViewActive() != 0;
         if (isMain) {
             float camq[4] = {};
             if (ReadFloatArraySafe(rsiPtr + 4, camq, 4) && IsPlausibleUnitQuaternion(camq)) {
-                OpenXRHeadPose matched{};
-                uint32_t age = 0, ties = 0;
-                if (CamWriteRecordFind(camq, &matched, &age, &ties)) {
-                    CyberpunkVR_DebugFinalAge  = age;
-                    CyberpunkVR_DebugFinalTies = ties;
-                    if (ties > 1) ++CyberpunkVR_DebugFinalTieHits;
-                    ++CyberpunkVR_DebugFinalMatch;
-                    OpenXRManager::Get().PushRenderedFramePose(matched);
-                } else {
-                    ++CyberpunkVR_DebugFinalNoMatch;
+                // Latch the last real muzzle direction at MAIN's final-camera callback, then
+                // publish it atomically with the quaternion this frame actually renders. CET
+                // occasionally publishes its identity/default +Y while weapon transforms are
+                // between states; that is not a new barrel direction and must not replace the
+                // last valid one.
+                static float s_muzzleFwd[3] = {};
+                if (float* sh = GetShotShared(); sh && sh[27] >= 0.5f) {
+                    const float x = sh[24], y = sh[25], z = sh[26];
+                    const bool identityDefault = (x == 0.0f && y == 1.0f && z == 0.0f);
+                    if (!identityDefault && x*x + y*y + z*z > 0.25f) {
+                        s_muzzleFwd[0] = x; s_muzzleFwd[1] = y; s_muzzleFwd[2] = z;
+                    }
+                }
+                if (s_muzzleFwd[0]*s_muzzleFwd[0] +
+                    s_muzzleFwd[1]*s_muzzleFwd[1] +
+                    s_muzzleFwd[2]*s_muzzleFwd[2] > 0.25f) {
+                    PublishBarrelDotRenderSnapshot(camq, s_muzzleFwd);
+                }
+
+                if (CyberpunkVR_PoseReadBack) {
+                    OpenXRHeadPose matched{};
+                    uint32_t age = 0, ties = 0;
+                    if (CamWriteRecordFind(camq, &matched, &age, &ties)) {
+                        CyberpunkVR_DebugFinalAge  = age;
+                        CyberpunkVR_DebugFinalTies = ties;
+                        if (ties > 1) ++CyberpunkVR_DebugFinalTieHits;
+                        ++CyberpunkVR_DebugFinalMatch;
+                        OpenXRManager::Get().PushRenderedFramePose(matched);
+                    } else {
+                        ++CyberpunkVR_DebugFinalNoMatch;
+                    }
                 }
             }
         }
