@@ -109,6 +109,7 @@ void InitRuntimePaths() {
     g_liveControls.xrInputActions = 1;
     g_liveControls.xrChordActivation = 0;
     g_liveControls.xrExtraChordActions = 1;
+    g_liveControls.xrFullStickSprintCrouch = 1;
 
     // Capture the recenter-request baseline NOW (before CET could write), so the
     // first OnGameAttached this session is seen as a change and triggers a recenter,
@@ -193,6 +194,7 @@ void EnsureLiveControlFileExists() {
     fprintf(file, "xr_input_actions=1\n");
     fprintf(file, "xr_chord_activation=0\n");
     fprintf(file, "xr_extra_chord_actions=1\n");
+    fprintf(file, "xr_full_stick_sprint_crouch=1\n");
     fprintf(file, "xr_mono_xqueue_wait=0\n");
     fprintf(file, "xr_snap_turn_pulse_ms=30\n");
     fprintf(file, "xr_mono_depth_capture=1\n");
