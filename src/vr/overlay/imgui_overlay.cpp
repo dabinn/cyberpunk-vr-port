@@ -3,6 +3,7 @@
 #include "openxr_manager.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -105,6 +106,7 @@ HWND g_hwnd = nullptr;
 WNDPROC g_originalWndProc = nullptr;
 bool g_imguiInitialized = false;
 bool g_menuVisible = false;
+std::atomic<uint32_t> g_menuToggleRequests{0};
 bool g_drawHandLocator = false;
 bool g_drawHandProxy3D = false;
 bool g_drawHandDebugAxes = false;
@@ -1155,6 +1157,14 @@ void ReleaseGameMouseCapture() {
     }
 }
 
+void ToggleOverlayMenu() {
+    g_menuVisible = !g_menuVisible;
+    if (g_menuVisible) {
+        ReleaseGameMouseCapture();
+    }
+    if (g_verboseLog) Log("ImGui overlay %s.\n", g_menuVisible ? "shown" : "hidden");
+}
+
 void UpdateImGuiMouseFromCursor(HWND hwnd, float backbufferWidth, float backbufferHeight) {
     ImGuiIO& io = ImGui::GetIO();
 
@@ -1472,6 +1482,50 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
 
             ImGui::Separator();
+            ImGui::TextUnformatted("Emulate D-pad and Additional Controls");
+            ImGui::TextUnformatted("Chord Activation Method");
+            changed |= ImGui::RadioButton("L3 button - left thumbstick", &state.xrChordActivation, 0);
+            changed |= ImGui::RadioButton("L3 button - right thumbstick (swap L3/R3)", &state.xrChordActivation, 1);
+            const bool thumbrestAvailable = OpenXRManager::Get().IsRightThumbrestAvailable();
+            changed |= ImGui::RadioButton(
+                thumbrestAvailable ? "Right thumbrest" : "Right thumbrest (unavailable)",
+                &state.xrChordActivation,
+                2);
+            if (!thumbrestAvailable && state.xrChordActivation == 2) {
+                ImGui::TextDisabled("Using L3 button - left thumbstick until right thumbrest is available.");
+            }
+            changed |= CheckboxInt("Extra Chord Actions", &state.xrExtraChordActions);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Enable extra chord actions for VR Recenter and the F10 Menu.\n"
+                                  "D-pad emulation and Back/Select remain available when this option is disabled.");
+            }
+            ImGui::TextDisabled("Current binding:");
+            const int effectiveChord = (state.xrChordActivation == 2 && !thumbrestAvailable)
+                ? 0 : state.xrChordActivation;
+            if (effectiveChord == 0) {
+                ImGui::BulletText("Hold left thumb click: right stick = D-pad, left Menu = Back/Select");
+                if (state.xrExtraChordActions != 0)
+                    ImGui::BulletText("Extra actions: A = Recenter, B = F10 Menu");
+                else
+                    ImGui::BulletText("Extra actions: disabled");
+                ImGui::BulletText("Thumb clicks: left = L3, right = R3");
+            } else if (effectiveChord == 1) {
+                ImGui::BulletText("Hold right thumb click: left stick = D-pad, left Menu = Back/Select");
+                if (state.xrExtraChordActions != 0)
+                    ImGui::BulletText("Extra actions: X = Recenter, Y = F10 Menu");
+                else
+                    ImGui::BulletText("Extra actions: disabled");
+                ImGui::BulletText("Thumb clicks: left = R3, right = L3");
+            } else {
+                ImGui::BulletText("Touch right thumbrest: left stick = D-pad, left Menu = Back/Select");
+                if (state.xrExtraChordActions != 0)
+                    ImGui::BulletText("Extra actions: X = Recenter, Y = F10 Menu");
+                else
+                    ImGui::BulletText("Extra actions: disabled");
+                ImGui::BulletText("Thumb clicks: left = L3, right = R3");
+            }
+
+            ImGui::Separator();
             ImGui::TextUnformatted("Weapon holsters (reach + right grip)");
             changed |= CheckboxInt("Immersive holsters", &state.xrImmersiveHolsters);
             if (ImGui::IsItemHovered()) {
@@ -1513,7 +1567,7 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
 
             ImGui::Separator();
-            ImGui::TextUnformatted("Default binding (CP2077 native gamepad):");
+            ImGui::TextUnformatted("Other bindings (CP2077 native gamepad):");
             ImGui::BulletText("Left stick   - walk / jog (push FULL forward = sprint / L3)");
             ImGui::BulletText("Right stick X - turn camera (Y = pitch unless Disable Mouse Y is on)");
             ImGui::BulletText("Right stick FULL down - crouch (R3)");
@@ -1523,13 +1577,7 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             ImGui::BulletText("Left  Y      - weapon switch");
             ImGui::BulletText("Right trigger - fire    | Left trigger - aim");
             ImGui::BulletText("Right grip    - holster equip / unequip | Left grip - crouch (shoulder)");
-            ImGui::BulletText("Left  thumb click - sprint (L3) | Right thumb click - crouch (R3)");
-            ImGui::BulletText("Left  menu button - pause menu");
-            ImGui::BulletText("DPAD - Emulation");
-            ImGui::BulletText("Right GRIP + RightThum UP | DPAD UP");
-            ImGui::BulletText("Right GRIP + RightThum DOWN | DPAD DOWN");
-            ImGui::BulletText("Right GRIP + RightThum LEFT | DPAD LEFT");
-            ImGui::BulletText("Right GRIP + RightThum RIGHT | DPAD RIGHT");
+            ImGui::BulletText("Left menu button - Start / pause menu (without chord)");
 
             ImGui::TextWrapped("Buttons follow each runtime's interaction profile (Touch / Index / "
                                "Vive / WMR). Customize the actual key bindings in the game's "
@@ -1778,11 +1826,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     // 2. Handle menu toggle
     if ((msg == WM_KEYUP || msg == WM_SYSKEYUP) && (wParam == VK_F10 || wParam == VK_INSERT)) {
-        g_menuVisible = !g_menuVisible;
-        if (g_menuVisible) {
-            ReleaseGameMouseCapture();
-        }
-        if (g_verboseLog) Log("ImGui overlay %s.\n", g_menuVisible ? "shown" : "hidden");
+        ToggleOverlayMenu();
         return 0;
     }
 
@@ -1798,6 +1842,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     return g_originalWndProc ? CallWindowProcA(g_originalWndProc, hwnd, msg, wParam, lParam) : DefWindowProcA(hwnd, msg, wParam, lParam);
 }
+}
+
+extern "C" void RequestOverlayToggle() {
+    g_menuToggleRequests.fetch_add(1, std::memory_order_release);
 }
 
 void OverlaySetDeviceAndQueue(ID3D12Device* device, ID3D12CommandQueue* queue) {
@@ -1831,6 +1879,11 @@ void OverlaySetWindow(HWND hwnd) {
 
 void OverlayRender(IDXGISwapChain* swapChain) {
     if (!EnsureImGui(swapChain)) return;
+
+    const uint32_t toggleRequests = g_menuToggleRequests.exchange(0, std::memory_order_acq_rel);
+    if ((toggleRequests & 1u) != 0u) {
+        ToggleOverlayMenu();
+    }
 
     DXGI_SWAP_CHAIN_DESC desc{};
     if (FAILED(swapChain->GetDesc(&desc))) return;
