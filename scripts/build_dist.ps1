@@ -138,6 +138,12 @@ if (Test-Path $hud) {
     Add-File (Need (Join-Path $hud "persistency.json") "persistency.json") "bin\x64\plugins\cyber_engine_tweaks\mods\HUDitor\persistency.json"
 }
 
+# Include a standalone uninstaller. It uses the mod's fixed names rather than build-time hashes,
+# so locally rebuilt or manually replaced plugin DLLs are still removed.
+$uninstallScriptPath = Join-Path $Out "uninstall_cyberpunkvrport.ps1"
+Copy-Item -LiteralPath (Need (Join-Path $PSScriptRoot "uninstall_cyberpunkvrport.ps1") "uninstaller") -Destination $uninstallScriptPath
+$manifest += [pscustomobject]@{ Path = "uninstall_cyberpunkvrport.ps1"; Bytes = (Get-Item $uninstallScriptPath).Length }
+
 # ---- the OpenXR probe is NOT packaged ---------------------------------------------------------
 # It stays in tools\xr_probe\ and goes to a tester by hand, when there is something to measure.
 # Registering a MACHINE-WIDE OpenXR API layer is not a thing to ship to everyone who installs a
@@ -217,9 +223,21 @@ IF SOMETHING IS WRONG
     red4ext\logs\                          script validation errors land here
     bin\x64\plugins\cyber_engine_tweaks\   per-mod CET logs
 
+
     Uninstall: run UNINSTALL.bat, in the same folder as this file. It removes every path this
     package added and then offers your own settings back. UNINSTALL.txt is the same thing
     written out by hand, including the two things neither of them can put back for you.
+
+UNINSTALL (Tofu Express)
+    Close the game, open PowerShell in the Cyberpunk 2077 game root, and run:
+
+        pwsh -File .\uninstall_cyberpunkvrport.ps1
+
+    Preview without deleting anything by adding -WhatIf. Add -KeepSettings to retain runtime
+    settings, opt-out markers, calibration data, and plugin logs.
+
+    The uninstaller does not restore UserSettings.json automatically. Nothing else is written
+    outside the game folder; the first-launch backup described above sits next to that file.
 
 Built from commit $(git -C $RepoRoot rev-parse --short HEAD 2>$null) on $(Get-Date -Format "yyyy-MM-dd").
 "@
