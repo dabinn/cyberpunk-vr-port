@@ -977,8 +977,9 @@ void DrawVRHandsControls() {
         }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("OFF (default): classic VR heading -- turn with stick / snap-turn, the head only looks.\n"
-                              "ON: your avatar's body physically rotates to follow your head; aiming or holding a\n"
-                              "weapon switches to full head-look + head-relative movement. Vehicles are unaffected.");
+                              "ON: the head looks freely within 45 degrees; beyond that, the avatar body follows\n"
+                              "only the excess angle. Your selected locomotion source remains unchanged.\n"
+                              "Vehicles are unaffected.");
         }
     }
 

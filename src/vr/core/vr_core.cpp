@@ -124,7 +124,7 @@ struct LiveControls {
     volatile int xrMonoDepthCapture; // 1 (default) = mono scene-depth for XR_KHR_composition_layer_depth. The resolve reads the game depth as an SRV WITHOUT transitioning it (D3D12 state is global -> barriering the game's resource device-removes CP2077), on our own capture queue (FIFO before the submit's depth copy, no cross-queue Wait), and only once the scene depth has been a stable shader-readable resource with menus closed for a warmup window (skips the intro/menu-load transient). 0 = no depth in mono.
     volatile int xrSnapTurnYawIndex; // which float index in deltaHead[] gets the snap yaw. Default 1.
     volatile int xrImmersiveHolsters; // 1 = visual-holster equip (default), 0 = simple slot mapping (back=Slot1, R hip=Slot2, L hip=Slot3). Published to shared[23] for the CET Holster mod.
-    volatile int xrPhysicalBodyRotation; // 1 = physical body rotation (avatar body follows HMD/aim heading). 0 (default) = classic stick/snap heading. Gates the aiming/weapon body-turn paths; vehicles unaffected.
+    volatile int xrPhysicalBodyRotation; // 1 = body follows HMD yaw beyond the free-look band. 0 (default) = classic stick/snap heading; vehicles unaffected.
 };
 
 static constexpr int kEnablePatchBufferTracer = 0;
@@ -2353,6 +2353,83 @@ static volatile float g_headingPitchS = 0.0f;  // pitch quaternion is (s, 0, 0, 
 static volatile float g_headingPitchC = 1.0f;
 static volatile uint32_t g_headingValid = 0;   // 0 on the shot frame / native-aim mode
 
+// Physical body-follow state. Gameplay heading advances at the animation tick rate while the
+// render camera remains on the continuous HMD timeline. Pending yaw is injected but not yet
+// visible in the engine heading; applied yaw is visible and therefore removed from camera
+// composition until it is transferred into the OpenXR recenter base when the mode is disabled.
+static std::atomic<int>   g_bodyFollowYawActive{0};
+static std::atomic<float> g_bodyFollowYawPending{0.0f};
+static std::atomic<float> g_bodyFollowYawApplied{0.0f};
+
+static float WrapYawPi(float value) {
+    while (value >  3.14159265f) value -= 6.28318531f;
+    while (value < -3.14159265f) value += 6.28318531f;
+    return value;
+}
+
+static float ResolveBodyFollowRenderYaw(float gameYaw) {
+    static bool haveLastGameYaw = false;
+    static float lastGameYaw = 0.0f;
+    static bool wasActive = false;
+    static bool baseTransferPending = false;
+    static float transferAmount = 0.0f;
+    static float transferStartHmdYaw = 0.0f;
+    static uint64_t transferStartMs = 0;
+
+    if (!haveLastGameYaw) {
+        lastGameYaw = gameYaw;
+        haveLastGameYaw = true;
+    }
+    const float observedDelta = WrapYawPi(gameYaw - lastGameYaw);
+    lastGameYaw = gameYaw;
+
+    const bool active = g_bodyFollowYawActive.load(std::memory_order_acquire) != 0;
+    if (active) {
+        if (!wasActive) {
+            g_bodyFollowYawApplied.store(0.0f, std::memory_order_release);
+            baseTransferPending = false;
+            wasActive = true;
+        }
+
+        const float pending = g_bodyFollowYawPending.load(std::memory_order_acquire);
+        if (fabsf(pending) > 0.00001f && observedDelta * pending > 0.0f) {
+            float consumed = fminf(fabsf(observedDelta), fabsf(pending));
+            if (pending < 0.0f) consumed = -consumed;
+            g_bodyFollowYawPending.fetch_add(-consumed, std::memory_order_acq_rel);
+            g_bodyFollowYawApplied.fetch_add(consumed, std::memory_order_acq_rel);
+        }
+        return gameYaw - g_bodyFollowYawApplied.load(std::memory_order_acquire);
+    }
+
+    if (wasActive) {
+        wasActive = false;
+        g_bodyFollowYawPending.store(0.0f, std::memory_order_release);
+        transferAmount = WrapYawPi(g_bodyFollowYawApplied.load(std::memory_order_acquire));
+        if (fabsf(transferAmount) > 0.0001f) {
+            transferStartHmdYaw = OpenXRManager::Get().GetHmdYawRelToBody();
+            transferStartMs = GetTickCount64();
+            OpenXRManager::Get().RotateBaseYaw(transferAmount);
+            baseTransferPending = true;
+        } else {
+            g_bodyFollowYawApplied.store(0.0f, std::memory_order_release);
+        }
+    }
+
+    if (baseTransferPending) {
+        const float hmdDelta = WrapYawPi(
+            OpenXRManager::Get().GetHmdYawRelToBody() - transferStartHmdYaw);
+        const float transferError = WrapYawPi(hmdDelta + transferAmount);
+        if (fabsf(transferError) < 0.02f || GetTickCount64() - transferStartMs > 250) {
+            baseTransferPending = false;
+            g_bodyFollowYawApplied.store(0.0f, std::memory_order_release);
+            return gameYaw;
+        }
+        return gameYaw - g_bodyFollowYawApplied.load(std::memory_order_acquire);
+    }
+
+    return gameYaw;
+}
+
 // The product actually written into both cameras, composed once per present interval.
 //
 // ONE value for both views, deliberately. Composing separately per camera would give MAIN and
@@ -3314,6 +3391,8 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         ? OpenXRManager::Get().AcquireFrameHeadSample(&xrPose)
         : OpenXRManager::Get().GetHeadPose(&xrPose);
     const bool composeAtWrite = (CyberpunkVR_CamWriteInPatch && CyberpunkVR_CamComposeAtWrite);
+    const float gameYaw = atan2f(-bodyGameForwardX, bodyGameForwardY);
+    float renderGameYaw = gameYaw;
     if (hasXR) {
         // Hand the EXACT sample this frame's camera is built from to the submit path, so
         // the image is labelled with the pose it was rendered from instead of whatever the
@@ -3346,12 +3425,12 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
 
         // The headset supplies vertical look when mouse-Y pitch is disabled. When it is
         // enabled, preserve the game's pitch and compose it with the HMD orientation.
-        const float gameYaw = atan2f(-bodyGameForwardX, bodyGameForwardY);
+        renderGameYaw = ResolveBodyFollowRenderYaw(gameYaw);
         const float gamePitch = g_liveControls.xrDisableMouseY != 0
             ? 0.0f
             : g_gamePitchRadians;
-        const float cy = cosf(gameYaw * 0.5f);
-        const float sy = sinf(gameYaw * 0.5f);
+        const float cy = cosf(renderGameYaw * 0.5f);
+        const float sy = sinf(renderGameYaw * 0.5f);
         const float pc = cosf(gamePitch * 0.5f);
         const float ps = sinf(gamePitch * 0.5f);
 
@@ -3371,12 +3450,9 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         const float xrGameZ = xrPose.oriY;
         const float xrGameW = xrPose.oriW;
 
-        // Camera = game orientation * FULL HMD orientation in EVERY on-foot mode. With physical
-        // body rotation ON, body-realign (OnOnFootDeltaHead) turns the game HEADING only
-        // on a PHYSICAL body turn and rotates the recenter base by the same angle, so a
-        // head-only turn moves the VIEW but leaves the body/heading put. (The old unarmed
-        // branch stripped the HMD yaw and glued the heading to it, which rotated the body
-        // on every head turn -- replaced by the realign model.)
+        // Camera = render heading * FULL HMD orientation. Physical body follow removes only
+        // the yaw already observed in gameplay heading, so tick-rate body updates never feed
+        // back into the continuous render view.
         float headingX, headingY, headingZ, headingW;
         MulQuat(0.0f, 0.0f, sy, cy, ps, 0.0f, 0.0f, pc,
             headingX, headingY, headingZ, headingW);
@@ -3475,7 +3551,7 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
             (allowGameCameraTranslation ? (g_liveControls.xrHeadOffsetZ + camBake[2] + eyeBake[2]) : 0.0f);
 
         // Perfectly level heading matrix for translation (no sliding into the floor when pitched).
-        const float flatYaw = atan2f(-bodyGameForwardX, bodyGameForwardY);
+        const float flatYaw = renderGameYaw;
         const float flatCy = cosf(flatYaw);
         const float flatSy = sinf(flatYaw);
         // Hand it to the hand publish so it can rebuild this same delta from ITS head sample.
@@ -3552,7 +3628,7 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
             // [141] = RENDER-FRESH game heading (rad) + [142] validity. During the snap
             // one-tick view hold the RENDERED heading is (game - snapDelta); publish THAT,
             // so the hands mapping and the [148] pre-snap guard track what is on screen.
-            shView[141] = atan2f(-bodyGameForwardX, bodyGameForwardY) + g_snapHold141;
+            shView[141] = renderGameYaw + g_snapHold141;
             shView[142] = 1.0f;
             // [227..230] the HEAD orientation this view was composed from, XR axes, same space
             // as the [16..19] the hand publish carries. The arms rotate their head-local
@@ -6069,11 +6145,17 @@ static volatile bool g_sprintInputActive = false;
 extern "C" void __fastcall OnOnFootDeltaHeadCallback(float* deltaHead) {
     
     if (!deltaHead) return;
-    if(g_isInVehicle) return;
+    if (g_isInVehicle) {
+        g_bodyFollowYawActive.store(0, std::memory_order_release);
+        return;
+    }
 
-    // Physical body rotation (F10 -> VRIK). OFF (default): no continuous body-yaw
-    // tracking from the HMD -- only the discrete snap-turn is applied (classic heading).
-    const bool bodyRot = g_liveControls.xrPhysicalBodyRotation != 0;
+    const bool bodyFollow = g_liveControls.xrPhysicalBodyRotation != 0;
+    g_bodyFollowYawActive.store(bodyFollow ? 1 : 0, std::memory_order_release);
+    static bool s_bodyFollowControlActive = false;
+    static float s_bodyFollowLastHmdYaw = 0.0f;
+    static float s_bodyFollowUnwrappedHmdYaw = 0.0f;
+    if (!bodyFollow) s_bodyFollowControlActive = false;
 
     int idx = GetSnapTurnYawIndex();
     if (idx < 0) idx = 0;
@@ -6115,91 +6197,41 @@ extern "C" void __fastcall OnOnFootDeltaHeadCallback(float* deltaHead) {
         }
     }
 
-    // bodyRot OFF (default) -> classic snap-turn only: the heading never tracks the
-    // head; the camera composes heading * FULL HMD, so a head turn moves ONLY the view.
-    if (!bodyRot) {
+    // Physical body rotation OFF keeps camera and body independent. Snap turn remains a
+    // separate explicit gameplay-heading input.
+    if (!bodyFollow) {
         deltaHead[idx] += snap;
         return;
     }
 
-    // BODY REALIGN (physical body rotation ON), on foot, ARMED and UNARMED alike. The
-    // heading is turned toward the head only when a PHYSICAL body turn is detected, and
-    // RotateBaseYaw() rotates the recenter base by the SAME angle, so the rendered view
-    // (heading * hmdRel) and the HMD-local hand poses do NOT move -- only the body turns
-    // underneath. Detection uses the controllers as a chest proxy: UNARMED = the
-    // left->right hand line (GetBodyYawFromHands); ARMED = the weapon (right) aim yaw OR
-    // the hand line agreeing with the head. A neck limit drags the body regardless.
     if (g_menuModeValue == 0) {
         OpenXRManager& xr = OpenXRManager::Get();
-        const float hmdYaw = xr.GetHmdYawRelToBody();   // head vs body/base yaw (rad)
-        auto wrapPi = [](float a) {
-            while (a >  3.14159265f) a -= 6.28318531f;
-            while (a < -3.14159265f) a += 6.28318531f;
-            return a;
-        };
-        constexpr float kAlignTol  = 0.3491f;   // 20 deg: body estimate agrees with head
-        constexpr float kAlignHold = 0.25f;     // s of sustained alignment before turning
-        constexpr float kStartBand = 0.3665f;   // 21 deg head-body offset needed to start
-        constexpr float kStopBand  = 0.0524f;   // 3 deg: offset where the realign stops
-        constexpr float kNeckLimit = 1.2217f;   // 70 deg: drag the body regardless of hands
-        constexpr float kTurnRate  = 2.6f;      // rad/s catch-up speed (~150 deg/s)
-
-        const bool weaponMode = (g_isAiming || g_hasWeaponEquipped);
-        float bodyLineYaw = 0.0f;
-        const bool haveLine = xr.GetBodyYawFromHands(&bodyLineYaw);
-        const float lineErr = haveLine ? wrapPi(bodyLineYaw - hmdYaw) : 3.14159265f;
-        float alignErr;
-        bool handsAligned;
-        if (weaponMode) {
-            const float aimErr = wrapPi(xr.GetHandYawRelToBody(1) - hmdYaw);
-            handsAligned = (fabsf(aimErr) < kAlignTol) || (haveLine && fabsf(lineErr) < kAlignTol);
-            alignErr = (fabsf(aimErr) < fabsf(lineErr)) ? aimErr : lineErr;
-        } else if (haveLine) {
-            handsAligned = fabsf(lineErr) < kAlignTol;
-            alignErr = lineErr;
+        const float hmdYaw = xr.GetHmdYawRelToBody();
+        if (!s_bodyFollowControlActive) {
+            s_bodyFollowLastHmdYaw = hmdYaw;
+            s_bodyFollowUnwrappedHmdYaw = hmdYaw;
+            g_bodyFollowYawPending.store(0.0f, std::memory_order_release);
+            s_bodyFollowControlActive = true;
         } else {
-            const float dL = wrapPi(xr.GetHandYawRelToBody(0) - hmdYaw);
-            const float dR = wrapPi(xr.GetHandYawRelToBody(1) - hmdYaw);
-            alignErr = (fabsf(dL) > fabsf(dR)) ? dL : dR;   // worst hand decides
-            handsAligned = fabsf(alignErr) < kAlignTol;
+            s_bodyFollowUnwrappedHmdYaw += WrapYawPi(hmdYaw - s_bodyFollowLastHmdYaw);
+            s_bodyFollowLastHmdYaw = hmdYaw;
         }
 
-        static bool     s_turning   = false;
-        static float    s_alignTime = 0.0f;
-        static uint64_t s_lastQpc   = 0;
-        LARGE_INTEGER qf, qn;
-        QueryPerformanceFrequency(&qf);
-        QueryPerformanceCounter(&qn);
-        float dt = 0.0f;
-        if (s_lastQpc != 0) dt = static_cast<float>(qn.QuadPart - s_lastQpc) / static_cast<float>(qf.QuadPart);
-        s_lastQpc = qn.QuadPart;
-        if (dt < 0.0f) dt = 0.0f;
-        if (dt > 0.05f) dt = 0.05f;   // pause/hitch: don't integrate a huge step
+        const float ownedYaw =
+            g_bodyFollowYawApplied.load(std::memory_order_acquire) +
+            g_bodyFollowYawPending.load(std::memory_order_acquire);
+        const float headFromBody = s_bodyFollowUnwrappedHmdYaw - ownedYaw;
+        constexpr float kFreeLookBand = 0.785398163f; // 45 degrees to either side
+        float step = 0.0f;
+        if (headFromBody > kFreeLookBand) step = headFromBody - kFreeLookBand;
+        if (headFromBody < -kFreeLookBand) step = headFromBody + kFreeLookBand;
 
-        s_alignTime = handsAligned ? (s_alignTime + dt) : 0.0f;
-
-        const float absYaw = fabsf(hmdYaw);
-        if (!s_turning) {
-            const bool bodyTurned = handsAligned && (s_alignTime >= kAlignHold) && (absYaw > kStartBand);
-            if (bodyTurned || absYaw > kNeckLimit) {
-                s_turning = true;
-                Log("[BODY-REALIGN] START hmdYaw=%.1f bodyLine=%.1f (line=%d) alignErr=%.1f neck=%d wpn=%d\n",
-                    hmdYaw * 57.2957795f, bodyLineYaw * 57.2957795f, haveLine ? 1 : 0,
-                    alignErr * 57.2957795f, (absYaw > kNeckLimit) ? 1 : 0, weaponMode ? 1 : 0);
-            }
-        } else if (absYaw < kStopBand) {
-            s_turning = false;
-            Log("[BODY-REALIGN] DONE hmdYaw=%.1f\n", hmdYaw * 57.2957795f);
-        }
-
-        if (s_turning && dt > 0.0f) {
-            float step = kTurnRate * dt;
-            if (step > absYaw) step = absYaw;
-            if (hmdYaw < 0.0f) step = -step;
-            if (step != 0.0f) {
-                deltaHead[idx] += step * 57.2957795f;   // heading toward the head (deg)
-                xr.RotateBaseYaw(step);                 // base follows -> view + hands stay put
-            }
+        constexpr float kMaxBodyFollowStep = 0.523598776f;
+        if (step > kMaxBodyFollowStep) step = kMaxBodyFollowStep;
+        if (step < -kMaxBodyFollowStep) step = -kMaxBodyFollowStep;
+        if (fabsf(step) > 0.0001f) {
+            deltaHead[idx] += step * 57.2957795f;
+            g_bodyFollowYawPending.fetch_add(step, std::memory_order_acq_rel);
         }
     }
 
@@ -6657,20 +6689,7 @@ bool InstallFreeDeltaHeadHook() {
 // never hits OnFootMoveXY so driving is untouched.
 extern "C" void OnOnFootMoveXYCallback(void* moveStruct) {
     int src = g_liveControls.xrMovementSource;
-
-    // Physical body rotation (F10 -> VRIK): when ON, the heading no longer tracks the
-    // head (body-realign turns it only on a physical body turn), so "Game" (0) would
-    // walk in the direction of the deliberately-slow BODY and lag every head turn.
-    // Movement must follow the GAZE immediately, so with bodyRot ON, Game falls back to
-    // HMD-relative on foot. The move vector is heading-relative and hmdYawRel is
-    // head-vs-heading, so the rotated vector equals the gaze direction exactly, even
-    // mid-realign (heading and hmdYawRel change by opposite amounts). OFF keeps classic.
-    if (g_liveControls.xrPhysicalBodyRotation) {
-        if (g_isAiming || g_hasWeaponEquipped) src = 1;
-        if (src <= 0) src = 1;
-    }
-
-    if (src <= 0) return; // 0 = Game (no rotation) -- only when bodyRot is OFF
+    if (src <= 0) return; // 0 = Game: preserve the gameplay body heading exactly
     if (g_menuModeValue != 0) return;
     if (!moveStruct) return;
     float* p = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(moveStruct) + 0x90);
@@ -6683,6 +6702,9 @@ extern "C" void OnOnFootMoveXYCallback(void* moveStruct) {
         case 2: yaw = OpenXRManager::Get().GetHandYawRelToBody(0); break;
         case 3: yaw = OpenXRManager::Get().GetHandYawRelToBody(1); break;
         default: return;
+    }
+    if (g_bodyFollowYawActive.load(std::memory_order_acquire) != 0) {
+        yaw -= g_bodyFollowYawApplied.load(std::memory_order_acquire);
     }
     float c = cosf(yaw);
     float s = sinf(yaw);
