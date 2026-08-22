@@ -58,24 +58,34 @@ function Add-File($src, $rel) {
     $script:manifest += [pscustomobject]@{ Path = $rel; Bytes = (Get-Item -LiteralPath $dst).Length }
 }
 
-# ---- the two plugins ------------------------------------------------------------------------
+# ---- the plugin -----------------------------------------------------------------------------
+# ONE plugin. This used to package CyberpunkVR_Hands from src\red4ext_plugin\ as well, and
+# that directory no longer exists: every script-callable native (VRBodyBonePos, VRPalmModelPos,
+# SetVRSprintActive, all of them) is compiled into CyberpunkVR_Stereo now, out of src\Natives\.
+# Shipping both was also the recipe for the read at 0xFFFFFFFFFFFFFFFF -- two RED4ext plugins
+# detouring one address -- so a stale CyberpunkVR_Hands.dll left in red4ext\plugins is worth deleting.
 $stereoDll = Need (Join-Path $RepoRoot "$BuildDir\bin\red4ext\plugins\CyberpunkVR_Stereo\Release\CyberpunkVR_Stereo.dll") "CyberpunkVR_Stereo.dll"
-$handsDll  = Need (Join-Path $RepoRoot "src\red4ext_plugin\build\RelWithDebInfo\CyberpunkVR_Hands.dll") "CyberpunkVR_Hands.dll"
 Add-File $stereoDll "red4ext\plugins\CyberpunkVR_Stereo\CyberpunkVR_Stereo.dll"
-Add-File $handsDll  "red4ext\plugins\CyberpunkVR_Hands\CyberpunkVR_Hands.dll"
 
 # The sight shaders are loaded by name at PSO-replacement time; without both, the replacement is
 # skipped and the only symptom is one line in the log.
-Add-File (Need (Join-Path $RepoRoot "src\vr\shaders\sight_reflex_ps.dxil") "sight PS") "red4ext\plugins\CyberpunkVR_Stereo\CyberpunkVR_SightPs.dxil"
-Add-File (Need (Join-Path $RepoRoot "src\vr\shaders\sight_reflex_vs.dxil") "sight VS") "red4ext\plugins\CyberpunkVR_Stereo\CyberpunkVR_SightVs.dxil"
+Add-File (Need (Join-Path $RepoRoot "src\Shaders\sight_reflex_ps.dxil") "sight PS") "red4ext\plugins\CyberpunkVR_Stereo\CyberpunkVR_SightPs.dxil"
+Add-File (Need (Join-Path $RepoRoot "src\Shaders\sight_reflex_vs.dxil") "sight VS") "red4ext\plugins\CyberpunkVR_Stereo\CyberpunkVR_SightVs.dxil"
 
-# Installed over the player's own settings ONCE, on the first launch with first_launch=0 in
-# vrport.ini, keeping a timestamped copy of what was there. See INSTALL.txt.
+# Installed over the player's own settings ONCE, on a launch that reads first_launch=1 from
+# vrport.ini -- 1 means "not installed yet", and FirstLaunch clears it to 0 only after the copy
+# succeeds. A timestamped copy of what was there is kept. See INSTALL.txt.
 Add-File (Need (Join-Path $RepoRoot "mods\config\UserSettings.json") "UserSettings.json") "red4ext\plugins\CyberpunkVR_Stereo\UserSettings.json"
 
 # ---- captured grip poses, read from beside the exe -------------------------------------------
-foreach ($g in @("CyberpunkVR_SmokeGrip_right.ini","CyberpunkVR_SmokeGrip_Left.ini","CyberpunkVR_LighterGrip_Left.ini")) {
-    Add-File (Need (Join-Path $RepoRoot "mods\config\$g") $g) "bin\x64\$g"
+# ENUMERATED, never listed. This was a hardcoded three (both smoke grips and the lighter) while
+# mods\config\ holds fourteen: it also has RestGrip_Left -- the relaxed left hand worn
+# while a weapon is out -- and one TwoHandGrip_<weapon> per weapon anyone has recorded a hold for.
+# Both absences are silent by design (an uncaptured weapon just has no two-hand hold), so the
+# package quietly shipped no two-handed grip at all. Enumerating means a newly captured pose ships
+# by existing, without anyone remembering to add it here.
+foreach ($g in (Get-ChildItem (Join-Path $RepoRoot "mods\config") -Filter "CyberpunkVR_*.ini" -File | Sort-Object Name)) {
+    Add-File $g.FullName "bin\x64\$($g.Name)"
 }
 
 # ---- engine-side tuning + the OpenVR shim ------------------------------------------------------
@@ -100,10 +110,27 @@ if (Test-Path $tw) {
 }
 
 # ---- packed archives ---------------------------------------------------------------------------
-foreach ($a in @("cyberpunkvrport.archive","VRCigarette.archive.xl")) {
+foreach ($a in @("cyberpunkvrport.archive","VRCigarette.archive.xl","vrport_basketball.archive")) {
     $p = Join-Path $RepoRoot "mods\archive\$a"
     if (Test-Path $p) { Add-File $p "archive\pc\mod\$a" }
     else { Write-Host "[!] $a is not in the repo -- run sync_assets.ps1 first" }
+}
+
+# ---- HUDitor: the port's setup, on the paths the mod actually uses ----------------------------
+# HUD placement is not the port's job -- its own HUD mod was removed on 2026-08-20 because it
+# scaled the shared HUD root around screen centre and fought a real editor. What ships instead is
+# the port's HUDitor setup: the editor moved off F7 to F11, and a layout tuned in VR.
+#
+# The binding lives in r6\input\ because that is the only place it works: the game merges
+# r6\input\*.xml into r6\cache\inputUserMappings.xml every launch and reads the merged
+# result. That merge is RED4ext's input_loader, so without it this file is inert.
+#
+# persistency.json REPLACES whatever HUDitor layout is installed -- said out loud in INSTALL.txt
+# rather than hidden, because for a tester getting the tuned layout is the whole point.
+$hud = Join-Path $RepoRoot "mods\config\huditor"
+if (Test-Path $hud) {
+    Add-File (Need (Join-Path $hud "HUDitor.xml") "HUDitor.xml") "r6\input\HUDitor.xml"
+    Add-File (Need (Join-Path $hud "persistency.json") "persistency.json") "bin\x64\plugins\cyber_engine_tweaks\mods\HUDitor\persistency.json"
 }
 
 # ---- the OpenXR probe is NOT packaged ---------------------------------------------------------
@@ -121,7 +148,8 @@ CyberpunkVRPort $Version
 WHAT THIS IS
     A VR mod for Cyberpunk 2077: stereo rendering through OpenXR, 6DoF head tracking, motion
     controllers merged into the game's own gamepad input, VRIK arms, and a set of gameplay mods
-    (HUD placement, holsters, melee, weapon handling, smoking).
+    (holsters, physical reload, melee, weapon handling, smoking). HUD placement is HUDitor's job
+    now, and this package carries the port's HUDitor setup -- see WHAT LANDS WHERE.
 
 BEFORE YOU INSTALL -- READ THIS ONE
     The first time the plugin starts it REPLACES your Cyberpunk settings with the ones this mod
@@ -134,13 +162,27 @@ BEFORE YOU INSTALL -- READ THIS ONE
     afterwards the file is yours and nothing here looks at it again. Everything you change in the
     game's own menus sticks.
 
-    To skip it entirely: after the first launch creates bin\x64\vrport.ini, set first_launch=1 in
-    it BEFORE starting the game a second time. To ask for it again later, set first_launch=0.
+    first_launch=1 in bin\x64\vrport.ini means "not installed yet"; the plugin
+    clears it to 0 once the copy has succeeded, and never looks again.
+
+    To SKIP it entirely, including on the very first launch: create bin\x64\vrport.ini yourself,
+    containing the single line first_launch=0, before you start the game. Creating it afterwards
+    is too late -- the plugin writes that file and reads it in the same breath, so a fresh
+    install has already been offered the settings by the time you can edit it.
+
+    To ask for the settings later, set first_launch=1 and start the game once.
 
 REQUIREMENTS
     Cyberpunk 2077 2.31 (this build's engine offsets are matched to it)
     RED4ext, Cyber Engine Tweaks, redscript, TweakXL, ArchiveXL, Codeware
     An OpenXR runtime, started BEFORE the game
+
+    HUDitor, plus RED4ext's input_loader -- ONLY if you want HUD placement. This package carries
+    the port's HUDitor setup (the editor on F11, and a VR layout), and input_loader is the plugin
+    that merges r6\input\*.xml, so without it the F11 binding is inert. Note that
+    persistency.json REPLACES any HUDitor layout you already have -- back yours up first if you
+    care about it. The port needs neither: with no HUD editor the flat-screen HUD is used
+    unchanged, and the port still composites it into the second eye either way.
 
     Nothing else may proxy dxgi. If bin\x64\dxgi.dll exists (R.E.A.L. VR installs one), move it
     out of the folder -- two VR paths in one process fight over the same engine hooks.
@@ -154,12 +196,13 @@ INSTALL
 
 WHAT LANDS WHERE
     red4ext\plugins\CyberpunkVR_Stereo\   the VR plugin, its shaders, the settings template
-    red4ext\plugins\CyberpunkVR_Hands\    avatar / VRIK / weapon / smoking natives
     bin\x64\CyberpunkVR_*Grip*.ini        captured hand poses for holding a cigarette and lighter
     bin\x64\plugins\cyber_engine_tweaks\mods\CyberpunkVRPort_*\
     r6\scripts\CyberpunkVRPort_*\
     r6\tweaks\vrcigarette\
     archive\pc\mod\                       packed assets + the ArchiveXL manifest
+    r6\input\HUDitor.xml               HUDitor's editor moved to F11 (needs input_loader)
+    bin\x64\plugins\...\mods\HUDitor\persistency.json   the VR HUD layout -- REPLACES yours
 
     The player entity assets in cyberpunkvrport.archive carry one render-to-texture camera per
     supported resolution. The launcher offers exactly the ones that exist.
