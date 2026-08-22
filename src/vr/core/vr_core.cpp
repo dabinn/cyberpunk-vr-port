@@ -8,6 +8,7 @@
 #include <cstdarg>
 #include <cstring>
 #include <cmath>
+#include <mutex>
 #include <share.h>
 #include "aob_scanner.h"
 #include "live_controls_ui.h"
@@ -2803,6 +2804,14 @@ static uint64_t g_locateCameraHits = 0;
 bool g_isInVehicle = false;
 bool g_isAiming = false;
 bool g_hasWeaponEquipped = false;
+static std::mutex g_adsCameraTelemetryMutex;
+static AdsCameraTelemetryUiState g_adsCameraTelemetry{};
+
+extern "C" void GetAdsCameraTelemetryUiState(AdsCameraTelemetryUiState* outState) {
+    if (!outState) return;
+    std::lock_guard<std::mutex> lock(g_adsCameraTelemetryMutex);
+    *outState = g_adsCameraTelemetry;
+}
 // [dx-win]/[jerk] diag: ENGINE located camera captured at callback entry (pre-overwrite).
 static float g_dbgEntryYaw = 0.0f, g_dbgEntryPosX = 0.0f, g_dbgEntryPosY = 0.0f, g_dbgEntryPosZ = 0.0f;
 // [jerk] diag: the FOV the game LAST TRIED to set (pre-override) + the camera state
@@ -3106,6 +3115,78 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
     // vector is the game's up.
     const float bodyGameForwardX = 2.0f * (baseQx * baseQy - baseQz * baseQw);
     const float bodyGameForwardY = 1.0f - 2.0f * (baseQx * baseQx + baseQz * baseQz);
+
+    // ADS CAMERA-PIVOT TELEMETRY. Measure what the ENGINE put into the located camera
+    // before VR adds head translation. Subtract the same entity+clean-pair anchor used by
+    // the existing sprint detector, then rotate the residual into heading-local R/F/U.
+    // Hip-fire continuously refreshes the baseline; ADS freezes it and reports the delta.
+    if (float* shAds = GetShotShared(); shAds && shAds[131] != 0.0f) {
+        static float s_lastTick = -1.0f;
+        static float s_baseline[3] = {};
+        static float s_peak[3] = {};
+        static bool s_baselineValid = false;
+        static bool s_prevAiming = false;
+        static unsigned int s_samples = 0;
+        const float tick = shAds[99];
+        if (tick != s_lastTick) {
+            s_lastTick = tick;
+            const float dx = g_dbgEntryPosX - (shAds[96] + shAds[128]);
+            const float dy = g_dbgEntryPosY - (shAds[97] + shAds[129]);
+            const float dz = g_dbgEntryPosZ - (shAds[98] + shAds[130]);
+            const float yaw = atan2f(-bodyGameForwardX, bodyGameForwardY);
+            const float cy = cosf(yaw), sy = sinf(yaw);
+            const float local[3] = {
+                cy * dx + sy * dy,
+               -sy * dx + cy * dy,
+                dz
+            };
+
+            if (!g_isAiming) {
+                s_baseline[0] = local[0];
+                s_baseline[1] = local[1];
+                s_baseline[2] = local[2];
+                s_baselineValid = true;
+                s_peak[0] = s_peak[1] = s_peak[2] = 0.0f;
+                s_samples = 0;
+            } else {
+                if (!s_prevAiming) {
+                    s_peak[0] = s_peak[1] = s_peak[2] = 0.0f;
+                    s_samples = 0;
+                }
+                ++s_samples;
+            }
+
+            const float delta[3] = {
+                s_baselineValid ? local[0] - s_baseline[0] : 0.0f,
+                s_baselineValid ? local[1] - s_baseline[1] : 0.0f,
+                s_baselineValid ? local[2] - s_baseline[2] : 0.0f
+            };
+            if (g_isAiming) {
+                for (int i = 0; i < 3; ++i) {
+                    const float a = fabsf(delta[i]);
+                    if (a > s_peak[i]) s_peak[i] = a;
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(g_adsCameraTelemetryMutex);
+                g_adsCameraTelemetry.available = 1;
+                g_adsCameraTelemetry.aiming = g_isAiming ? 1 : 0;
+                g_adsCameraTelemetry.baselineValid = s_baselineValid ? 1 : 0;
+                g_adsCameraTelemetry.samples = s_samples;
+                g_adsCameraTelemetry.residualRight = local[0];
+                g_adsCameraTelemetry.residualForward = local[1];
+                g_adsCameraTelemetry.residualUp = local[2];
+                g_adsCameraTelemetry.deltaRight = delta[0];
+                g_adsCameraTelemetry.deltaForward = delta[1];
+                g_adsCameraTelemetry.deltaUp = delta[2];
+                g_adsCameraTelemetry.peakRight = s_peak[0];
+                g_adsCameraTelemetry.peakForward = s_peak[1];
+                g_adsCameraTelemetry.peakUp = s_peak[2];
+            }
+            s_prevAiming = g_isAiming;
+        }
+    }
 
 
 

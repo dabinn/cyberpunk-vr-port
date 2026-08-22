@@ -123,6 +123,26 @@ struct LiveControlsUiState {
     int xrPhysicalBodyRotation;
 };
 
+// Read-only snapshot for the in-headset compact ADS camera diagnostic. Positions
+// are the engine camera residual relative to the entity/head anchor, expressed in
+// the camera heading's local right/forward/up basis. Values are metres.
+struct AdsCameraTelemetryUiState {
+    int available;
+    int aiming;
+    int baselineValid;
+    unsigned int samples;
+    float residualRight;
+    float residualForward;
+    float residualUp;
+    float deltaRight;
+    float deltaForward;
+    float deltaUp;
+    float peakRight;
+    float peakForward;
+    float peakUp;
+};
+
 extern "C" void GetLiveControlsUiState(LiveControlsUiState* outState);
 extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int persistToFile);
+extern "C" void GetAdsCameraTelemetryUiState(AdsCameraTelemetryUiState* outState);
 extern "C" void RequestLiveControlsRecenter();
