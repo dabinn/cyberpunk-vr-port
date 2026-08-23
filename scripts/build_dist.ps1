@@ -1,4 +1,4 @@
-# Assemble a tester package under dist\, laid out exactly as it must land in the game root.
+# Assemble a tester package under dist\ with a FOMOD wrapper and a Cyberpunk 2077\ payload.
 #
 # Everything comes from the repo or from a build output -- nothing is read out of the installed
 # game -- so what a tester gets is what is committed. Run scripts\sync_assets.ps1 first if the
@@ -20,6 +20,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $DistRoot = [IO.Path]::GetFullPath((Join-Path $RepoRoot "dist"))
 $Out      = [IO.Path]::GetFullPath((Join-Path $DistRoot "CyberpunkVRPort-$Version"))
+$Payload  = Join-Path $Out "Cyberpunk 2077"
 if ((Split-Path $Out -Parent) -ne $DistRoot) { throw "Package path must be directly inside dist" }
 
 # Folders that exist for development and have no business in a tester's game.
@@ -63,10 +64,11 @@ if (Test-Path $Out) {
     Remove-Item -LiteralPath $resolvedOut -Recurse -Force
 }
 New-Item -ItemType Directory -Path $Out -Force | Out-Null
+New-Item -ItemType Directory -Path $Payload -Force | Out-Null
 
 $manifest = @()
 function Add-File($src, $rel) {
-    $dst = Join-Path $Out $rel
+    $dst = Join-Path $Payload $rel
     New-Item -ItemType Directory -Path (Split-Path $dst -Parent) -Force | Out-Null
     Copy-Item -LiteralPath $src -Destination $dst -Force
     $script:manifest += [pscustomobject]@{ Path = $rel; Bytes = (Get-Item -LiteralPath $dst).Length }
@@ -113,7 +115,7 @@ Add-File (Need (Join-Path $RepoRoot "mods\config\openvr_api.dll") "openvr_api.dl
 # ---- CET mods, redscript, tweaks --------------------------------------------------------------
 foreach ($d in (Get-ChildItem (Join-Path $RepoRoot "mods\cet") -Directory)) {
     if ($SkipMods -contains $d.Name) { continue }
-    $n = Copy-Tree $d.FullName (Join-Path $Out "bin\x64\plugins\cyber_engine_tweaks\mods\$($d.Name)")
+    $n = Copy-Tree $d.FullName (Join-Path $Payload "bin\x64\plugins\cyber_engine_tweaks\mods\$($d.Name)")
     $manifest += [pscustomobject]@{ Path = "bin\x64\plugins\cyber_engine_tweaks\mods\$($d.Name)\  ($n files)"; Bytes = 0 }
 }
 foreach ($d in (Get-ChildItem (Join-Path $RepoRoot "mods\redscript") -Directory)) {
@@ -121,12 +123,12 @@ foreach ($d in (Get-ChildItem (Join-Path $RepoRoot "mods\redscript") -Directory)
     # shared script cache, authoring folder or an empty retired module.
     if ($d.Name -notlike "CyberpunkVRPort_*" -or $SkipMods -contains $d.Name -or
         -not (Get-ChildItem -LiteralPath $d.FullName -Recurse -File -Filter '*.reds' | Select-Object -First 1)) { continue }
-    $n = Copy-Tree $d.FullName (Join-Path $Out "r6\scripts\$($d.Name)")
+    $n = Copy-Tree $d.FullName (Join-Path $Payload "r6\scripts\$($d.Name)")
     $manifest += [pscustomobject]@{ Path = "r6\scripts\$($d.Name)\  ($n files)"; Bytes = 0 }
 }
 $tweaksRoot = Join-Path $RepoRoot "mods\tweaks"
 foreach ($tw in (Get-ChildItem -LiteralPath $tweaksRoot -Directory)) {
-    $n = Copy-Tree $tw.FullName (Join-Path $Out "r6\tweaks\$($tw.Name)")
+    $n = Copy-Tree $tw.FullName (Join-Path $Payload "r6\tweaks\$($tw.Name)")
     $manifest += [pscustomobject]@{ Path = "r6\tweaks\$($tw.Name)\  ($n files)"; Bytes = 0 }
 }
 foreach ($tw in (Get-ChildItem -LiteralPath $tweaksRoot -File)) {
@@ -154,6 +156,31 @@ $inputDir = Join-Path $RepoRoot "mods\config\input"
 if (Test-Path $inputDir) {
     Add-File (Need (Join-Path $inputDir "CyberpunkVRPort_ScannerHud.xml") "CyberpunkVRPort_ScannerHud.xml") "r6\input\CyberpunkVRPort_ScannerHud.xml"
 }
+
+# ---- Vortex FOMOD ---------------------------------------------------------------------------
+$fomodDirectory = Join-Path $Out "fomod"
+New-Item -ItemType Directory -Path $fomodDirectory -Force | Out-Null
+
+$moduleConfig = @"
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://qconsulting.ca/fo3/ModConfig5.0.xsd">
+  <moduleName>CyberpunkVRPort</moduleName>
+  <requiredInstallFiles>
+    <folder source="Cyberpunk 2077" destination="" />
+  </requiredInstallFiles>
+</config>
+"@
+Set-Content -LiteralPath (Join-Path $fomodDirectory "ModuleConfig.xml") -Value $moduleConfig -Encoding utf8
+
+$fomodInfo = @"
+<fomod>
+  <Name>CyberpunkVRPort</Name>
+  <Version>$Version</Version>
+  <Author>dariulone and contributors</Author>
+  <Website>https://github.com/dabinn/cyberpunk-vr-port</Website>
+</fomod>
+"@
+Set-Content -LiteralPath (Join-Path $fomodDirectory "info.xml") -Value $fomodInfo -Encoding utf8
 
 # ---- the OpenXR probe is NOT packaged ---------------------------------------------------------
 # It stays in tools\xr_probe\ and goes to a tester by hand, when there is something to measure.
@@ -208,8 +235,15 @@ REQUIREMENTS
     out of the folder -- two VR paths in one process fight over the same engine hooks.
 
 INSTALL
-    Extract the contents of this folder into your Cyberpunk 2077 game root -- the folder that
-    contains bin\, r6\, red4ext\ and archive\. The paths inside already match.
+    Auto Installer:
+        Download CyberpunkVRPort-Auto-Installer.exe from GitHub Releases and select Install.
+
+    Vortex:
+        Add the original archive to Vortex and install it normally.
+
+    Manual:
+        Extract the contents of the Cyberpunk 2077 folder into your game root -- the folder that
+        contains bin\, r6\, red4ext\ and archive\.
 
     When upgrading, remove r6\scripts\CyberpunkVRPort_LootUi\vrport_loot_ui.reds.
     Its old loot scaling and tooltip reparenting are replaced by the texture HUD.
@@ -534,10 +568,10 @@ $all = Get-ChildItem $Out -Recurse -File
 if ($all.FullName -match '[\\/]CyberpunkVRPort_QuickBoot[\\/]') {
     throw "QuickBoot must not be included in a release package"
 }
-if (Test-Path -LiteralPath (Join-Path $Out 'r6\scripts\cache')) {
+if (Test-Path -LiteralPath (Join-Path $Payload 'r6\scripts\cache')) {
     throw "Shared script cache must not be owned by the release package"
 }
-if (Test-Path -LiteralPath (Join-Path $Out 'r6\scripts\MoreOccluders.reds')) {
+if (Test-Path -LiteralPath (Join-Path $Payload 'r6\scripts\MoreOccluders.reds')) {
     throw "More Occluders must be installed separately from its author's page"
 }
 Write-Host ""
