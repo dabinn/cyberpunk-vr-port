@@ -77,6 +77,9 @@ file(GLOB_RECURSE CPVR_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
 )
+# Upgrading from the former two-plugin tree can leave its ignored in-source build directory
+# under src/red4ext_plugin/. Never compile generated CMake compiler-identification sources.
+list(FILTER CPVR_SOURCES EXCLUDE REGEX "/src/red4ext_plugin/build/")
 
 # Keep the folder shape in the IDE -- Hooks/, Runtimes/, Anim/, Utils/ are the reading order.
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${CPVR_SOURCES})

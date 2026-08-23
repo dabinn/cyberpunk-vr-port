@@ -1,4 +1,4 @@
-﻿# Assemble a tester package under dist\, laid out exactly as it must land in the game root.
+# Assemble a tester package under dist\ with a FOMOD wrapper and a Cyberpunk 2077\ payload.
 #
 # Everything comes from the repo or from a build output -- nothing is read out of the installed
 # game -- so what a tester gets is what is committed. Run scripts\sync_assets.ps1 first if the
@@ -18,6 +18,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $Out      = Join-Path $RepoRoot "dist\CyberpunkVRPort-$Version"
+$Payload  = Join-Path $Out "Cyberpunk 2077"
 
 # Folders that exist for development and have no business in a tester's game.
 #
@@ -54,10 +55,11 @@ if (Test-Path $Out) {
     if (-not $Force) { Remove-Item $Out -Recurse -Force } else { Remove-Item $Out -Recurse -Force }
 }
 New-Item -ItemType Directory -Path $Out -Force | Out-Null
+New-Item -ItemType Directory -Path $Payload -Force | Out-Null
 
 $manifest = @()
 function Add-File($src, $rel) {
-    $dst = Join-Path $Out $rel
+    $dst = Join-Path $Payload $rel
     New-Item -ItemType Directory -Path (Split-Path $dst -Parent) -Force | Out-Null
     Copy-Item -LiteralPath $src -Destination $dst -Force
     $script:manifest += [pscustomobject]@{ Path = $rel; Bytes = (Get-Item -LiteralPath $dst).Length }
@@ -100,17 +102,17 @@ Add-File (Need (Join-Path $RepoRoot "mods\config\openvr_api.dll") "openvr_api.dl
 # ---- CET mods, redscript, tweaks --------------------------------------------------------------
 foreach ($d in (Get-ChildItem (Join-Path $RepoRoot "mods\cet") -Directory)) {
     if ($SkipMods -contains $d.Name) { continue }
-    $n = Copy-Tree $d.FullName (Join-Path $Out "bin\x64\plugins\cyber_engine_tweaks\mods\$($d.Name)")
+    $n = Copy-Tree $d.FullName (Join-Path $Payload "bin\x64\plugins\cyber_engine_tweaks\mods\$($d.Name)")
     $manifest += [pscustomobject]@{ Path = "bin\x64\plugins\cyber_engine_tweaks\mods\$($d.Name)\  ($n files)"; Bytes = 0 }
 }
 foreach ($d in (Get-ChildItem (Join-Path $RepoRoot "mods\redscript") -Directory)) {
     if ($d.Name -eq "logs" -or $SkipMods -contains $d.Name) { continue }
-    $n = Copy-Tree $d.FullName (Join-Path $Out "r6\scripts\$($d.Name)")
+    $n = Copy-Tree $d.FullName (Join-Path $Payload "r6\scripts\$($d.Name)")
     $manifest += [pscustomobject]@{ Path = "r6\scripts\$($d.Name)\  ($n files)"; Bytes = 0 }
 }
 $tw = Join-Path $RepoRoot "mods\tweaks\vrcigarette"
 if (Test-Path $tw) {
-    $n = Copy-Tree $tw (Join-Path $Out "r6\tweaks\vrcigarette")
+    $n = Copy-Tree $tw (Join-Path $Payload "r6\tweaks\vrcigarette")
     $manifest += [pscustomobject]@{ Path = "r6\tweaks\vrcigarette\  ($n files)"; Bytes = 0 }
 }
 
@@ -152,6 +154,31 @@ if (Test-Path $inputDir) {
     Add-File (Need (Join-Path $inputDir "CyberpunkVRPort_ScannerHud.xml") "CyberpunkVRPort_ScannerHud.xml") "r6\input\CyberpunkVRPort_ScannerHud.xml"
 }
 
+# ---- Vortex FOMOD ---------------------------------------------------------------------------
+$fomodDirectory = Join-Path $Out "fomod"
+New-Item -ItemType Directory -Path $fomodDirectory -Force | Out-Null
+
+$moduleConfig = @"
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://qconsulting.ca/fo3/ModConfig5.0.xsd">
+  <moduleName>CyberpunkVRPort</moduleName>
+  <requiredInstallFiles>
+    <folder source="Cyberpunk 2077" destination="" />
+  </requiredInstallFiles>
+</config>
+"@
+Set-Content -LiteralPath (Join-Path $fomodDirectory "ModuleConfig.xml") -Value $moduleConfig -Encoding utf8
+
+$fomodInfo = @"
+<fomod>
+  <Name>CyberpunkVRPort</Name>
+  <Version>$Version</Version>
+  <Author>dariulone and contributors</Author>
+  <Website>https://github.com/dabinn/cyberpunk-vr-port</Website>
+</fomod>
+"@
+Set-Content -LiteralPath (Join-Path $fomodDirectory "info.xml") -Value $fomodInfo -Encoding utf8
+
 # ---- the OpenXR probe is NOT packaged ---------------------------------------------------------
 # It stays in tools\xr_probe\ and goes to a tester by hand, when there is something to measure.
 # Registering a MACHINE-WIDE OpenXR API layer is not a thing to ship to everyone who installs a
@@ -171,6 +198,14 @@ WHAT THIS IS
     now, and this package carries the port's HUDitor setup -- see WHAT LANDS WHERE.
 
 BEFORE YOU INSTALL -- READ THIS ONE
+    UPGRADING FROM v0.1.1 / TE3 OR EARLIER:
+        Before a manual install, remove this legacy plugin directory:
+        red4ext\plugins\CyberpunkVR_Hands
+
+    v0.1.3 merged the Hands plugin into CyberpunkVR_Stereo. Leaving the old
+    CyberpunkVR_Hands.dll installed loads both implementations and can crash
+    the game. The Auto Installer handles this cleanup automatically.
+
     The first time the plugin starts it REPLACES your Cyberpunk settings with the ones this mod
     was tuned against:
 
@@ -207,8 +242,15 @@ REQUIREMENTS
     out of the folder -- two VR paths in one process fight over the same engine hooks.
 
 INSTALL
-    Extract the contents of this folder into your Cyberpunk 2077 game root -- the folder that
-    contains bin\, r6\, red4ext\ and archive\. The paths inside already match.
+    Auto Installer:
+        Download CyberpunkVRPort-Auto-Installer.exe from GitHub Releases and select Install.
+
+    Vortex:
+        Add the original archive to Vortex and install it normally.
+
+    Manual:
+        Extract the contents of the Cyberpunk 2077 folder into your game root -- the folder that
+        contains bin\, r6\, red4ext\ and archive\.
 
     Then start your OpenXR runtime, then the game. A small launcher window appears first: pick
     your headset and per-eye render resolution there.
