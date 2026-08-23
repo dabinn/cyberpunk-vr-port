@@ -18,6 +18,10 @@ tools/*
 !tools/xr_probe/
 !tools/crash/
 !tools/ent/
+!tools/auto_installer/
+tools/auto_installer/bin/
+tools/auto_installer/obj/
+!tools/auto_installer/*.ps1
 releases/
 *.py
 # The per-view capture analysis tools, kept for the same reason tools/crash and tools/ent are:
@@ -33,6 +37,7 @@ package.json
 !.opencode/memory/*.md
 *.zip
 *.ps1
+!tools/auto_installer/tests/*.ps1
 !scripts/uninstall_cyberpunkvrport.ps1
 # ...except the probe layer install scripts, which are part of the tool,
 !tools/xr_probe/*.ps1
