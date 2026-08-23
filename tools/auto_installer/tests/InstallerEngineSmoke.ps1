@@ -43,6 +43,7 @@ try {
     $engine = $constructor.Invoke(@($ini))
     $installMethod = $engineType.GetMethod("Install", [Reflection.BindingFlags]"Instance,NonPublic")
     $forceCreateMethod = $engineType.GetMethod("ForceCreateVrportIni", [Reflection.BindingFlags]"Instance,NonPublic")
+    $deleteVrportIniMethod = $engineType.GetMethod("DeleteVrportIni", [Reflection.BindingFlags]"Instance,NonPublic")
     $uninstallMethod = $engineType.GetMethod("Uninstall", [Reflection.BindingFlags]"Instance,NonPublic")
     $statusMethod = $engineType.GetMethod("GetInstallationStatus", [Reflection.BindingFlags]"Instance,NonPublic")
 
@@ -145,6 +146,13 @@ try {
     }
     if (Test-Path -LiteralPath (Join-Path $forceGame "bin\x64\CyberpunkVRPort-Auto-Installer.state.ini")) {
         throw "Immediate force-create unexpectedly wrote Installer ownership state."
+    }
+    if (-not $deleteVrportIniMethod.Invoke($engine, [object[]]@([string]$forceGame)) -or
+        (Test-Path -LiteralPath $forceIniPath)) {
+        throw "Immediate vrport.ini deletion did not remove the setting file."
+    }
+    if ($deleteVrportIniMethod.Invoke($engine, [object[]]@([string]$forceGame))) {
+        throw "vrport.ini deletion reported success when the file was already absent."
     }
 
     Add-Type -AssemblyName System.IO.Compression

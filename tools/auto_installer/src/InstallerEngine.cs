@@ -116,6 +116,18 @@ namespace CyberpunkVRPort.AutoInstaller
             return CreateVrportIniIfMissing(NormalizeGameRoot(gameRoot));
         }
 
+        internal bool DeleteVrportIni(string gameRoot)
+        {
+            AssertGameClosed();
+            var root = NormalizeGameRoot(gameRoot);
+            var path = ResolveUnder(root, VrportIniRelativePath);
+            AssertNoReparsePoint(root, path);
+            if (!File.Exists(path)) return false;
+            File.SetAttributes(path, FileAttributes.Normal);
+            File.Delete(path);
+            return true;
+        }
+
         private static bool CreateVrportIniIfMissing(string root)
         {
             var path = ResolveUnder(root, VrportIniRelativePath);
