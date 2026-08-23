@@ -82,8 +82,11 @@ $strayDest = Join-Path $GameRoot "_vrport_disabled"
 foreach ($ourDir in @("CyberpunkVR_Stereo", "CyberpunkVR_Hands")) {
     $dir = Join-Path $GameRoot "red4ext\plugins\$ourDir"
     if (-not (Test-Path $dir)) { continue }
+    # v0.1.3 merged Hands into Stereo. Keep only the canonical Stereo DLL;
+    # every DLL in the legacy Hands directory must be disabled.
+    $canonicalDll = if ($ourDir -eq $ModName) { "$ModName.dll" } else { $null }
     $strays = Get-ChildItem $dir -Filter *.dll -File -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -ne "$ourDir.dll" }
+              Where-Object { -not $canonicalDll -or $_.Name -ne $canonicalDll }
     foreach ($s in $strays) {
         if (-not (Test-Path $strayDest)) { New-Item -ItemType Directory -Path $strayDest -Force | Out-Null }
         Move-Item -LiteralPath $s.FullName -Destination $strayDest -Force
