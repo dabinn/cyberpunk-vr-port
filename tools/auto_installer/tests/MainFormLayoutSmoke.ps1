@@ -73,13 +73,13 @@ function Test-Layout([bool]$devMode) {
         if ([Math]::Abs($statusPoint.Y - $installerPoint.Y) -gt 12 -or $installerPoint.X -le $statusPoint.X) {
             throw "Operation and Installer statuses are not aligned in the footer."
         }
-        if (-not $installerStatus.Text.StartsWith('[v1.1] ')) {
+        if (-not $installerStatus.Text.StartsWith('[v1.3] ')) {
             throw "Installer version was not prefixed to the existing update status."
         }
         $setInstallerStatus = $formType.GetMethod('SetInstallerStatus',
             [Reflection.BindingFlags]'Instance,NonPublic')
         $setInstallerStatus.Invoke($form, [object[]]@('InstallerStatusUpdateAvailable'))
-        if (-not $installerStatus.Enabled -or -not $installerStatus.Text.StartsWith('[v1.1] ')) {
+        if (-not $installerStatus.Enabled -or -not $installerStatus.Text.StartsWith('[v1.3] ')) {
             throw "Available Installer update status is not an enabled versioned text link."
         }
         $setInstallerStatus.Invoke($form, [object[]]@('InstallerStatusCurrent'))
