@@ -73,17 +73,23 @@ function Test-Layout([bool]$devMode) {
         if ([Math]::Abs($statusPoint.Y - $installerPoint.Y) -gt 12 -or $installerPoint.X -le $statusPoint.X) {
             throw "Operation and Installer statuses are not aligned in the footer."
         }
-        if (-not $installerStatus.Text.StartsWith('[v1.1] ')) {
+        if (-not $installerStatus.Text.StartsWith('[v1.3] ')) {
             throw "Installer version was not prefixed to the existing update status."
         }
         $setInstallerStatus = $formType.GetMethod('SetInstallerStatus',
             [Reflection.BindingFlags]'Instance,NonPublic')
         $setInstallerStatus.Invoke($form, [object[]]@('InstallerStatusUpdateAvailable'))
-        if (-not $installerStatus.Enabled -or -not $installerStatus.Text.StartsWith('[v1.1] ')) {
+        if (-not $installerStatus.Enabled -or $installerStatus.Cursor -ne [Windows.Forms.Cursors]::Hand -or
+            -not $installerStatus.Text.StartsWith('[v1.3] ')) {
             throw "Available Installer update status is not an enabled versioned text link."
         }
-        $setInstallerStatus.Invoke($form, [object[]]@('InstallerStatusCurrent'))
-        if ($installerStatus.Enabled) { throw "Current Installer status unexpectedly remained clickable." }
+        foreach ($nonClickableStatus in @('InstallerStatusCurrent', 'InstallerStatusChecking',
+            'InstallerStatusUpdating', 'InstallerStatusUnavailable', 'InstallerStatusDev')) {
+            $setInstallerStatus.Invoke($form, [object[]]@($nonClickableStatus))
+            if (-not $installerStatus.Enabled -or $installerStatus.Cursor -ne [Windows.Forms.Cursors]::Default) {
+                throw "$nonClickableStatus is disabled or unexpectedly appears clickable."
+            }
+        }
         if (-not ($installPoint.Y -lt $installationPoint.Y -and $installationPoint.Y -lt $vrportPoint.Y -and
             $vrportPoint.Y -lt $statusPoint.Y)) {
             throw "Install and vrport.ini status lines are not between the action buttons and footer."
@@ -119,8 +125,10 @@ function Test-Layout([bool]$devMode) {
             }
             Set-Content -LiteralPath (Join-Path $managedRoot 'bin\x64\vrport.ini') -Value 'setting' -NoNewline
             $refreshInstallationStatus.Invoke($form, @())
-            if ($vrportIniStatus.Text -ne 'Present' -or $vrportIniStatus.Enabled) {
-                throw "Existing vrport.ini state is not displayed as a disabled Present status."
+            if ($vrportIniStatus.Text -ne 'Present' -or -not $vrportIniStatus.Enabled -or
+                $vrportIniStatus.LinkArea.Length -ne $vrportIniStatus.Text.Length -or
+                $vrportIniStatus.LinkColor -ne [Drawing.Color]::PaleGreen) {
+                throw "Existing vrport.ini state is not displayed as a clickable Present status."
             }
             Remove-Item -LiteralPath (Join-Path $managedRoot 'bin\x64\vrport.ini') -Force
             $refreshInstallationStatus.Invoke($form, @())
@@ -136,7 +144,9 @@ function Test-Layout([bool]$devMode) {
             }
         }
         $expectedVrportPrefix = [string]([char]0x2514) + [string]([char]0x2500) + ' vrport.ini:'
-        if (-not $vrportIniStatus.Enabled -or $vrportIniPrefix.Text -ne $expectedVrportPrefix -or
+        if (-not $vrportIniStatus.Enabled -or
+            $vrportIniStatus.LinkArea.Length -ne $vrportIniStatus.Text.Length -or
+            $vrportIniPrefix.Text -ne $expectedVrportPrefix -or
             $vrportIniStatus.Text -ne 'Not present' -or
             $vrportIniStatus.LinkColor -ne [Drawing.Color]::Gainsboro) {
             throw "Missing vrport.ini state is not displayed as a white clickable status-only link."
