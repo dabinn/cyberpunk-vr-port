@@ -48,7 +48,7 @@ namespace CyberpunkVRPort.AutoInstaller
         private readonly Button installButton = new Button();
         private readonly Button uninstallButton = new Button();
         private readonly Label statusLabel = new Label();
-        private readonly LinkLabel installerStatusLabel = new LinkLabel();
+        private readonly Label installerStatusLabel = new Label();
         private readonly Label installationStatusLabel = new Label();
         private readonly Label vrportIniPrefixLabel = new Label();
         private readonly LinkLabel vrportIniStatusLabel = new LinkLabel();
@@ -170,9 +170,7 @@ namespace CyberpunkVRPort.AutoInstaller
             installerStatusLabel.ForeColor = Color.Gainsboro;
             installerStatusLabel.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
             installerStatusLabel.TextAlign = ContentAlignment.MiddleRight;
-            installerStatusLabel.LinkBehavior = LinkBehavior.NeverUnderline;
-            installerStatusLabel.DisabledLinkColor = Color.Gainsboro;
-            installerStatusLabel.LinkClicked += async (_, __) => await UpdateInstallerNowAsync();
+            installerStatusLabel.Click += async (_, __) => await UpdateInstallerNowAsync();
             installationStatusLabel.AutoSize = true;
             installationStatusLabel.ForeColor = Color.Gainsboro;
             vrportIniPrefixLabel.AutoSize = true;
@@ -186,7 +184,7 @@ namespace CyberpunkVRPort.AutoInstaller
             vrportIniStatusLabel.LinkBehavior = LinkBehavior.NeverUnderline;
             vrportIniStatusLabel.DisabledLinkColor = Color.Gainsboro;
             vrportIniStatusLabel.Margin = new Padding(3, 0, 0, 0);
-            vrportIniStatusLabel.LinkClicked += ToggleForceCreateVrportIni;
+            vrportIniStatusLabel.LinkClicked += ManageVrportIni;
             vrportIniStatusRow.AutoSize = true;
             vrportIniStatusRow.BackColor = Color.Transparent;
             vrportIniStatusRow.FlowDirection = FlowDirection.LeftToRight;
@@ -666,7 +664,7 @@ namespace CyberpunkVRPort.AutoInstaller
             sourceBox.Enabled = !busy;
             forkBox.Enabled = !busy;
             localButton.Enabled = !busy;
-            installerStatusLabel.Enabled = !busy && installerStatusKey == "InstallerStatusUpdateAvailable";
+            RefreshInstallerStatusInteractivity();
             RefreshVrportIniLinkState();
         }
 
@@ -797,22 +795,28 @@ namespace CyberpunkVRPort.AutoInstaller
         {
             installerStatusKey = key;
             installerStatusLabel.Text = "[v" + installerVersion + "] " + T(key, key);
-            installerStatusLabel.Enabled = key == "InstallerStatusUpdateAvailable";
-            installerStatusLabel.LinkColor = key == "InstallerStatusUpdateAvailable"
-                ? Color.LightSkyBlue
-                : Color.Gainsboro;
             installerStatusLabel.ForeColor = key == "InstallerStatusCurrent"
                 ? Color.PaleGreen
-                : key == "InstallerStatusUpdateAvailable" || key == "InstallerStatusUpdating"
+                : key == "InstallerStatusUpdateAvailable"
+                    ? Color.LightSkyBlue
+                    : key == "InstallerStatusUpdating"
                     ? Color.Khaki
                     : key == "InstallerStatusUnavailable"
                         ? Color.LightSalmon
                         : Color.Gainsboro;
+            RefreshInstallerStatusInteractivity();
+        }
+
+        private void RefreshInstallerStatusInteractivity()
+        {
+            var clickable = !busy && installerStatusKey == "InstallerStatusUpdateAvailable";
+            installerStatusLabel.Enabled = true;
+            installerStatusLabel.Cursor = clickable ? Cursors.Hand : Cursors.Default;
         }
 
         private async Task UpdateInstallerNowAsync()
         {
-            if (installerStatusKey != "InstallerStatusUpdateAvailable") return;
+            if (busy || installerStatusKey != "InstallerStatusUpdateAvailable") return;
             var prompt = T("InstallerUpdatePromptNow",
                 "The Auto Installer will update and restart.");
             if (MessageBox.Show(this, prompt, Text, MessageBoxButtons.OKCancel,
@@ -858,13 +862,21 @@ namespace CyberpunkVRPort.AutoInstaller
             RefreshVrportIniLinkState(status.VrportIniExists);
         }
 
-        private void ToggleForceCreateVrportIni(object sender, LinkLabelLinkClickedEventArgs eventArgs)
+        private void ManageVrportIni(object sender, LinkLabelLinkClickedEventArgs eventArgs)
         {
-            var warning = T("VrportIniForceWarning",
-                "Danger! vrport.ini will be forcibly created now. Use this only if you know what you are doing.");
+            var isPresent = engine.GetInstallationStatus(gamePathBox.Text).VrportIniExists;
+            var warning = isPresent
+                ? T("VrportIniDeleteWarning",
+                    "Danger! vrport.ini will be deleted now. Your VR settings will return to defaults the next time it is created. Use this only if you know what you are doing.")
+                : T("VrportIniForceWarning",
+                    "Danger! vrport.ini will be forcibly created now. Use this only if you know what you are doing.");
             if (MessageBox.Show(this, warning, Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                 return;
-            try { engine.ForceCreateVrportIni(gamePathBox.Text); }
+            try
+            {
+                if (isPresent) engine.DeleteVrportIni(gamePathBox.Text);
+                else engine.ForceCreateVrportIni(gamePathBox.Text);
+            }
             catch (Exception exception) { ShowError(exception.GetBaseException().Message); }
             finally { RefreshInstallationStatus(); }
         }
@@ -872,10 +884,15 @@ namespace CyberpunkVRPort.AutoInstaller
         private void RefreshVrportIniLinkState(bool? exists = null)
         {
             var isPresent = exists ?? engine.GetInstallationStatus(gamePathBox.Text).VrportIniExists;
-            vrportIniStatusLabel.Enabled = !busy && !isPresent;
-            vrportIniStatusLabel.LinkColor = Color.Gainsboro;
+            var clickable = !busy;
+            vrportIniStatusLabel.Enabled = true;
+            vrportIniStatusLabel.TabStop = clickable;
+            vrportIniStatusLabel.LinkArea = clickable
+                ? new LinkArea(0, vrportIniStatusLabel.Text.Length)
+                : new LinkArea(0, 0);
+            vrportIniStatusLabel.LinkColor = isPresent ? Color.PaleGreen : Color.Gainsboro;
             vrportIniStatusLabel.ActiveLinkColor = Color.White;
-            vrportIniStatusLabel.DisabledLinkColor = isPresent ? Color.PaleGreen : Color.Gainsboro;
+            vrportIniStatusLabel.VisitedLinkColor = vrportIniStatusLabel.LinkColor;
         }
 
         private void UpdateReleaseNotesLink()
