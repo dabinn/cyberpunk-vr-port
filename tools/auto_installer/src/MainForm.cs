@@ -48,7 +48,7 @@ namespace CyberpunkVRPort.AutoInstaller
         private readonly Button installButton = new Button();
         private readonly Button uninstallButton = new Button();
         private readonly Label statusLabel = new Label();
-        private readonly LinkLabel installerStatusLabel = new LinkLabel();
+        private readonly Label installerStatusLabel = new Label();
         private readonly Label installationStatusLabel = new Label();
         private readonly Label vrportIniPrefixLabel = new Label();
         private readonly LinkLabel vrportIniStatusLabel = new LinkLabel();
@@ -170,9 +170,7 @@ namespace CyberpunkVRPort.AutoInstaller
             installerStatusLabel.ForeColor = Color.Gainsboro;
             installerStatusLabel.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
             installerStatusLabel.TextAlign = ContentAlignment.MiddleRight;
-            installerStatusLabel.LinkBehavior = LinkBehavior.NeverUnderline;
-            installerStatusLabel.DisabledLinkColor = Color.Gainsboro;
-            installerStatusLabel.LinkClicked += async (_, __) => await UpdateInstallerNowAsync();
+            installerStatusLabel.Click += async (_, __) => await UpdateInstallerNowAsync();
             installationStatusLabel.AutoSize = true;
             installationStatusLabel.ForeColor = Color.Gainsboro;
             vrportIniPrefixLabel.AutoSize = true;
@@ -666,7 +664,7 @@ namespace CyberpunkVRPort.AutoInstaller
             sourceBox.Enabled = !busy;
             forkBox.Enabled = !busy;
             localButton.Enabled = !busy;
-            installerStatusLabel.Enabled = !busy && installerStatusKey == "InstallerStatusUpdateAvailable";
+            RefreshInstallerStatusInteractivity();
             RefreshVrportIniLinkState();
         }
 
@@ -797,22 +795,28 @@ namespace CyberpunkVRPort.AutoInstaller
         {
             installerStatusKey = key;
             installerStatusLabel.Text = "[v" + installerVersion + "] " + T(key, key);
-            installerStatusLabel.Enabled = key == "InstallerStatusUpdateAvailable";
-            installerStatusLabel.LinkColor = key == "InstallerStatusUpdateAvailable"
-                ? Color.LightSkyBlue
-                : Color.Gainsboro;
             installerStatusLabel.ForeColor = key == "InstallerStatusCurrent"
                 ? Color.PaleGreen
-                : key == "InstallerStatusUpdateAvailable" || key == "InstallerStatusUpdating"
+                : key == "InstallerStatusUpdateAvailable"
+                    ? Color.LightSkyBlue
+                    : key == "InstallerStatusUpdating"
                     ? Color.Khaki
                     : key == "InstallerStatusUnavailable"
                         ? Color.LightSalmon
                         : Color.Gainsboro;
+            RefreshInstallerStatusInteractivity();
+        }
+
+        private void RefreshInstallerStatusInteractivity()
+        {
+            var clickable = !busy && installerStatusKey == "InstallerStatusUpdateAvailable";
+            installerStatusLabel.Enabled = true;
+            installerStatusLabel.Cursor = clickable ? Cursors.Hand : Cursors.Default;
         }
 
         private async Task UpdateInstallerNowAsync()
         {
-            if (installerStatusKey != "InstallerStatusUpdateAvailable") return;
+            if (busy || installerStatusKey != "InstallerStatusUpdateAvailable") return;
             var prompt = T("InstallerUpdatePromptNow",
                 "The Auto Installer will update and restart.");
             if (MessageBox.Show(this, prompt, Text, MessageBoxButtons.OKCancel,

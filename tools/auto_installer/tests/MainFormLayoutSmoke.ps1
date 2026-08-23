@@ -79,11 +79,17 @@ function Test-Layout([bool]$devMode) {
         $setInstallerStatus = $formType.GetMethod('SetInstallerStatus',
             [Reflection.BindingFlags]'Instance,NonPublic')
         $setInstallerStatus.Invoke($form, [object[]]@('InstallerStatusUpdateAvailable'))
-        if (-not $installerStatus.Enabled -or -not $installerStatus.Text.StartsWith('[v1.3] ')) {
+        if (-not $installerStatus.Enabled -or $installerStatus.Cursor -ne [Windows.Forms.Cursors]::Hand -or
+            -not $installerStatus.Text.StartsWith('[v1.3] ')) {
             throw "Available Installer update status is not an enabled versioned text link."
         }
-        $setInstallerStatus.Invoke($form, [object[]]@('InstallerStatusCurrent'))
-        if ($installerStatus.Enabled) { throw "Current Installer status unexpectedly remained clickable." }
+        foreach ($nonClickableStatus in @('InstallerStatusCurrent', 'InstallerStatusChecking',
+            'InstallerStatusUpdating', 'InstallerStatusUnavailable', 'InstallerStatusDev')) {
+            $setInstallerStatus.Invoke($form, [object[]]@($nonClickableStatus))
+            if (-not $installerStatus.Enabled -or $installerStatus.Cursor -ne [Windows.Forms.Cursors]::Default) {
+                throw "$nonClickableStatus is disabled or unexpectedly appears clickable."
+            }
+        }
         if (-not ($installPoint.Y -lt $installationPoint.Y -and $installationPoint.Y -lt $vrportPoint.Y -and
             $vrportPoint.Y -lt $statusPoint.Y)) {
             throw "Install and vrport.ini status lines are not between the action buttons and footer."
