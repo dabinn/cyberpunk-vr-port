@@ -61,6 +61,7 @@ void GetVRProjDump(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame,
 void GetVRProjLiveDump(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, float* aOut, int64_t);
 void GetVRProvDump(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, float* aOut, int64_t);
 void GetVRSharedSlot(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, float* aOut, int64_t);
+void SetVRRightGripRoute(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t);
 void GetVRSmokeCigVisualScaleY(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, float* aOut, int64_t a4);
 void GetVRTrace(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, float* aOut, int64_t a4);
 void GetVRTraceCaller(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, float* aOut, int64_t a4);

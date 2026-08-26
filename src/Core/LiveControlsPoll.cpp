@@ -467,6 +467,12 @@ void PollLiveControls() {
     int xrInputActions = g_liveControls.xrInputActions;
     int xrChordActivation = g_liveControls.xrChordActivation;
     int xrExtraChordActions = g_liveControls.xrExtraChordActions;
+    int xrClassicOnFootControls = g_liveControls.xrClassicOnFootControls;
+    int xrClassicDisableLsSprint = g_liveControls.xrClassicDisableLsSprint;
+    int xrClassicDisableRsDashCrouch = g_liveControls.xrClassicDisableRsDashCrouch;
+    int xrClassicVehicleControls = g_liveControls.xrClassicVehicleControls;
+    int xrClassicSwapTriggersGrips = g_liveControls.xrClassicSwapTriggersGrips;
+    int xrClassicScannerControls = g_liveControls.xrClassicScannerControls;
     int xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
     int xrSnapTurnPulseMs = g_liveControls.xrSnapTurnPulseMs > 0 ? g_liveControls.xrSnapTurnPulseMs : 30;
     int xrMonoDepthCapture = g_liveControls.xrMonoDepthCapture;
@@ -1098,6 +1104,36 @@ void PollLiveControls() {
             xrExtraChordActions = intValue;
             continue;
         }
+        if (sscanf_s(line, "xr_classic_on_foot_controls=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_classic_on_foot_controls = %d", &intValue) == 1) {
+            xrClassicOnFootControls = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_classic_disable_ls_sprint=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_classic_disable_ls_sprint = %d", &intValue) == 1) {
+            xrClassicDisableLsSprint = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_classic_disable_rs_dash_crouch=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_classic_disable_rs_dash_crouch = %d", &intValue) == 1) {
+            xrClassicDisableRsDashCrouch = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_classic_vehicle_controls=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_classic_vehicle_controls = %d", &intValue) == 1) {
+            xrClassicVehicleControls = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_classic_swap_triggers_grips=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_classic_swap_triggers_grips = %d", &intValue) == 1) {
+            xrClassicSwapTriggersGrips = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_classic_scanner_controls=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_classic_scanner_controls = %d", &intValue) == 1) {
+            xrClassicScannerControls = intValue;
+            continue;
+        }
         if (sscanf_s(line, "xr_mono_xqueue_wait=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_mono_xqueue_wait = %d", &intValue) == 1) {
             xrMonoXQueueWait = intValue;
@@ -1206,6 +1242,12 @@ void PollLiveControls() {
         g_liveControls.xrRenderPoseSubmit != xrRenderPoseSubmit ||
         g_liveControls.xrChordActivation != xrChordActivation ||
         g_liveControls.xrExtraChordActions != xrExtraChordActions ||
+        g_liveControls.xrClassicOnFootControls != xrClassicOnFootControls ||
+        g_liveControls.xrClassicDisableLsSprint != xrClassicDisableLsSprint ||
+        g_liveControls.xrClassicDisableRsDashCrouch != xrClassicDisableRsDashCrouch ||
+        g_liveControls.xrClassicVehicleControls != xrClassicVehicleControls ||
+        g_liveControls.xrClassicSwapTriggersGrips != xrClassicSwapTriggersGrips ||
+        g_liveControls.xrClassicScannerControls != xrClassicScannerControls ||
         g_liveControls.xrRuntime != xrRuntime ||
         g_liveControls.xrDepthSubmit != xrDepthSubmit;
 
@@ -1249,6 +1291,12 @@ void PollLiveControls() {
     g_liveControls.xrInputActions = xrInputActions != 0 ? 1 : 0;
     g_liveControls.xrChordActivation = (xrChordActivation >= 0 && xrChordActivation <= 2) ? xrChordActivation : 0;
     g_liveControls.xrExtraChordActions = xrExtraChordActions != 0 ? 1 : 0;
+    g_liveControls.xrClassicOnFootControls = xrClassicOnFootControls != 0 ? 1 : 0;
+    g_liveControls.xrClassicDisableLsSprint = xrClassicDisableLsSprint != 0 ? 1 : 0;
+    g_liveControls.xrClassicDisableRsDashCrouch = xrClassicDisableRsDashCrouch != 0 ? 1 : 0;
+    g_liveControls.xrClassicVehicleControls = xrClassicVehicleControls != 0 ? 1 : 0;
+    g_liveControls.xrClassicSwapTriggersGrips = xrClassicSwapTriggersGrips != 0 ? 1 : 0;
+    g_liveControls.xrClassicScannerControls = xrClassicScannerControls != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = xrMonoXQueueWait != 0 ? 1 : 0;
     g_liveControls.xrSnapTurnPulseMs = xrSnapTurnPulseMs > 0 ? xrSnapTurnPulseMs : 30;
     g_liveControls.xrMonoDepthCapture = xrMonoDepthCapture != 0 ? 1 : 0;
@@ -1464,6 +1512,12 @@ LiveControlsUiState MakeLiveControlsUiState() {
     state.xrInputActions = g_liveControls.xrInputActions;
     state.xrChordActivation = g_liveControls.xrChordActivation;
     state.xrExtraChordActions = g_liveControls.xrExtraChordActions;
+    state.xrClassicOnFootControls = g_liveControls.xrClassicOnFootControls;
+    state.xrClassicDisableLsSprint = g_liveControls.xrClassicDisableLsSprint;
+    state.xrClassicDisableRsDashCrouch = g_liveControls.xrClassicDisableRsDashCrouch;
+    state.xrClassicVehicleControls = g_liveControls.xrClassicVehicleControls;
+    state.xrClassicSwapTriggersGrips = g_liveControls.xrClassicSwapTriggersGrips;
+    state.xrClassicScannerControls = g_liveControls.xrClassicScannerControls;
     state.xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
     state.xrMonoDepthCapture = g_liveControls.xrMonoDepthCapture;
     state.xrSnapTurnPulseMs = g_liveControls.xrSnapTurnPulseMs;
@@ -1701,6 +1755,12 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_input_actions=%d\n", state.xrInputActions != 0 ? 1 : 0);
     fprintf(file, "xr_chord_activation=%d\n", (state.xrChordActivation >= 0 && state.xrChordActivation <= 2) ? state.xrChordActivation : 0);
     fprintf(file, "xr_extra_chord_actions=%d\n", state.xrExtraChordActions != 0 ? 1 : 0);
+    fprintf(file, "xr_classic_on_foot_controls=%d\n", state.xrClassicOnFootControls != 0 ? 1 : 0);
+    fprintf(file, "xr_classic_disable_ls_sprint=%d\n", state.xrClassicDisableLsSprint != 0 ? 1 : 0);
+    fprintf(file, "xr_classic_disable_rs_dash_crouch=%d\n", state.xrClassicDisableRsDashCrouch != 0 ? 1 : 0);
+    fprintf(file, "xr_classic_vehicle_controls=%d\n", state.xrClassicVehicleControls != 0 ? 1 : 0);
+    fprintf(file, "xr_classic_swap_triggers_grips=%d\n", state.xrClassicSwapTriggersGrips != 0 ? 1 : 0);
+    fprintf(file, "xr_classic_scanner_controls=%d\n", state.xrClassicScannerControls != 0 ? 1 : 0);
     fprintf(file, "xr_mono_xqueue_wait=%d\n", state.xrMonoXQueueWait != 0 ? 1 : 0);
     fprintf(file, "xr_mono_depth_capture=%d\n", state.xrMonoDepthCapture != 0 ? 1 : 0);
     fprintf(file, "xr_snap_turn_pulse_ms=%d\n", state.xrSnapTurnPulseMs > 0 ? state.xrSnapTurnPulseMs : 30);
@@ -1780,6 +1840,12 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
     g_liveControls.xrInputActions = state->xrInputActions != 0 ? 1 : 0;
     g_liveControls.xrChordActivation = (state->xrChordActivation >= 0 && state->xrChordActivation <= 2) ? state->xrChordActivation : 0;
     g_liveControls.xrExtraChordActions = state->xrExtraChordActions != 0 ? 1 : 0;
+    g_liveControls.xrClassicOnFootControls = state->xrClassicOnFootControls != 0 ? 1 : 0;
+    g_liveControls.xrClassicDisableLsSprint = state->xrClassicDisableLsSprint != 0 ? 1 : 0;
+    g_liveControls.xrClassicDisableRsDashCrouch = state->xrClassicDisableRsDashCrouch != 0 ? 1 : 0;
+    g_liveControls.xrClassicVehicleControls = state->xrClassicVehicleControls != 0 ? 1 : 0;
+    g_liveControls.xrClassicSwapTriggersGrips = state->xrClassicSwapTriggersGrips != 0 ? 1 : 0;
+    g_liveControls.xrClassicScannerControls = state->xrClassicScannerControls != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = state->xrMonoXQueueWait != 0 ? 1 : 0;
     g_liveControls.xrMonoDepthCapture = state->xrMonoDepthCapture != 0 ? 1 : 0;
     g_liveControls.xrSnapTurnPulseMs = state->xrSnapTurnPulseMs > 0 ? state->xrSnapTurnPulseMs : 30;

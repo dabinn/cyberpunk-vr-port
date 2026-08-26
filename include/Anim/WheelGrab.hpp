@@ -15,7 +15,7 @@ namespace cvr::anim {
 // PLAIN GLOBALS, not shared slots. The upstream version (iPowerTech, wip motioncontroller vehicle
 // steering) published thirteen of these into the shared block because it had to cross from the hands
 // plugin to the dxgi proxy; that proxy is gone and both ends are this one DLL now, so the only thing
-// still crossing a boundary is the armed mask the CET mods read (vrshared::kWheelArmedMask).
+// still crossing a boundary is the grip-owner mask the CET mods read (vrshared::kWheelArmedMask).
 //
 // Atomic because the producer and the consumers are different threads: the pose hook writes them on
 // the engine's animation thread, the XInput detour reads them on the input thread and the overlay on

@@ -149,7 +149,15 @@ void WheelCaptureAnim(int hand, int handIdx) {
 // tick old): the target for this solve is not computed until well inside the arm block, and a tick of
 // lag on a 28 cm radius is not a thing a hand can outrun.
 void WheelUpdate(float dtSec) {
-    const bool enabled = (g_liveControls.xrWheelGrab != 0);
+    const bool classicVehicle = (g_liveControls.xrClassicVehicleControls != 0);
+    static bool s_classicVehicleWasEnabled = false;
+    if (classicVehicle && !s_classicVehicleWasEnabled) {
+        // Drop every published and internal owner immediately. The loop below still samples gripPrev,
+        // so switching back cannot re-grab the wheel from a grip that was never released.
+        WheelReset();
+    }
+    s_classicVehicleWasEnabled = classicVehicle;
+    const bool enabled = (g_liveControls.xrWheelGrab != 0) && !classicVehicle;
     const bool driving = g_isDriving.load(std::memory_order_relaxed);
     float radius = g_liveControls.xrWheelRadius;
     if (!(radius > 0.05f) || radius > 1.0f) radius = 0.28f;
@@ -239,7 +247,7 @@ void WheelUpdate(float dtSec) {
     // where the hub is. Releasing the grip is what turns a hand at the hub back into a horn.
     int hornMask = 0;
     {
-        const bool hornEnabled = (g_liveControls.xrWheelHorn != 0);
+        const bool hornEnabled = (g_liveControls.xrWheelHorn != 0) && !classicVehicle;
         float hornR = g_liveControls.xrWheelHornRadius;
         if (!(hornR >= kHornRadiusMin) || hornR > kHornRadiusMax) hornR = kHornRadiusDefault;
         const float rIn  = hornR;
@@ -271,6 +279,11 @@ void WheelUpdate(float dtSec) {
     g_wheelHornMask.store(hornMask, std::memory_order_relaxed);
     g_wheelSteer.store(g_steer, std::memory_order_relaxed);
     g_wheelSteerDeg.store(g_steerDeg, std::memory_order_relaxed);
+    if (classicVehicle && driving && g_liveControls.xrClassicSwapTriggersGrips != 0) {
+        // The wheel no longer owns either hand, but the pedal mapping does. Keep CET holster/reload
+        // consumers from treating the same grip press as a second action.
+        armedMask = vrshared::kWheelArmedRightBit | vrshared::kWheelArmedLeftBit;
+    }
     // THE ONE THING THAT STILL CROSSES A BOUNDARY: the CET mods read the grips out of the shared
     // block ([49] and [155] feed the holster equip, the smoking poses, the basketball grab and the
     // reload's magazine hand), and a grip that is holding the wheel must not also mean any of those.

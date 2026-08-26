@@ -109,6 +109,13 @@ void InitRuntimePaths() {
     g_liveControls.xrInputActions = 1;
     g_liveControls.xrChordActivation = 0;
     g_liveControls.xrExtraChordActions = 1;
+    // Classic mappings are opt-in so an existing or new installation keeps upstream v0.1.5 input.
+    g_liveControls.xrClassicOnFootControls = 0;
+    g_liveControls.xrClassicDisableLsSprint = 0;
+    g_liveControls.xrClassicDisableRsDashCrouch = 0;
+    g_liveControls.xrClassicVehicleControls = 0;
+    g_liveControls.xrClassicSwapTriggersGrips = 0;
+    g_liveControls.xrClassicScannerControls = 0;
 
     // Capture the recenter-request baseline NOW (before CET could write), so the
     // first OnGameAttached this session is seen as a change and triggers a recenter,
