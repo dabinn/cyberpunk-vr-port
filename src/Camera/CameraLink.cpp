@@ -19,6 +19,59 @@ float g_camWriteQuat[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
 
 }  // namespace
+
+namespace {
+struct AtomicFinalMainCameraFrame {
+    std::atomic<float> worldPos[3]{};
+    std::atomic<float> worldQuat[4]{};
+    std::atomic<uint64_t> timestampUs{0};
+    std::atomic<uint64_t> callbackHit{0};
+    std::atomic<uint32_t> locateSequence{0};
+    std::atomic<uint32_t> sequence{0};
+};
+
+AtomicFinalMainCameraFrame g_finalMain{};
+std::atomic<uint32_t> g_finalMainSeq{0};
+}
+
+void cvr::camera::FinalMainCameraFramePublish(const FinalMainCameraFrame& f) {
+    g_finalMainSeq.fetch_add(1u, std::memory_order_acq_rel);
+    for (int i = 0; i < 3; ++i) {
+        g_finalMain.worldPos[i].store(f.worldPos[i], std::memory_order_relaxed);
+    }
+    for (int i = 0; i < 4; ++i) {
+        g_finalMain.worldQuat[i].store(f.worldQuat[i], std::memory_order_relaxed);
+    }
+    g_finalMain.timestampUs.store(f.timestampUs, std::memory_order_relaxed);
+    g_finalMain.callbackHit.store(f.callbackHit, std::memory_order_relaxed);
+    g_finalMain.locateSequence.store(f.locateSequence, std::memory_order_relaxed);
+    g_finalMain.sequence.store(f.sequence, std::memory_order_relaxed);
+    g_finalMainSeq.fetch_add(1u, std::memory_order_release);
+}
+
+bool cvr::camera::FinalMainCameraFrameRead(FinalMainCameraFrame* out) {
+    if (!out) return false;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const uint32_t s0 = g_finalMainSeq.load(std::memory_order_acquire);
+        if (s0 == 0u || (s0 & 1u)) continue;
+        FinalMainCameraFrame tmp{};
+        for (int i = 0; i < 3; ++i) {
+            tmp.worldPos[i] = g_finalMain.worldPos[i].load(std::memory_order_relaxed);
+        }
+        for (int i = 0; i < 4; ++i) {
+            tmp.worldQuat[i] = g_finalMain.worldQuat[i].load(std::memory_order_relaxed);
+        }
+        tmp.timestampUs = g_finalMain.timestampUs.load(std::memory_order_relaxed);
+        tmp.callbackHit = g_finalMain.callbackHit.load(std::memory_order_relaxed);
+        tmp.locateSequence = g_finalMain.locateSequence.load(std::memory_order_relaxed);
+        tmp.sequence = g_finalMain.sequence.load(std::memory_order_relaxed);
+        if (g_finalMainSeq.load(std::memory_order_acquire) == s0) {
+            *out = tmp;
+            return true;
+        }
+    }
+    return false;
+}
 void cvr::camera::CamWriteQuatPublish(float x, float y, float z, float w) {
     g_camWriteSeq.fetch_add(1, std::memory_order_acq_rel);
     std::atomic_thread_fence(std::memory_order_release);

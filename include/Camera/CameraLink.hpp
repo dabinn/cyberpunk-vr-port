@@ -99,6 +99,22 @@ void LocatedCameraFramePublish(const LocatedCameraFrame& f);
 // false when no frame has been published yet or a consistent read could not be taken.
 bool LocatedCameraFrameRead(LocatedCameraFrame* out);
 
+// ---- the last MAIN render camera observed at FinalCamera --------------------------------------
+//
+// Phase 3A compares what is available before VRCAM starts with the last camera MAIN actually
+// rendered. This packet gives that older publication its own identity and timestamp; consumers
+// must not pretend its sequence is the current VRCAM frame.
+struct FinalMainCameraFrame {
+    float worldPos[3];
+    float worldQuat[4];
+    uint64_t timestampUs;
+    uint64_t callbackHit;
+    uint32_t locateSequence;
+    uint32_t sequence;
+};
+void FinalMainCameraFramePublish(const FinalMainCameraFrame& f);
+bool FinalMainCameraFrameRead(FinalMainCameraFrame* out);
+
 // ---- the view frame handed to the solve --------------------------------------------------------
 //
 // ONE STRUCT, ONE INSTANT, AND THAT IS THE WHOLE POINT.

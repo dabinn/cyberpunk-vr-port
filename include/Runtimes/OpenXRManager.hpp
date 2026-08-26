@@ -100,7 +100,12 @@ inline uint64_t XrDiagNowUs() {
     if (s_freq.QuadPart == 0) return 0;
     LARGE_INTEGER t{};
     QueryPerformanceCounter(&t);
-    return static_cast<uint64_t>(t.QuadPart * 1000000ll / s_freq.QuadPart);
+    // Split quotient/remainder before scaling. Multiplying a long-running QPC value by one
+    // million first overflows signed 64-bit after ordinary system uptime and produced timestamps
+    // near UINT64_MAX in the Phase 3A authority probe.
+    const uint64_t ticks = static_cast<uint64_t>(t.QuadPart);
+    const uint64_t freq = static_cast<uint64_t>(s_freq.QuadPart);
+    return (ticks / freq) * 1000000ull + ((ticks % freq) * 1000000ull) / freq;
 }
 
 class OpenXRManager {

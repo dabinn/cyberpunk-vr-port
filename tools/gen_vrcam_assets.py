@@ -12,6 +12,7 @@
 #
 # What it writes:
 #   * the four player .ent.json files  -- appends the missing components
+#   * base/vrport/vrport_world_vrcam.ent.json -- a world-owned RTT camera entity
 #   * texture_from_camera_<W>x<H>.dtex.json for each new resolution
 #   * the "components" catalogue in the CET mod's vrcam.json
 #
@@ -47,6 +48,7 @@ ENT_FILES = [
     "ep1/characters/entities/player/player_ma_fpp_ep1.ent.json",
     "ep1/characters/entities/player/player_wa_fpp_ep1.ent.json",
 ]
+WORLD_ENT = "base/vrport/vrport_world_vrcam.ent"
 DTEX_DIR = "base/media/tv/entities"
 DTEX_DEPOT = "base\\media\\tv\\entities"
 
@@ -108,9 +110,13 @@ def hard_transform_binding():
     }
 
 
-def make_component(w, h, cruid, parent_transform):
-    """One entRenderToTextureCameraComponent. parent_transform is the handle def or a ref."""
-    return {
+def make_component(w, h, cruid, parent_transform, name_prefix="vrcam_"):
+    """One entRenderToTextureCameraComponent.
+
+    Player components keep their camera-slot binding. The static world entity passes None so its
+    RTT components belong directly to the entity root.
+    """
+    component = {
         "$type": "entRenderToTextureCameraComponent",
         "albedoDynamicTextureRes": null_resource(),
         "aspectRatio": f32(w / h),
@@ -154,12 +160,11 @@ def make_component(w, h, cruid, parent_transform):
             },
         },
         "motionBlurScale": 1,
-        "name": cname("vrcam_%dx%d" % (w, h)),
+        "name": cname("%s%dx%d" % (name_prefix, w, h)),
         "nearPlaneOverride": NEAR_PLANE,
         "normalsDynamicTextureRes": null_resource(),
         "overrideBackgroundColor": 0,
         "params": {"$type": "WorldRenderAreaSettings", "areaParameters": []},
-        "parentTransform": parent_transform,
         "particlesDynamicTextureRes": null_resource(),
         "renderingMode": "Shaded",
         "renderSceneLayer": "Default",
@@ -168,6 +173,73 @@ def make_component(w, h, cruid, parent_transform):
         "streamingDistance": STREAMING_DISTANCE,
         "virtualCameraName": cname("vrcam_feed_%dx%d" % (w, h)),
         "zoom": 1,
+    }
+    if parent_transform is not None:
+        component["parentTransform"] = parent_transform
+    return component
+
+
+def make_world_entity(wanted):
+    """A component-only template spawned through Codeware's StaticEntitySystem."""
+    entity = {
+        "$type": "entEntity",
+        "customCameraTarget": "ECCTV_All",
+        "renderSceneLayerMask": "Default",
+    }
+    chunks = [dict(entity)]
+    components = []
+    cruid = {"0": "0"}
+    for w, h in wanted:
+        cid = cruid_for(w, h)
+        chunks.append(make_component(w, h, cid, None, "world_vrcam_"))
+        components.append(make_component(w, h, cid, None, "world_vrcam_"))
+        cruid[str(len(chunks) - 1)] = str(cid)
+
+    return {
+        "Header": {
+            "WolvenKitVersion": "8.20.0",
+            "WKitJsonVersion": "0.0.9",
+            "GameVersion": 2310,
+            "ExportedDateTime": EXPORTED_AT,
+            "DataType": "CR2W",
+            "ArchiveFileName": WORLD_ENT.replace("/", "\\"),
+        },
+        "Data": {
+            "Version": 195,
+            "BuildVersion": 0,
+            "RootChunk": {
+                "$type": "entEntityTemplate",
+                "appearances": [],
+                "backendDataOverrides": [],
+                "bindingOverrides": [],
+                "compiledData": {
+                    "BufferId": "0",
+                    "Flags": 4063232,
+                    "Type": ("WolvenKit.RED4.Archive.Buffer.RedPackage, WolvenKit.RED4, "
+                             "Version=8.20.0.0, Culture=neutral, PublicKeyToken=null"),
+                    "Data": {
+                        "Version": 4,
+                        "Sections": 7,
+                        "CruidIndex": 0,
+                        "CruidDict": cruid,
+                        "Chunks": chunks,
+                    },
+                },
+                "compiledEntityLODFlags": 0,
+                "componentResolveSettings": [],
+                "components": components,
+                "cookingPlatform": "PLATFORM_PC",
+                "defaultAppearance": cname("default"),
+                "entity": {"HandleId": "1", "Data": dict(entity)},
+                "includeInstanceBuffer": None,
+                "includes": [],
+                "inplaceResources": [],
+                "localData": None,
+                "resolvedDependencies": [],
+                "visualTagsSchema": None,
+            },
+            "EmbeddedFiles": [],
+        },
     }
 
 
@@ -366,6 +438,42 @@ def process_ent(path, wanted, dry_run):
     return added, parent_id, mint, made_backup
 
 
+def process_world_ent(path, wanted, dry_run):
+    data = make_world_entity(wanted)
+    problems = []
+    root = data["Data"]["RootChunk"]
+    chunks = root["compiledData"]["Data"]["Chunks"]
+    components = root["components"]
+    cruid = root["compiledData"]["Data"]["CruidDict"]
+    if len(chunks) != len(components) + 1:
+        problems.append("chunks(%d) != components(%d)+1" % (len(chunks), len(components)))
+    if len(cruid) != len(chunks):
+        problems.append("CruidDict has %d entries for %d chunks" % (len(cruid), len(chunks)))
+    if any(c.get("parentTransform") is not None for c in components):
+        problems.append("world VRCAM component unexpectedly has a parentTransform")
+    names = [component_name(c) for c in components]
+    if len(names) != len(set(names)):
+        problems.append("duplicate world VRCAM component names")
+    if any(not n.startswith("world_vrcam_") for n in names):
+        problems.append("world entity contains a component outside world_vrcam_*")
+    if any(c.get("$type") != "entRenderToTextureCameraComponent" for c in components):
+        problems.append("world entity contains a non-VRCAM component")
+    if problems:
+        return False, False, problems
+
+    body = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    old = None
+    if os.path.isfile(path):
+        old = io.open(path, encoding="utf-8-sig").read()
+    changed = old != body
+    made_backup = False
+    if changed and not dry_run:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with io.open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(body)
+    return changed, made_backup, []
+
+
 _CRUID_TABLE = {}
 
 
@@ -442,6 +550,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true", help="report what would change, write nothing")
     ap.add_argument("--project", default=PROJECT, help="WolvenKit project root")
+    ap.add_argument("--world-only", action="store_true",
+                    help="author only the dedicated world VRCAM entity")
     args = ap.parse_args()
 
     global RAW, ARCHIVE
@@ -482,6 +592,22 @@ def main():
              "%d..%d" % (cruid_for(*fresh[0]) - CRUID_BASE, cruid_for(*fresh[-1]) - CRUID_BASE)
              if fresh else "none"))
     print()
+
+    world_path = os.path.join(RAW, (WORLD_ENT + ".json").replace("/", os.sep))
+    world_changed, world_backed_up, world_problems = process_world_ent(
+        world_path, wanted, args.dry_run)
+    print("%-46s %s, %d root-owned VRCAM component(s)%s"
+          % (os.path.basename(world_path), "would write" if args.dry_run and world_changed
+             else "written" if world_changed else "unchanged", len(wanted),
+             "  [.orig saved]" if world_backed_up else ""))
+    if world_problems:
+        print("      VERIFY FAILED: %s" % "; ".join(world_problems))
+        return 1
+    if args.world_only:
+        print()
+        print("%s world entity generation complete"
+              % ("DRY RUN:" if args.dry_run else "done:"))
+        return 0
 
     total_added = 0
     failures = []
