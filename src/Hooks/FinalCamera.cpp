@@ -17,6 +17,7 @@
 
 #include "Camera/CameraLink.hpp"
 #include "Camera/CameraState.hpp"
+#include "Camera/ActiveMainCamera.hpp"
 #include "Utils/LogThrottle.hpp"
 #include "Core/LiveControls.hpp"
 #include "Core/Telemetry.hpp"
@@ -71,6 +72,10 @@ extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
         if (isMain) {
             float camq[4] = {};
             if (ReadFloatArraySafe(rsiPtr + 4, camq, 4) && IsPlausibleUnitQuaternion(camq)) {
+                // View key 0 is the only authoritative MAIN identity available here. Publish its
+                // rendered pose for the world-owned VRCAM entity; never infer MAIN from whichever
+                // LocateCamera callback happened to run last.
+                cvr::camera::PublishActiveMainCamera(rsiPtr);
                 // LATCHED, and for the reason the overlay already latched it on its own side: with
                 // no weapon the muzzle quaternion is identity and the publisher then sends its +Y as
                 // exactly (0,1,0) -- not a barrel direction, and it used to drag the aim point

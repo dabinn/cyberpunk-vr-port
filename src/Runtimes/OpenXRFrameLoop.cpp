@@ -453,6 +453,20 @@ extern "C" __declspec(dllexport) unsigned long long CyberpunkVR_DebugFitMissed =
 // component all fall back to the mono path byte-for-byte.
 extern "C" __declspec(dllexport) int CyberpunkVR_StereoSubmit = 1;
 extern "C" __declspec(dllexport) unsigned long long CyberpunkVR_DebugStereoEyeSubmits = 0;
+extern "C" __declspec(dllexport) unsigned long long CyberpunkVR_DebugStereoEyeFallbacks = 0;
+namespace {
+std::atomic<uint32_t> g_stereo_eye_source{0}; // 0 = stereo off/not submitted, 1 = MAIN fallback, 2 = VRCAM
+}
+extern "C" __declspec(dllexport) uint32_t CyberpunkVR_StereoEyeSource() {
+    return g_stereo_eye_source.load(std::memory_order_relaxed);
+}
+extern "C" __declspec(dllexport) const char* CyberpunkVR_StereoEyeSourceName() {
+    switch (CyberpunkVR_StereoEyeSource()) {
+    case 2: return "VRCAM";
+    case 1: return "MAIN fallback";
+    default: return "stereo off/not submitted";
+    }
+}
 // The VRCAM view's final colour, published by stereo/sync_stereo.cpp. "Fresh" = null once
 // that view stops updating; see the definition for why existence alone is the wrong test.
 extern "C" ID3D12Resource* CyberpunkVR_GetVrcamEyeTextureFresh();
@@ -2030,6 +2044,8 @@ DWORD OpenXRManager::FrameThreadMain() {
                     SUCCEEDED(currentAllocator->Reset()) && SUCCEEDED(m_cmdList->Reset(currentAllocator, nullptr))) {
                     bool copyReady = true;
                     bool useDepthLayer = monoHasDepth && m_depthLayerSupported;
+                    bool copiedVrcamEye = false;
+                    bool copiedMainFallbackToVrcamEye = false;
                     std::vector<bool> acquiredEyes(viewCountOutput, false);
                     std::vector<bool> acquiredDepthEyes(viewCountOutput, false);
                     std::vector<XrCompositionLayerProjectionView> projectionViews(viewCountOutput);
@@ -2140,7 +2156,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                                 toCommon.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
                                 toCommon.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
                                 m_cmdList->ResourceBarrier(1, &toCommon);
-                                ++CyberpunkVR_DebugStereoEyeSubmits;
+                                copiedVrcamEye = true;
                             }
                         }
                         if (!(doMonoSharpen ||
@@ -2162,6 +2178,10 @@ DWORD OpenXRManager::FrameThreadMain() {
                             toCommon.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
                             toCommon.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
                             m_cmdList->ResourceBarrier(1, &toCommon);
+                            if (CyberpunkVR_StereoSubmit &&
+                                eye == (CyberpunkVR_MainIsRightEye ? 0u : 1u)) {
+                                copiedMainFallbackToVrcamEye = true;
+                            }
                         }
 
                         projectionViews[eye].pose = monoPoses[eye];
@@ -2564,6 +2584,40 @@ DWORD OpenXRManager::FrameThreadMain() {
                             if (XR_SUCCEEDED(endRes)) {
                                 XrMark('E');
                                 XrBucketCadence(frameState.predictedDisplayPeriod);
+                                // Count the source only after xrEndFrame accepts the layer. This is the
+                                // final answer to what the designated second-eye slot actually received,
+                                // rather than an inference from component or render-graph activity.
+                                if (!CyberpunkVR_StereoSubmit) {
+                                    g_stereo_eye_source.store(0, std::memory_order_relaxed);
+                                } else if (copiedVrcamEye) {
+                                    ++CyberpunkVR_DebugStereoEyeSubmits;
+                                    g_stereo_eye_source.store(2, std::memory_order_relaxed);
+                                } else if (copiedMainFallbackToVrcamEye) {
+                                    ++CyberpunkVR_DebugStereoEyeFallbacks;
+                                    g_stereo_eye_source.store(1, std::memory_order_relaxed);
+                                }
+                                {
+                                    static uint64_t s_nextEyeSourceLogMs = 0;
+                                    static unsigned long long s_lastVrcamCopies = 0;
+                                    static unsigned long long s_lastMainFallbackCopies = 0;
+                                    const uint64_t nowMs = GetTickCount64();
+                                    if (nowMs >= s_nextEyeSourceLogMs) {
+                                        const unsigned long long vrcamCopies =
+                                            CyberpunkVR_DebugStereoEyeSubmits;
+                                        const unsigned long long mainFallbackCopies =
+                                            CyberpunkVR_DebugStereoEyeFallbacks;
+                                        Log("[xreye-src] current=%s vrcamCopies=%llu(+%llu) "
+                                            "mainFallbackCopies=%llu(+%llu) serial=%llu\n",
+                                            CyberpunkVR_StereoEyeSourceName(),
+                                            vrcamCopies, vrcamCopies - s_lastVrcamCopies,
+                                            mainFallbackCopies,
+                                            mainFallbackCopies - s_lastMainFallbackCopies,
+                                            static_cast<unsigned long long>(presentSerial));
+                                        s_lastVrcamCopies = vrcamCopies;
+                                        s_lastMainFallbackCopies = mainFallbackCopies;
+                                        s_nextEyeSourceLogMs = nowMs + 2000;
+                                    }
+                                }
                                 // DIAG: the angular gap between the SUBMITTED render pose
                                 // (the head pose the captured frame was rendered with) and
                                 // the CURRENT head pose (location.pose, freshly located this
@@ -2643,7 +2697,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                                     }
                                 }
                                 if ((presentSerial % 300) == 1) {
-                                    Log("OpenXRManager: Mono frame submitted. serial=%llu fresh=%d views=%u shouldRender=%d depth=%d\n",
+                                    Log("OpenXRManager: Projection frame submitted. serial=%llu fresh=%d views=%u shouldRender=%d depth=%d\n",
                                         static_cast<unsigned long long>(presentSerial),
                                         presentSerial != m_lastSubmittedSerial ? 1 : 0,
                                         viewCountOutput,

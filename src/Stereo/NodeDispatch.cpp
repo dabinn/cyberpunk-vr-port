@@ -84,6 +84,75 @@ WakeByAddressAllFn      g_wake_by_address_all = nullptr;
 NodeDispatchFn          g_node_dispatch_orig = nullptr;
 std::atomic<bool>       g_node_dispatch_hooked{false};
 
+extern "C" uint64_t CyberpunkVR_DebugViewKeyMainNodes;
+extern "C" uint64_t CyberpunkVR_DebugViewKeyOtherNodes;
+
+// Fixed-size, lock-free census of the ACTUAL view keys reaching the dispatcher. The selected
+// VRCAM key is only an expectation; when an RTT camera registers under a different key, comparing
+// everything to that expectation turns a live second view into a column of zeroes. This census is
+// diagnostic-only and never changes attribution or render behaviour.
+namespace {
+constexpr uint64_t kEmptyViewKey = ~uint64_t{0};
+struct ActualViewKeySlot {
+    std::atomic<uint64_t> key{kEmptyViewKey};
+    std::atomic<uint64_t> hits{0};
+};
+std::array<ActualViewKeySlot, 32> g_actual_view_keys{};
+std::atomic<uint64_t> g_actual_view_key_overflow{0};
+
+void actual_view_key_note(uint64_t key, uintptr_t ctx, uint32_t work_rva) {
+    const size_t start = static_cast<size_t>((key ^ (key >> 32)) &
+                                              (g_actual_view_keys.size() - 1));
+    for (size_t probe = 0; probe < g_actual_view_keys.size(); ++probe) {
+        ActualViewKeySlot& slot = g_actual_view_keys[(start + probe) &
+                                                     (g_actual_view_keys.size() - 1)];
+        uint64_t found = slot.key.load(std::memory_order_acquire);
+        if (found == key) {
+            slot.hits.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (found == kEmptyViewKey &&
+            slot.key.compare_exchange_strong(found, key, std::memory_order_acq_rel)) {
+            slot.hits.store(1, std::memory_order_release);
+            const uint64_t expected = g_vrcam_ctx_key.load(std::memory_order_relaxed);
+            log("[vrcam][view-key] discovered key=0x%016llX expected=0x%016llX "
+                "match=%d ctx=%p firstWork=%06X",
+                (unsigned long long)key, (unsigned long long)expected,
+                key == expected ? 1 : 0, reinterpret_cast<void*>(ctx), work_rva);
+            return;
+        }
+    }
+    g_actual_view_key_overflow.fetch_add(1, std::memory_order_relaxed);
+}
+
+void actual_view_key_report() {
+    static std::atomic<uint64_t> nextReportMs{0};
+    const uint64_t now = GetTickCount64();
+    uint64_t due = nextReportMs.load(std::memory_order_relaxed);
+    if (now < due || !nextReportMs.compare_exchange_strong(
+            due, now + 2000, std::memory_order_relaxed)) {
+        return;
+    }
+
+    char summary[2048] = {};
+    size_t used = 0;
+    for (const ActualViewKeySlot& slot : g_actual_view_keys) {
+        const uint64_t key = slot.key.load(std::memory_order_acquire);
+        if (key == kEmptyViewKey) continue;
+        const uint64_t hits = slot.hits.load(std::memory_order_relaxed);
+        const int wrote = std::snprintf(
+            summary + used, sizeof(summary) - used, "%s%016llX=%llu",
+            used ? " " : "", (unsigned long long)key, (unsigned long long)hits);
+        if (wrote <= 0 || static_cast<size_t>(wrote) >= sizeof(summary) - used) break;
+        used += static_cast<size_t>(wrote);
+    }
+    log("[vrcam][view-keys] expected=0x%016llX keys:%s overflow=%llu",
+        (unsigned long long)g_vrcam_ctx_key.load(std::memory_order_relaxed),
+        used ? summary : " (none)",
+        (unsigned long long)g_actual_view_key_overflow.load(std::memory_order_relaxed));
+}
+}  // namespace
+
 static bool is_vrcam_copy_to_texture(uintptr_t* node, uint8_t* work_context) {
     if (!node || !work_context) return false;
     __try {
@@ -833,6 +902,20 @@ uint8_t __fastcall Detour_NodeDispatch(
     const uint32_t work_rva = (prof_work && g_exe_base &&
             prof_work > reinterpret_cast<uintptr_t>(g_exe_base))
         ? static_cast<uint32_t>(prof_work - reinterpret_cast<uintptr_t>(g_exe_base)) : 0;
+    if (view_key_known) {
+        uintptr_t ctx = 0;
+        __try { ctx = work_context ? *reinterpret_cast<uintptr_t*>(work_context + 0x18) : 0; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { ctx = 0; }
+        actual_view_key_note(view_key, ctx, work_rva);
+        actual_view_key_report();
+        if (view_key == 0) {
+            InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(
+                &CyberpunkVR_DebugViewKeyMainNodes));
+        } else if (view_key != g_vrcam_ctx_key.load(std::memory_order_relaxed)) {
+            InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(
+                &CyberpunkVR_DebugViewKeyOtherNodes));
+        }
+    }
     // Close VRCAM's viewData holes as early as the view is seen at all, so every consumer in
     // the frame reads the filled value rather than the zero the pool handed out.
     if ((CyberpunkVR_ViewDataFixMask || CyberpunkVR_FogMirrorMask ||

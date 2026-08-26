@@ -20,6 +20,7 @@
 // change; it is an unfalsifiable one, so the order is preserved.
 
 #include "Camera/CameraLink.hpp"
+#include "Camera/ActiveMainCamera.hpp"
 #include "Camera/CameraState.hpp"
 #include "Utils/LogThrottle.hpp"
 #include "Core/LiveControls.hpp"
@@ -38,6 +39,9 @@
 #include <cstddef>
 
 extern "C" void BodyYawFollowSyncRecenter();
+// Keep engine lifecycle propagation active, then overwrite the RTT camera component with the
+// absolute MAIN-derived pose after the engine store.
+extern "C" __declspec(dllexport) int CyberpunkVR_WorldVrcamDirectWrite = 0;
 
 extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* ownerState) {
     BodyYawFollowSyncRecenter();
@@ -46,6 +50,71 @@ extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* owner
     const int camKind = ClassifyPatchCameraOwner(ownerState);
 
     if (!cameraState || reinterpret_cast<uintptr_t>(cameraState) < 0x10000) return;
+
+    // The detached VRCAM is already a complete authored RTT camera. Assign its absolute other-eye
+    // pose at the same post-store site the legacy path uses, after UpdateWorldTransforms rebuilt the
+    // component and before SerializeSetup consumes it. This deliberately bypasses
+    // Entity.SetWorldTransform and its presentation/interpolation path; do not let this component
+    // fall through into the player-relative head-delta and half-IPD additions below.
+    if (camKind == 3) {
+        if (!CyberpunkVR_WorldVrcamDirectWrite) return;
+        int32_t targetPosition[3] = {};
+        float targetOrientation[4] = {};
+        uint64_t sequence = 0;
+        if (!cvr::camera::ReadWorldVrcamPose(
+                targetPosition, targetOrientation, &sequence)) {
+            return;
+        }
+
+        const uintptr_t owner = reinterpret_cast<uintptr_t>(ownerState);
+        const uintptr_t posAddr = owner + 0xE0;
+        const uintptr_t quatAddr = reinterpret_cast<uintptr_t>(cameraState);
+        int32_t before[3] = {};
+        bool readBefore = true;
+        for (int i = 0; i < 3; ++i) {
+            uint32_t value = 0;
+            readBefore = ReadU32Safe(posAddr + i * 4, &value) && readBefore;
+            before[i] = static_cast<int32_t>(value);
+        }
+
+        bool wrote = true;
+        for (int i = 0; i < 3; ++i) {
+            wrote = WriteU32Safe(posAddr + i * 4,
+                                 static_cast<uint32_t>(targetPosition[i])) && wrote;
+        }
+        for (int i = 0; i < 4; ++i) {
+            wrote = WriteFloatSafe(quatAddr + i * sizeof(float),
+                                   targetOrientation[i]) && wrote;
+        }
+        int32_t after[3] = {};
+        bool readAfter = true;
+        for (int i = 0; i < 3; ++i) {
+            uint32_t value = 0;
+            readAfter = ReadU32Safe(posAddr + i * 4, &value) && readAfter;
+            after[i] = static_cast<int32_t>(value);
+        }
+
+        static std::atomic<uint64_t> lastLogMs{0};
+        const uint64_t now = GetTickCount64();
+        uint64_t last = lastLogMs.load(std::memory_order_relaxed);
+        if ((!last || now - last >= 1000) &&
+            lastLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+            constexpr float k = 1.0f / 131072.0f;
+            Log("[worldvrcam][direct] hits=%llu seq=%llu wrote=%d "
+                "before=(%.3f,%.3f,%.3f) target=(%.3f,%.3f,%.3f) "
+                "after=(%.3f,%.3f,%.3f)\n",
+                static_cast<unsigned long long>(CyberpunkVR_DebugPatchCamWorldVrcam),
+                static_cast<unsigned long long>(sequence), wrote ? 1 : 0,
+                readBefore ? before[0] * k : 0.0f,
+                readBefore ? before[1] * k : 0.0f,
+                readBefore ? before[2] * k : 0.0f,
+                targetPosition[0] * k, targetPosition[1] * k, targetPosition[2] * k,
+                readAfter ? after[0] * k : 0.0f,
+                readAfter ? after[1] * k : 0.0f,
+                readAfter ? after[2] * k : 0.0f);
+        }
+        return;
+    }
 
     float quat[4] = {};
     float posA[4] = {};

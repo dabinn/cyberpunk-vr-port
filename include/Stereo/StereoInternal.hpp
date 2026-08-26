@@ -240,6 +240,7 @@ extern char g_vrcam_camera[96];
 extern std::atomic<uint32_t> g_vrcam_sel_w;
 extern std::atomic<uint32_t> g_vrcam_sel_h;
 extern std::atomic<uint64_t> g_vrcam_ctx_key;
+extern std::atomic<uint64_t> g_world_vrcam_component_key;
 // True once the launcher resolution has decided the pick, so a later file read cannot undo it.
 extern bool g_vrcam_pick_authoritative;
 

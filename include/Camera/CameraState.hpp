@@ -77,6 +77,7 @@ extern "C" __declspec(dllexport) extern uint64_t CyberpunkVR_DebugIpdWorldWrites
 extern "C" __declspec(dllexport) extern uint64_t CyberpunkVR_DebugPatchCamMain;
 extern "C" __declspec(dllexport) extern uint64_t CyberpunkVR_DebugPatchCamOther;
 extern "C" __declspec(dllexport) extern uint64_t CyberpunkVR_DebugPatchCamVrcam;
+extern "C" __declspec(dllexport) extern uint64_t CyberpunkVR_DebugPatchCamWorldVrcam;
 extern "C" __declspec(dllexport) extern uint64_t CyberpunkVR_DebugPoseFromCache;
 extern "C" __declspec(dllexport) extern uint64_t CyberpunkVR_DebugPoseLocatedAtWrite;
 extern "C" __declspec(dllexport) extern uint64_t CyberpunkVR_DebugViewCamMain;

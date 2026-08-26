@@ -73,6 +73,9 @@ static void vrcam_apply_selection(const char* component, const char* camera) {
     strncpy_s(g_vrcam_component, sizeof(g_vrcam_component), component, _TRUNCATE);
     strncpy_s(g_vrcam_camera, sizeof(g_vrcam_camera), camera, _TRUNCATE);
     g_vrcam_ctx_key.store(cname_hash(g_vrcam_camera));
+    char worldComponent[sizeof(g_vrcam_component) + 8] = {};
+    snprintf(worldComponent, sizeof(worldComponent), "world_%s", g_vrcam_component);
+    g_world_vrcam_component_key.store(cname_hash(worldComponent), std::memory_order_release);
     int w = 0, h = 0;
     // Resolution off the COMPONENT name, falling back to the camera's -- both carry <W>x<H>.
     if (vrcam_parse_resolution(g_vrcam_component, &w, &h) ||

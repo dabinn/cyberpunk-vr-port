@@ -1022,12 +1022,15 @@ uint64_t g_patchCameraHits = 0;
 // first/last/most-frequent guessing, and stable across launches because it is a name hash.
 static constexpr uint64_t kCamNameMain = 0x6FCFDF926F11594Eull;
 extern "C" unsigned long long CyberpunkVR_VrcamCamNameHash();   // stereo/sync_stereo.cpp
+extern "C" unsigned long long CyberpunkVR_WorldVrcamCamNameHash();
 
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugPatchCamMain  = 0;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugPatchCamVrcam = 0;
+extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugPatchCamWorldVrcam = 0;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugPatchCamOther = 0;
 
-// 0 = not a camera we drive, 1 = MAIN (the player's FPP camera), 2 = VRCAM.
+// 0 = not a camera we drive, 1 = MAIN (the player's FPP camera), 2 = player VRCAM,
+// 3 = detached world VRCAM.
 //
 // WHY THE OBJECT AND NOT THE VIEW
 //
@@ -1066,18 +1069,21 @@ int ClassifyPatchCameraOwner(void* ownerState) {
     if (obj == g_camObjVrcam.load(std::memory_order_relaxed)) { ++CyberpunkVR_DebugPatchCamVrcam; return 2; }
 
     const uint64_t vrcam = CyberpunkVR_VrcamCamNameHash();
+    const uint64_t worldVrcam = CyberpunkVR_WorldVrcamCamNameHash();
 
     int off = g_camNameOffset.load(std::memory_order_acquire);
     if (off < 0) {
         for (int k = 0x08; k <= 0x80; k += 8) {
             uint64_t v = 0;
             if (!ReadU64Safe(obj + k, &v)) break;
-            if (v == kCamNameMain || (vrcam != 0 && v == vrcam)) {
+            if (v == kCamNameMain || (vrcam != 0 && v == vrcam) ||
+                (worldVrcam != 0 && v == worldVrcam)) {
                 g_camNameOffset.store(k, std::memory_order_release);
                 Log("PatchCamera: component name CName found at owner+0x%02X "
-                    "(main=0x%016llX vrcam=0x%016llX)\n", k,
+                    "(main=0x%016llX vrcam=0x%016llX world=0x%016llX)\n", k,
                     static_cast<unsigned long long>(kCamNameMain),
-                    static_cast<unsigned long long>(vrcam));
+                    static_cast<unsigned long long>(vrcam),
+                    static_cast<unsigned long long>(worldVrcam));
                 off = k;
                 break;
             }
@@ -1098,6 +1104,13 @@ int ClassifyPatchCameraOwner(void* ownerState) {
         ++CyberpunkVR_DebugCamRebinds;
         ++CyberpunkVR_DebugPatchCamVrcam;
         return 2;
+    }
+    if (worldVrcam != 0 && name == worldVrcam) {
+        // Do not latch a DynamicEntitySystem component pointer. The world entity is deliberately
+        // deleted and recreated across sessions; retaining its old address could misclassify an
+        // unrelated component if the allocator later reused that address.
+        ++CyberpunkVR_DebugPatchCamWorldVrcam;
+        return 3;
     }
     ++CyberpunkVR_DebugPatchCamOther;
     return 0;
@@ -1305,4 +1318,3 @@ void InitStereoOnce() {
 __declspec(dllexport) void CyberpunkVRPort_InitStereo() { InitStereoOnce(); }
 
 }
-

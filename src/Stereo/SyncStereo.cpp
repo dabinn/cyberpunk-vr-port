@@ -139,6 +139,10 @@ char     g_vrcam_camera[96]    = "vrcam_feed";
 // Atomic: the watcher thread below can replace it once CET reports the component's real
 // virtualCameraName, while the render hooks compare against it every dispatch.
 std::atomic<uint64_t> g_vrcam_ctx_key{0x8D23967F656EA945ULL};  // cname_hash("vrcam_feed")
+// Component identity for the detached RTT camera. Its virtualCameraName intentionally remains the
+// same as the player component, but the component name is prefixed with "world_" so PatchCamera can
+// give it an absolute pose instead of applying the legacy player-relative delta path.
+std::atomic<uint64_t> g_world_vrcam_component_key{0};
 
 // ---- MAIN gameplay view identity --------------------------------------------------------
 // Aspect ratio cannot answer this: in VR MAIN renders square, exactly like VRCAM, so the old
@@ -202,6 +206,9 @@ extern "C" __declspec(dllexport) const char* CyberpunkVR_VrcamComponentName() { 
 // working across launches because it is a name hash, not an address.
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_VrcamCamNameHash() {
     return cname_hash(g_vrcam_component);
+}
+extern "C" __declspec(dllexport) uint64_t CyberpunkVR_WorldVrcamCamNameHash() {
+    return g_world_vrcam_component_key.load(std::memory_order_acquire);
 }
 extern "C" __declspec(dllexport) const char* CyberpunkVR_VrcamCameraName()    { return g_vrcam_camera; }
 extern "C" __declspec(dllexport) uint64_t    CyberpunkVR_VrcamCtxKey()        { return g_vrcam_ctx_key.load(); }

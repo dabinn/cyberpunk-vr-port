@@ -1,9 +1,9 @@
 -- CyberpunkVRPort_Stereo — the Lua half of the VRCAM view.
 --
--- It exists for exactly one thing the native plugin cannot do: switching an entity component on.
--- entRenderToTextureCameraComponent.isEnabled is only reachable through the game's RTTI, which is
--- script-side, so the plugin asks and this mod does it. Everything else about the second view --
--- the view key, the render graph, the camera, the submit -- is native.
+-- It owns the script-side VRCAM lifecycle: spawning the component-only world entity through
+-- Codeware, following the authoritative MAIN pose, and switching one RTT component on.
+-- Everything after the authored camera component -- view key, render graph, capture and submit --
+-- remains native.
 --
 -- Files:
 --   vrcam.json            which component to enable, and the full authored catalogue.
@@ -35,6 +35,11 @@ end)
 registerForEvent("onUpdate", function(dt)
     if not Stereo.ready then return end
     VrcamSel.tick(dt)
+end)
+
+registerForEvent("onShutdown", function()
+    VrcamSel.shutdown()
+    Stereo.ready = false
 end)
 
 return Stereo

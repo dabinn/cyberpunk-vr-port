@@ -40,6 +40,9 @@ extern "C" int32_t  CyberpunkVR_StereoEyeCapture;
 extern "C" uint32_t CyberpunkVR_StereoEyeMaxAgeMs;
 extern "C" uint32_t CyberpunkVR_DebugVrcamEyeAgeMs;        // 0xFFFFFFFF = never produced
 extern "C" unsigned long long CyberpunkVR_DebugStereoEyeSubmits;
+extern "C" unsigned long long CyberpunkVR_DebugStereoEyeFallbacks;
+extern "C" uint32_t CyberpunkVR_StereoEyeSource();
+extern "C" const char* CyberpunkVR_StereoEyeSourceName();
 extern "C" int32_t CyberpunkVR_StableCopy;
 extern "C" int32_t CyberpunkVR_StableFromTonemap;
 extern "C" uint64_t CyberpunkVR_DebugStableCopies;
@@ -71,6 +74,7 @@ extern "C" int      CyberpunkVR_ProfSnapshotNodes(uint32_t* rva, double* msv, do
 extern "C" const char* CyberpunkVR_ProfNodeName(uint32_t rva);
 extern "C" uint64_t CyberpunkVR_DebugViewKeyMainNodes;
 extern "C" uint64_t CyberpunkVR_DebugViewKeyOtherNodes;
+extern "C" int CyberpunkVR_WorldVrcamDirectWrite;
 extern volatile int32_t g_lastLocatePosFP[3];
 extern "C" float CyberpunkVRPort_HalfIpd();
 extern "C" float GetGameRenderFovDeg();
@@ -401,6 +405,12 @@ void DrawStereoControls() {
     const bool eyeEverProduced = eyeAge != 0xFFFFFFFFu;
     const bool eyeFresh = eyeEverProduced && eyeAge <= CyberpunkVR_StereoEyeMaxAgeMs;
     const bool submitOn = CyberpunkVR_StereoSubmit != 0;
+    const bool vrcamRequested = CyberpunkVR_VrcamEnabled != 0;
+    const uint32_t xrEyeSource = CyberpunkVR_StereoEyeSource();
+
+    char worldComponent[112] = {};
+    std::snprintf(worldComponent, sizeof(worldComponent), "world_%s",
+                  CyberpunkVR_VrcamComponentName());
 
     // Which eye VRCAM lands in is CyberpunkVR_MainIsRightEye's to decide -- the submit picks
     // eye (MainIsRightEye ? 0 : 1) for it -- so the wording is derived rather than written down.
@@ -409,24 +419,38 @@ void DrawStereoControls() {
     const char* kVrcamEye = CyberpunkVR_MainIsRightEye ? "LEFT" : "RIGHT";
     const char* kMainEye  = CyberpunkVR_MainIsRightEye ? "RIGHT" : "LEFT";
 
-    if (submitOn && eyeFresh) {
+    if (submitOn && xrEyeSource == 2) {
         ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.5f, 1.0f),
                            "Stereo active  (%s = VRCAM, %s = MAIN)", kVrcamEye, kMainEye);
+    } else if (submitOn && !vrcamRequested) {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f),
+                           "VRCAM requested OFF -> both eye images use MAIN fallback");
+    } else if (submitOn && eyeFresh) {
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+                           "VRCAM frame is fresh, but XR second eye uses MAIN fallback");
+        ImGui::TextDisabled("The render reached the snapshot pool but did not pair with the submitted serial.");
+    } else if (submitOn && eyeEverProduced) {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f),
+                           "VRCAM render paused/stale -> both eye images use MAIN fallback");
+        ImGui::TextDisabled("The selected feed was recognised and produced frames earlier. "
+                            "Menus, loading and scene transitions can temporarily stop its RTT render.");
     } else if (submitOn) {
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f),
-                           "No second eye right now -> both eyes get MAIN (mono)");
-        ImGui::TextDisabled("Expected in menus and while loading. If it stays here in gameplay: "
-                            "the VRCAM component is off, or vrcam.json names a camera the player "
-                            "entity does not carry.");
+                           "Waiting for the first recognised VRCAM frame -> MAIN fallback");
+        ImGui::TextDisabled("Expected before gameplay is ready. If it stays here in gameplay, "
+                            "check the world RTT target and its player fallback below.");
     } else {
-        ImGui::TextDisabled("Stereo submit off -> both eyes get MAIN (mono)");
+        ImGui::TextDisabled("Stereo submit off -> both eye images use MAIN");
     }
     if (eyeEverProduced)
-        ImGui::TextDisabled("vrcam eye age %u ms  (stale over %u)   eye submits %llu",
-                            eyeAge, CyberpunkVR_StereoEyeMaxAgeMs,
-                            static_cast<unsigned long long>(CyberpunkVR_DebugStereoEyeSubmits));
+        ImGui::TextDisabled("vrcam eye age %u ms  (stale over %u)",
+                            eyeAge, CyberpunkVR_StereoEyeMaxAgeMs);
     else
         ImGui::TextDisabled("vrcam eye: never produced a frame");
+    ImGui::TextDisabled("XR second-eye source: %s   VRCAM copies %llu   MAIN fallback copies %llu",
+                        CyberpunkVR_StereoEyeSourceName(),
+                        static_cast<unsigned long long>(CyberpunkVR_DebugStereoEyeSubmits),
+                        static_cast<unsigned long long>(CyberpunkVR_DebugStereoEyeFallbacks));
     ImGui::Separator();
 
     bool submit = submitOn;
@@ -475,15 +499,26 @@ void DrawStereoControls() {
     // Forces the RTT component's isEnabled through the game's RTTI (the CET side re-asserts it,
     // so it survives a reload/respawn). Off means the engine stops rendering the second view
     // entirely, not just our stereo shift -- which is the cheapest way back to plain mono.
-    bool vrcamOn = CyberpunkVR_VrcamEnabled != 0;
-    if (ImGui::Checkbox("VRCAM component  (RTTI Toggle: force ON/OFF)", &vrcamOn))
+    bool vrcamOn = vrcamRequested;
+    if (ImGui::Checkbox("VRCAM render component  (RTTI Toggle: force ON/OFF)", &vrcamOn))
         CyberpunkVR_SetVrcamEnabled(vrcamOn ? 1u : 0u);
-    ImGui::TextDisabled("component %s   camera %s",
-                        CyberpunkVR_VrcamComponentName(), CyberpunkVR_VrcamCameraName());
-    ImGui::TextDisabled("view nodes: main %llu   other %llu   vrcam %llu",
+    ImGui::TextDisabled("world target %s   camera %s",
+                        worldComponent, CyberpunkVR_VrcamCameraName());
+    ImGui::TextDisabled("world pose path: SetWorldTransform   native +0xE0/+0xF0 overwrite %s",
+                        CyberpunkVR_WorldVrcamDirectWrite ? "ON" : "OFF");
+    ImGui::TextDisabled("component writer history: world selected %llu   player component %llu",
+                        static_cast<unsigned long long>(CyberpunkVR_DebugPatchCamWorldVrcam),
+                        static_cast<unsigned long long>(CyberpunkVR_DebugPatchCamVrcam));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Historical writer matches do not prove that the component stayed enabled\n"
+                          "or that its render reached the headset.");
+    ImGui::TextDisabled("view-key nodes: key 0 %llu   unmatched %llu   selected VRCAM %llu",
                         static_cast<unsigned long long>(CyberpunkVR_DebugViewKeyMainNodes),
                         static_cast<unsigned long long>(CyberpunkVR_DebugViewKeyOtherNodes),
                         static_cast<unsigned long long>(CyberpunkVR_DebugVrcamNodeHits));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Counts come from Stereo's active NodeDispatch hook. key 0 is not assumed\n"
+                          "to mean MAIN; selected VRCAM is the configured virtualCameraName hash.");
 
     // Separate second swapchain + window mirroring the VRCAM eye (for OBS / desktop preview).
     // Costs a per-frame copy, so it is off unless asked for.
