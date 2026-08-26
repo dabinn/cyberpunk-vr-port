@@ -57,6 +57,14 @@ struct LiveControlsUiState {
     // Optional chord actions only: VR recenter and F10 overlay toggle. D-pad
     // and Back/Select remain active regardless of this value.
     int xrExtraChordActions;
+    // Classic controller routing. On-foot and vehicle parents keep their child values while off;
+    // Scanner is an independent context-level bypass for the port's custom remapping.
+    int xrClassicOnFootControls;
+    int xrClassicDisableLsSprint;
+    int xrClassicDisableRsDashCrouch;
+    int xrClassicVehicleControls;
+    int xrClassicSwapTriggersGrips;
+    int xrClassicScannerControls;
     // Mono submit safety flags. Defaults 0 keep CP2077 mono mode from hanging on
     // the menu (see cybervrport-controller-bindings memory for the trace).
     int xrMonoXQueueWait;

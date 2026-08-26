@@ -906,15 +906,73 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
 
             ImGui::Separator();
+            ImGui::TextUnformatted("Classic Controller Mapping");
+            changed |= CheckboxInt("Use classic General / On foot controls",
+                                   &state.xrClassicOnFootControls);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Restore native on-foot controller buttons, including B = Dodge and\n"
+                                  "R3 = Crouch. B and R3 no longer operate the physical reload.");
+            }
+            ImGui::Indent();
+            if (state.xrClassicOnFootControls == 0) ImGui::BeginDisabled();
+            changed |= CheckboxInt("Disable Sprint on LS-Y", &state.xrClassicDisableLsSprint);
+            changed |= CheckboxInt("Disable Dash / Crouch on RS-Y",
+                                   &state.xrClassicDisableRsDashCrouch);
+            if (state.xrClassicOnFootControls == 0) ImGui::EndDisabled();
+            ImGui::Unindent();
+
+            ImGui::Spacing();
+            changed |= CheckboxInt("Use classic vehicle controls", &state.xrClassicVehicleControls);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Disable physical wheel grab, controller-tilt steering, hub interaction,\n"
+                                  "and the weapon-out trigger/throttle-latch driving mode. Saved settings\n"
+                                  "for those features are preserved.");
+            }
+            ImGui::Indent();
+            if (state.xrClassicVehicleControls == 0) ImGui::BeginDisabled();
+            changed |= CheckboxInt("Swap Triggers / Grips when driving",
+                                   &state.xrClassicSwapTriggersGrips);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("While driving: VR Triggers become LB / RB, and analog Grips become\n"
+                                  "LT / RT. A held Grip must be released before live switching takes effect.");
+            }
+            if (state.xrClassicVehicleControls == 0) ImGui::EndDisabled();
+            ImGui::Unindent();
+
+            ImGui::Spacing();
+            changed |= CheckboxInt("While using Scanner", &state.xrClassicScannerControls);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Keep the ear gesture and Scanner toggle, but use the game's normal\n"
+                                  "controller bindings instead of the port's Scanner remapping.");
+            }
+
+            ImGui::Separator();
             ImGui::TextUnformatted("Current binding (on foot):");
-            ImGui::BulletText("Left stick    - walk / jog | FULL forward, HELD 0.2 s = sprint");
-            ImGui::BulletText("Right stick X - turn camera (Y = pitch unless Disable Mouse Y is on)");
-            ImGui::BulletText("Right stick FULL up   - DASH / dodge (once per push)");
-            ImGui::BulletText("Right stick FULL down - crouch (R3)");
-            ImGui::BulletText("Right thumb click - slide release: racks the weapon");
+            if (state.xrClassicOnFootControls != 0) {
+                ImGui::BulletText(state.xrClassicDisableLsSprint != 0
+                    ? "Left stick    - walk / jog (LS-Y Sprint disabled)"
+                    : "Left stick    - walk / jog | FULL forward, HELD 0.2 s = sprint");
+                ImGui::BulletText("Right stick X/Y - turn / pitch (Y requires Disable Mouse Y off)");
+                if (state.xrClassicDisableRsDashCrouch != 0) {
+                    ImGui::BulletText("Right stick Y - camera pitch only; Dash / Crouch disabled");
+                } else {
+                    ImGui::BulletText("Right stick FULL up/down - Dash / Crouch");
+                }
+                ImGui::BulletText("Right thumb click - crouch (R3)");
+            } else {
+                ImGui::BulletText("Left stick    - walk / jog | FULL forward, HELD 0.2 s = sprint");
+                ImGui::BulletText("Right stick X - turn camera (Y = pitch unless Disable Mouse Y is on)");
+                ImGui::BulletText("Right stick FULL up   - DASH / dodge (once per push)");
+                ImGui::BulletText("Right stick FULL down - crouch (R3)");
+                ImGui::BulletText("Right thumb click - slide release: racks the weapon");
+            }
             ImGui::BulletText("Right A       - JUMP");
-            ImGui::BulletText("Right B       - drop the magazine (weapon in hand)");
-            ImGui::BulletText("                holstered it is the game's B again -- close the phone, back out");
+            if (state.xrClassicOnFootControls != 0) {
+                ImGui::BulletText("Right B       - Dodge / game's native B");
+            } else {
+                ImGui::BulletText("Right B       - drop the magazine (weapon in hand)");
+                ImGui::BulletText("                holstered it is the game's B again -- close the phone, back out");
+            }
             ImGui::BulletText("Left  X       - reload / interact");
             ImGui::BulletText("Left  Y       - weapon switch");
             ImGui::BulletText("Right trigger - fire | Left trigger - aim / melee block");
@@ -924,19 +982,18 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             ImGui::BulletText("                squeeze again to close. The hand is free in between");
             ImGui::BulletText("Left  menu button - pause menu");
             ImGui::Spacing();
-            ImGui::TextUnformatted("While the scanner is open, the same hand works it:");
-            ImGui::BulletText("Left stick UP / DOWN, to the stop - page the quickhack list");
-            ImGui::BulletText("                below the stop the stick still walks; only a full push pages");
-            ImGui::BulletText("Left  X       - apply the selected hack (a plain press)");
-            ImGui::BulletText("Right trigger - tag the target. It does NOT fire while the scanner is up");
-            ImGui::BulletText("Right stick click - change the scanner tab");
-            ImGui::BulletText("Left trigger + right stick - zoom in / out");
-            ImGui::Spacing();
-            ImGui::TextUnformatted("D-Pad, as a chord: HOLD the LEFT stick click, pick with the RIGHT stick");
-            ImGui::BulletText("Right stick UP / DOWN / LEFT / RIGHT -> D-Pad UP / DOWN / LEFT / RIGHT");
-            ImGui::BulletText("                to the stop, like every other gesture here -- a resting");
-            ImGui::BulletText("                thumb must not step a list");
-            ImGui::BulletText("Released with no direction = the vanilla left stick click (L3)");
+            if (state.xrClassicScannerControls != 0) {
+                ImGui::TextUnformatted("While the scanner is open: use the game's controller bindings");
+                ImGui::BulletText("The ear gesture still toggles Scanner; D-pad remains available by chord");
+            } else {
+                ImGui::TextUnformatted("While the scanner is open, the same hand works it:");
+                ImGui::BulletText("Left stick UP / DOWN, to the stop - page the quickhack list");
+                ImGui::BulletText("                below the stop the stick still walks; only a full push pages");
+                ImGui::BulletText("Left  X       - apply the selected hack (a plain press)");
+                ImGui::BulletText("Right trigger - tag the target. It does NOT fire while the scanner is up");
+                ImGui::BulletText("Right stick click - change the scanner tab");
+                ImGui::BulletText("Left trigger + right stick - zoom in / out");
+            }
             ImGui::Spacing();
             ImGui::TextUnformatted("In a vehicle (the gestures above do not apply):");
             ImGui::BulletText("The camera is HELD IN FIRST PERSON: the perspective toggle does nothing,");
@@ -944,7 +1001,14 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             ImGui::BulletText("HOLD X        - get out. B is never the exit here, so no stray press ejects you");
             ImGui::BulletText("Right A       - confirm a dialogue line (it is X on foot, and X is the");
             ImGui::BulletText("                exit in here). The handbrake on A keeps working");
-            ImGui::BulletText("Left trigger  - brake | Right trigger - throttle (see the Vehicle section)");
+            if (state.xrClassicVehicleControls != 0 && state.xrClassicSwapTriggersGrips != 0) {
+                ImGui::BulletText("Triggers - LB / RB | Grips - brake / throttle");
+            } else {
+                ImGui::BulletText("Left trigger  - brake | Right trigger - throttle (see the Vehicle section)");
+            }
+            if (state.xrClassicVehicleControls != 0) {
+                ImGui::BulletText("Physical wheel and weapon-out throttle latch - disabled");
+            }
 
             ImGui::TextWrapped("Buttons follow each runtime's interaction profile (Touch / Index / "
                                "Vive / WMR). Customize the actual key bindings in the game's "
