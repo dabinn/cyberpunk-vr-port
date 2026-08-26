@@ -276,41 +276,74 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // (With a weapon actually drawn the phone still cannot be closed by B. Fixing that needs a
     // phone-open signal, and the game's own is the blackboard bool UI_ComDevice.ContactsActive --
     // which is what PhoneSystem.IsPhoneOpened reads. Not wired yet; this covers the common case.)
-    const uint16_t kPortOwnedButtons =
+    const bool gameplayScreen = (g_menuModeValue == 0);
+    const bool mounted = g_isInVehicle;
+    const bool classicOnFoot = !mounted && (g_liveControls.xrClassicOnFootControls != 0);
+    const bool classicVehicle = mounted && (g_liveControls.xrClassicVehicleControls != 0);
+
+    // A live switch into grip-driven pedals must not reinterpret a grip that was already holding the
+    // wheel as full throttle or brake. Both grips have to return to rest before the new owner starts.
+    static bool s_classicSwapRequestedPrev = false;
+    static bool s_classicSwapWaitForGripRelease = false;
+    const bool classicSwapRequested = classicVehicle && gameplayScreen
+        && (g_liveControls.xrClassicSwapTriggersGrips != 0);
+    if (classicSwapRequested && !s_classicSwapRequestedPrev) {
+        s_classicSwapWaitForGripRelease = vr.leftGrip > 0.05f || vr.rightGrip > 0.05f;
+    }
+    if (!classicSwapRequested) {
+        s_classicSwapWaitForGripRelease = false;
+    } else if (s_classicSwapWaitForGripRelease
+               && vr.leftGrip <= 0.05f && vr.rightGrip <= 0.05f) {
+        s_classicSwapWaitForGripRelease = false;
+    }
+    s_classicSwapRequestedPrev = classicSwapRequested;
+    const bool classicSwapDrivingInputs =
+        classicSwapRequested && !s_classicSwapWaitForGripRelease;
+
+    const uint16_t kPortOwnedButtons = classicOnFoot ? 0 :
         static_cast<uint16_t>(0x0080 | (g_hasWeaponEquipped ? 0x2000 : 0x0000));
     // X AND B BOTH, and B is the correction: letting the raw B through in a car looked more
     // forgiving and was the opposite. B is ExitVehicle_Button, so a stray press ejects the
     // player from a moving car -- which reads as being thrown across the street, not as a
     // button. Exit is a deliberate X press now, translated below; nothing else can eject.
     constexpr uint16_t kVehicleOwnedButtons = 0x4000 | 0x2000;   // X = get out, B = never by accident
-    const bool gameplayScreen = (g_menuModeValue == 0);
-    const bool mounted = g_isInVehicle;
     uint16_t ownedNow = 0;
     if (gameplayScreen) ownedNow = mounted ? kVehicleOwnedButtons : kPortOwnedButtons;
+    uint16_t vrButtons = vr.buttons;
+    if (classicSwapDrivingInputs) {
+        // Shoulder buttons come from the VR triggers below, not from any grip-derived runtime bit.
+        vrButtons &= static_cast<uint16_t>(~(0x0100 | 0x0200));
+    }
     pState->Gamepad.wButtons |=
-        (vr.buttons & static_cast<uint16_t>(~ownedNow));
+        (vrButtons & static_cast<uint16_t>(~ownedNow));
 
-    // MENU-ONLY: right grip = RB (right shoulder) for tab navigation to the RIGHT,
-    // symmetric with the left grip's LB. The right grip is deliberately NEVER merged as
-    // RB in gameplay -- there it is reserved for the hand-to-holster equip (published as
-    // shared[49] above) and the D-pad modifier, and RB is a gameplay action that would
-    // misfire on every holster reach. Menus run no holster logic and can't fire gameplay
-    // actions, so the grip is safe as RB while one is open. Menu state = the native
-    // menu-mode hook OR the redscript world-map bridge flag (shared[81]).
+    // Route one complete right-grip press to either RB or the virtual holster. The CET
+    // holster classifier publishes whether the hand is inside a holster zone; latch that
+    // decision on the press edge so moving across a boundary while held cannot switch paths.
+    // Wheel, smoke and unavailable-classifier states publish a non-RB route. Menus retain
+    // their unconditional RB tab navigation even if they open after the grip was pressed.
     {
+        static bool s_rightGripWasDown = false;
+        static bool s_rightGripRoutesToRb = false;
         bool menuOpenForRb = (g_menuModeValue != 0);
+        float* sh = GetShotShared();
         if (!menuOpenForRb) {
-            if (float* sh = GetShotShared()) {
-                if (reinterpret_cast<volatile uint32_t*>(sh)[81] != 0u) menuOpenForRb = true;
-            }
+            if (sh && reinterpret_cast<volatile uint32_t*>(sh)[81] != 0u) menuOpenForRb = true;
         }
-        if (menuOpenForRb && vr.rightGrip >= 0.7f) {
+        const bool rightGripDown = vr.rightGrip >= 0.7f;
+        if (rightGripDown && !s_rightGripWasDown) {
+            const int route = sh ? static_cast<int>(sh[vrshared::kRightGripRoute]) : 0;
+            s_rightGripRoutesToRb = !mounted && route == 1;
+        }
+        if (!classicSwapDrivingInputs && rightGripDown && (menuOpenForRb || s_rightGripRoutesToRb)) {
             pState->Gamepad.wButtons |= 0x0200; // XINPUT_GAMEPAD_RIGHT_SHOULDER
         }
+        if (!rightGripDown) s_rightGripRoutesToRb = false;
+        s_rightGripWasDown = rightGripDown;
         // And the LEFT grip's LB, on the same terms. It used to be emitted unconditionally from the frameloop,
         // which meant every gameplay squeeze of the left grip opened the SCANNER -- LB's gameplay binding. That
         // hand now grabs the magazine for the reload, so the two cannot share the input.
-        if (menuOpenForRb && vr.leftGrip >= 0.7f) {
+        if (!classicSwapDrivingInputs && menuOpenForRb && vr.leftGrip >= 0.7f) {
             pState->Gamepad.wButtons |= 0x0100; // XINPUT_GAMEPAD_LEFT_SHOULDER
         }
     }
@@ -320,8 +353,12 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // mod sets IsBlocking/IsDeflecting directly, damageManager.script mitigates on those stats,
     // and the PSM Block state with its AimWalk/sprint debuffs is never entered. A physical left
     // trigger still reaches the game's own 'MeleeBlock' action through this merge as in flat.)
-    BYTE lt = FloatToBYTE(vr.leftTrigger);
-    BYTE rt = FloatToBYTE(vr.rightTrigger);
+    BYTE lt = FloatToBYTE(classicSwapDrivingInputs ? vr.leftGrip : vr.leftTrigger);
+    BYTE rt = FloatToBYTE(classicSwapDrivingInputs ? vr.rightGrip : vr.rightTrigger);
+    if (classicSwapDrivingInputs) {
+        if (vr.leftTrigger >= 0.7f) pState->Gamepad.wButtons |= 0x0100;
+        if (vr.rightTrigger >= 0.7f) pState->Gamepad.wButtons |= 0x0200;
+    }
     // The VR left trigger reaches the gamepad LT (aim / zoom, melee block, VEHICLE BRAKE) unless
     // the smoking lighter has a claim on it, which is only true on foot with empty hands.
     //
@@ -427,6 +464,11 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         s_prevGesture = s_gesture;
     }
 
+    // Keep the spatial gesture and its LB latch, but let the game's Scanner context own the
+    // ordinary controller mapping when the Classic Scanner option is enabled.
+    const bool scannerRemapActive = scannerHold
+        && (g_liveControls.xrClassicScannerControls == 0);
+
     // ---- THE SCANNER, WORKED WITH THE HAND THAT RAISED IT ---------------------------------------
     //
     // WHAT THE GAME LISTENS FOR, read out of its own files rather than guessed:
@@ -478,7 +520,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         // while X was both the page-down and the apply. The knob stays exported so an existing
         // vrport.ini keeps parsing.
 
-        if (scannerHold && CyberpunkVR_ScannerFaceNav != 0) {
+        if (scannerRemapActive && CyberpunkVR_ScannerFaceNav != 0) {
             const bool xDown = (vr.buttons & 0x4000) != 0;
             const bool yDown = (vr.buttons & 0x8000) != 0;
 
@@ -552,14 +594,15 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // Face buttons B / Y as flags, for gestures that want a button (the physical reload drops the magazine on
     // B). Y still reaches the game through the merge above; B no longer does -- it is the port's now, so a
     // magazine drop cannot also dodge.
-    OpenXRManager::Get().SetSharedSlot(vrshared::kRightSecondaryBtn, (vr.buttons & 0x2000) ? 1.0f : 0.0f);
+    OpenXRManager::Get().SetSharedSlot(vrshared::kRightSecondaryBtn,
+        (!classicOnFoot && (vr.buttons & 0x2000)) ? 1.0f : 0.0f);
     OpenXRManager::Get().SetSharedSlot(vrshared::kLeftSecondaryBtn,  (vr.buttons & 0x8000) ? 1.0f : 0.0f);
     // The right stick click, which the merge above deliberately does NOT pass on: the physical reload uses it as
     // the slide release. Published as a flag; the Lua side takes the rising edge.
     // The scanner used to hold this click and the publish was suppressed while it did. It fires on
     // the left grip now, so the click means one thing again and needs no guard.
     OpenXRManager::Get().SetSharedSlot(vrshared::kRightStickClick,
-                                       (vr.buttons & 0x0080) ? 1.0f : 0.0f);
+                                       (!classicOnFoot && (vr.buttons & 0x0080)) ? 1.0f : 0.0f);
     // One switch for the whole port. The launcher's DEBUG checkbox already gates the plugin's own
     // chatter; republishing it here lets the CET bridges obey it too, live, without each of them
     // growing a setting of its own that nobody remembers to turn off.
@@ -568,7 +611,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // so the game enters its NATIVE melee-attack state (full native damage/combo/numbers/markers), then
     // count it down. Otherwise merge the physical trigger into RT normally (guns shooting / held attack).
     float meleeImpulse = OpenXRManager::Get().GetSharedSlot(29);
-    if (meleeImpulse > 0.5f) {
+    if (!classicSwapDrivingInputs && meleeImpulse > 0.5f) {
         pState->Gamepad.bRightTrigger = 255;
         OpenXRManager::Get().SetSharedSlot(29, meleeImpulse - 1.0f);
     } else {
@@ -581,15 +624,19 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     //   2 = PRESS it fully. A hammer already cocked lets go under a touch -- single action -- so the port decides
     //       where in the travel the shot falls instead of the game's own threshold.
     const float trgMode = OpenXRManager::Get().GetSharedSlot(vrshared::kTriggerOverride);
-    if (trgMode > 1.5f)      pState->Gamepad.bRightTrigger = 255;
-    else if (trgMode > 0.5f) pState->Gamepad.bRightTrigger = 0;
+    if (!classicSwapDrivingInputs) {
+        if (trgMode > 1.5f)      pState->Gamepad.bRightTrigger = 255;
+        else if (trgMode > 0.5f) pState->Gamepad.bRightTrigger = 0;
+    }
 
     // THE SCANNER'S TRIGGER IS A TAG AND NOT A SHOT. While the gesture is held the trigger marks the
     // target (Tag_Button, emitted further down), and a tag that also fires a round is a tag nobody can
     // use where tagging matters: it spends real ammunition and announces the player. Zeroed AFTER the
     // override above so the scanner wins over a cocked hammer, which costs nothing -- one of them wants
     // the left hand at the ear and the other wants it at the weapon, so they cannot both be true.
-    if (scannerHold && CyberpunkVR_ScannerTriggerTag != 0) pState->Gamepad.bRightTrigger = 0;
+    if (scannerRemapActive && CyberpunkVR_ScannerTriggerTag != 0) {
+        pState->Gamepad.bRightTrigger = 0;
+    }
 
     // Left stick = locomotion (always merged when magnitude exceeds the
     // physical pad's so the game uses our values).
@@ -621,7 +668,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // AND IT SENDS A KEY, NOT A D-PAD PRESS. IK_Pad_DigitUp/Down are on UI_MoveUp/UI_MoveDown AND on
     // ZoomIn_Button/ZoomOut_Button, so a synthetic D-pad press paged the list and zoomed at the same
     // time. See SendListKey for the mappings this was read out of.
-    if (scannerHold && CyberpunkVR_ScannerFaceNav != 0 && CyberpunkVR_ScannerStickNav != 0 &&
+    if (scannerRemapActive && CyberpunkVR_ScannerFaceNav != 0 && CyberpunkVR_ScannerStickNav != 0 &&
         !g_isInVehicle && (g_menuModeValue == 0)) {
         static int s_navArmedDir = 0;
 
@@ -701,7 +748,8 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     {
         const float bR = cvr::anim::g_wheelBlendRight.load(std::memory_order_relaxed);
         const float bL = cvr::anim::g_wheelBlendLeft.load(std::memory_order_relaxed);
-        if (g_isDriving.load(std::memory_order_relaxed) && (bR > 0.01f || bL > 0.01f)) {
+        if (!classicVehicle && g_isDriving.load(std::memory_order_relaxed)
+            && (bR > 0.01f || bL > 0.01f)) {
             float steer = cvr::anim::g_wheelSteer.load(std::memory_order_relaxed);
             if (steer >  1.0f) steer =  1.0f;
             if (steer < -1.0f) steer = -1.0f;
@@ -721,7 +769,8 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // would eject them. The gesture and its mask stay wired and measured; what is missing is a button
     // that is free while seated, and there is not one. xr_wheel_horn therefore defaults off, and this
     // block is where a replacement goes if one is found.
-    if (g_isDriving.load(std::memory_order_relaxed) && g_liveControls.xrWheelHorn != 0) {
+    if (!classicVehicle && g_isDriving.load(std::memory_order_relaxed)
+        && g_liveControls.xrWheelHorn != 0) {
         if (cvr::anim::g_wheelHornMask.load(std::memory_order_relaxed) != 0) {
             ++CyberpunkVR_DebugWheelHornGestures;   // counted, not pressed
         }
@@ -751,7 +800,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         static float s_vehThrottle = 0.0f;
         static LARGE_INTEGER s_vehGunQpc = {};
 
-        vehGunMode = (g_isDriving.load(std::memory_order_relaxed) && g_hasWeaponEquipped
+        vehGunMode = (!classicVehicle && g_isDriving.load(std::memory_order_relaxed) && g_hasWeaponEquipped
                       && g_liveControls.xrVehicleGunTrigger != 0);
         if (vehGunMode) {
             LARGE_INTEGER now, freq;
@@ -840,7 +889,10 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         // puts the old outright block back.
         const bool crouchBlocks = (CyberpunkVR_SprintFromCrouch == 0) && crouched;
 
-        const bool detent = (lyDetent > 0.90f) && !g_isInVehicle && !crouchBlocks;
+        const bool disableLsSprint = classicOnFoot
+            && (g_liveControls.xrClassicDisableLsSprint != 0);
+        const bool detent = !disableLsSprint && (lyDetent > 0.90f)
+            && !g_isInVehicle && !crouchBlocks;
         if (detent) s_detentMs += dtMs; else s_detentMs = 0.0;
         const double holdMs = (CyberpunkVR_SprintHoldMs >= 0) ? CyberpunkVR_SprintHoldMs : 200;
         const bool want = detent && (s_detentMs >= holdMs);
@@ -922,6 +974,9 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // ON FOOT ONLY, for the same reason the dash below is: crouching means nothing in a car, and
     // R3 there is VehicleInverseCameraToggle_Button -- so the right stick pushed down was
     // flipping the driving camera. Found while fixing the exit button; same family of bug.
+    const bool disableRsDashCrouch = classicOnFoot
+        && (g_liveControls.xrClassicDisableRsDashCrouch != 0);
+
     // A DEVICE SCREEN IS UP: HAND THE RIGHT STICK'S Y BACK TO THE GAME.
     //
     // The game scrolls a device screen -- a computer's message list, a terminal -- with
@@ -954,7 +1009,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         // and a finger resting at the break point is not a stream of them.
         const bool ltDown = s_ltZoomWas ? (vr.leftTrigger > 0.35f) : (vr.leftTrigger > 0.60f);
         s_ltZoomWas = ltDown;
-        const bool armed = scannerHold && (CyberpunkVR_ScannerZoom != 0) && ltDown
+        const bool armed = scannerRemapActive && (CyberpunkVR_ScannerZoom != 0) && ltDown
                            && !g_isInVehicle && (g_menuModeValue == 0);
         if (armed) {
             float th = CyberpunkVR_ScannerZoomStick;
@@ -976,7 +1031,8 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         }
     }
 
-    const bool wantCrouch = (ry < -0.90f) && !g_isInVehicle && !deviceScreen && !scannerHold
+    const bool wantCrouch = !disableRsDashCrouch && (ry < -0.90f) && !g_isInVehicle
+                            && !deviceScreen && !scannerRemapActive
                             && !DeviceCamActive();   // in a camera the stick aims the camera
     if (wantCrouch) ry = 0.0f;
 
@@ -997,8 +1053,8 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     {
         static int      s_dashArmedDir = 0;   // 1 = fired on this push, waiting for the stick to return
         static uint64_t s_dashUntilMs  = 0;
-        const bool allowDash = (CyberpunkVR_DashStickUp != 0)
-                               && !scannerHold          // the scanner owns this stick
+        const bool allowDash = !disableRsDashCrouch && (CyberpunkVR_DashStickUp != 0)
+                               && !scannerRemapActive   // the port's Scanner mapping owns this stick
                                && !deviceScreen         // the stick is scrolling a screen
                                && !DeviceCamActive()    // in a camera it is aiming the camera
                                && !g_isInVehicle            // in a car the right stick is free look
@@ -1020,7 +1076,9 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
             s_dashUntilMs = 0;
         }
     }
-    if (ry > 0.90f && !deviceScreen) ry = 0.0f;   // consumed, exactly as the crouch half is
+    if (!disableRsDashCrouch && ry > 0.90f && !deviceScreen) {
+        ry = 0.0f;   // consumed, exactly as the crouch half is
+    }
 
     // Suppress pitch from the stick if the user wants HMD-only pitch.
     // ...but never on a device screen: there this axis is not camera pitch at all, it is the
@@ -1149,16 +1207,20 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // Bump packet number on any change so XInput consumers latch it.
     static uint16_t s_lastButtons = 0;
     static uint16_t s_lastSynth = 0;
+    static uint16_t s_lastOutButtons = 0;
     static BYTE s_lastLT = 0, s_lastRT = 0;
     // The trigger bytes compared here are the MERGED ones, not the raw VR values: the latched vehicle
     // throttle walks bRightTrigger up and down while the VR trigger sits still, and a consumer that
     // only re-reads on a new packet number would never see the trim move.
     const BYTE outLT = pState->Gamepad.bLeftTrigger;
     const BYTE outRT = pState->Gamepad.bRightTrigger;
-    if (vr.buttons != s_lastButtons || synthButtons != s_lastSynth || outLT != s_lastLT || outRT != s_lastRT) {
+    const uint16_t outButtons = pState->Gamepad.wButtons;
+    if (vr.buttons != s_lastButtons || synthButtons != s_lastSynth
+        || outButtons != s_lastOutButtons || outLT != s_lastLT || outRT != s_lastRT) {
         pState->dwPacketNumber++;
         s_lastButtons = vr.buttons;
         s_lastSynth = synthButtons;
+        s_lastOutButtons = outButtons;
         s_lastLT = outLT;
         s_lastRT = outRT;
     }

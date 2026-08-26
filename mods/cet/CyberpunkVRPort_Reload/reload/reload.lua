@@ -1131,10 +1131,8 @@ M.dbg = function()
 end
 
 
--- WHICH HANDS THE STEERING WHEEL OWNS. The wheel grab publishes them in shared[163] (bit0 = right,
--- bit1 = left), raised on PROXIMITY so there is no press edge to race. A grip that is holding the wheel
--- is not a grip: driving one-handed with a gun out puts the LEFT hand -- this module's magazine hand --
--- on the wheel, which is exactly the case the shoot-while-driving mode exists for.
+-- WHICH HANDS THE VEHICLE CONTROLS OWN. Shared[163] carries bit0 = right and bit1 = left. Wheel grab
+-- raises it on proximity; classic grip pedals raise both. A vehicle-owned grip is not a reload grip.
 --
 -- NOTE THE TWO CONVENTIONS: h == 0 is the LEFT hand in this module, and bit0 is the RIGHT hand there.
 local function wheelOwns(h)

@@ -151,17 +151,16 @@ constexpr int kLeftGripPressed   = 155;
 // smoking one alone in a single session, and as much again from the weapon one. A log nobody can
 // open is a log nobody reads.
 constexpr int kDebugLog          = 156;
-// Face buttons as pressed flags, for gameplay gestures that need a button of their own. The physical reload
-// drops the magazine on B, the way the flat game does -- and the button still reaches the game through the
-// XInput merge, so nothing is taken away by publishing it.
+// Face buttons as pressed flags, for gameplay gestures that need a button of their own. The default mapping
+// gives B to the physical reload; classic on-foot controls instead publish zero here and return B to the game.
 constexpr int kRightSecondaryBtn = 157;   // right B
 constexpr int kLeftSecondaryBtn  = 158;   // left Y
-// The RIGHT STICK CLICK -- and this one is taken AWAY from the game on purpose, unlike the face buttons above.
+// The RIGHT STICK CLICK -- taken away from the game by the default mapping.
 // It was R3 = crouch, but crouching is already the right stick pushed fully DOWN (vr_core: ry < -0.90 asserts R3),
 // so the click itself is redundant and is now the physical reload's SLIDE RELEASE: what a thumb does on a real
 // pistol, instead of reaching a whole hand over the gun. The bit is masked out of the XInput merge, or the game
-// would crouch on every slide release.
-constexpr int kRightStickClick    = 159;   // right stick click (R3), consumed by the port
+// would crouch on every slide release. Classic on-foot controls publish zero and return R3 to the game.
+constexpr int kRightStickClick    = 159;   // right stick click (R3), consumed by the default mapping
 // THE RIGHT TRIGGER, as an ANALOG value and as a channel back. [30] has been the trigger's only channel and it is a
 // FLAG -- pressed past half or not -- which is enough for a melee power modifier and useless for an action that is
 // worked progressively. A revolver's is: the trigger carries the hammer back as it is squeezed, and where the shot
@@ -186,7 +185,8 @@ constexpr int kTriggerOverride    = 161;   // 0 pass / 1 block / 2 force, CET ->
 //
 // The one piece of the driving feature that crosses a boundary, and the reason is the grips: [49] and
 // [155] are read by FOUR CET mods -- the holster equip, the smoking poses, the basketball grab and the
-// reload's magazine hand -- and a grip that is holding the wheel must not also mean any of those. The
+// reload's magazine hand -- and a grip owned by the wheel or classic vehicle pedals must not also mean
+// any of those. The
 // rest of that feature's state (the blends, the steering, the horn, the settings) stayed inside the
 // plugin as plain globals in src/Anim/WheelGrab.cpp: the upstream version published thirteen slots
 // because it had to reach the dxgi proxy, and that proxy is gone.
@@ -194,7 +194,7 @@ constexpr int kTriggerOverride    = 161;   // 0 pass / 1 block / 2 force, CET ->
 // The upstream numbering was [157..169], which in THIS tree is the B and Y buttons, the right stick
 // click, the trigger channel and the reload's owned wrist -- six live slots. Renumbered rather than
 // copied, which is what the graveyard at the top of this file is for.
-constexpr int kWheelArmedMask     = 163;
+constexpr int kWheelArmedMask     = 163; // hands whose grips are owned by the active vehicle control
 // 1 while a DEVICE SCREEN (computer, terminal) is up. redscript -> plugin, written by
 // SetVRDeviceScreen from CyberpunkVRPort_DeviceCam at the same two points the game pushes and
 // pops UIGameContext.DeviceZoom.
@@ -206,4 +206,7 @@ constexpr int kWheelArmedMask     = 163;
 constexpr int kDeviceScreenOpen   = 164;
 constexpr int kWheelArmedRightBit = 1;
 constexpr int kWheelArmedLeftBit  = 2;
+// Right-grip routing selected by the CET holster-zone classifier. 0 = unavailable,
+// 1 = ordinary gameplay RB, 2 = holster/reload/wheel ownership.
+constexpr int kRightGripRoute     = 165;
 } // namespace vrshared
