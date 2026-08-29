@@ -875,6 +875,15 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                                   "Left/Right hand - walks the way the chosen controller points.\n"
                                   "Vehicles always keep game heading.");
             }
+            const bool handDirectedLocomotion = moveSrc == 2 || moveSrc == 3;
+            if (!handDirectedLocomotion) ImGui::BeginDisabled();
+            changed |= CheckboxInt("Use HMD for hand-directed locomotion while armed or aiming",
+                                   &state.xrCombatHmdLocomotion);
+            if (!handDirectedLocomotion) ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("Prevents weapon handling from unintentionally changing your movement direction\n"
+                                  "during combat when using Left hand or Right hand locomotion.");
+            }
 
             ImGui::Separator();
             ImGui::TextUnformatted("Turning (right stick)");
