@@ -87,6 +87,7 @@ struct LiveControls {
     volatile int xrVehicleGunTrigger;   // 1 (default) = with a weapon out in the driver seat the right trigger FIRES (pad RB) and the throttle is latched.
     volatile float xrVehicleThrottleTrim; // how much of the throttle's full travel the left stick adds or removes per second while a weapon is out. Default 0.5.
     volatile int xrPhysicalBodyRotation; // 1 = physical body rotation (avatar body follows HMD yaw). 0 (default) = classic stick/snap heading; vehicles unaffected.
+    volatile int xrAdsRightEyeAlignment; // 1 = move vanilla ADS arms toward the right eye. 0 (default) = keep the authored ADS position.
 };
 
 extern LiveControls g_liveControls;

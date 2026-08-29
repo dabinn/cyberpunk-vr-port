@@ -238,6 +238,7 @@ void PollLiveControls() {
     int xrSnapTurnYawIndex = g_liveControls.xrSnapTurnYawIndex >= 0 && g_liveControls.xrSnapTurnYawIndex <= 3 ? g_liveControls.xrSnapTurnYawIndex : 1;
     int xrImmersiveHolsters = g_liveControls.xrImmersiveHolsters;
     int xrPhysicalBodyRotation = g_liveControls.xrPhysicalBodyRotation;
+    int xrAdsRightEyeAlignment = g_liveControls.xrAdsRightEyeAlignment;
     int xrCutsceneSuspendTier = g_liveControls.xrCutsceneSuspendTier;
     float xrVehHeadOffsetX = g_liveControls.xrVehHeadOffsetX;
     float xrVehHeadOffsetY = g_liveControls.xrVehHeadOffsetY;
@@ -508,6 +509,11 @@ void PollLiveControls() {
             xrPhysicalBodyRotation = intValue;
             continue;
         }
+        if (sscanf_s(line, "xr_ads_right_eye_alignment=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_ads_right_eye_alignment = %d", &intValue) == 1) {
+            xrAdsRightEyeAlignment = intValue;
+            continue;
+        }
         if (sscanf_s(line, "xr_xinput_install=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_xinput_install = %d", &intValue) == 1) {
             xrXInputInstall = intValue;
@@ -707,6 +713,7 @@ void PollLiveControls() {
     g_liveControls.xrLaserDotMode = (xrLaserDotMode < 0) ? 0 : (xrLaserDotMode > 2 ? 2 : xrLaserDotMode);
     g_liveControls.xrMovementControl = xrMovementSource != 0 ? 1 : 0;
     g_liveControls.xrPhysicalBodyRotation = xrPhysicalBodyRotation != 0 ? 1 : 0;
+    g_liveControls.xrAdsRightEyeAlignment = xrAdsRightEyeAlignment != 0 ? 1 : 0;
     g_liveControls.xrCutsceneSuspendTier =
         (xrCutsceneSuspendTier < -1) ? -1 : (xrCutsceneSuspendTier > 4 ? 4 : xrCutsceneSuspendTier);
     g_liveControls.xrDisableMouseY = xrDisableMouseY != 0 ? 1 : 0;
@@ -852,6 +859,7 @@ LiveControlsUiState MakeLiveControlsUiState() {
     state.xrCombatHmdLocomotion = g_liveControls.xrCombatHmdLocomotion;
     state.xrLaserDotMode = g_liveControls.xrLaserDotMode;
     state.xrPhysicalBodyRotation = g_liveControls.xrPhysicalBodyRotation;
+    state.xrAdsRightEyeAlignment = g_liveControls.xrAdsRightEyeAlignment;
     state.xrCutsceneSuspendTier = g_liveControls.xrCutsceneSuspendTier;
     state.xrXInputInstall = g_liveControls.xrXInputInstall;
     state.xrInputActions = g_liveControls.xrInputActions;
@@ -946,6 +954,7 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_combat_hmd_locomotion=%d\n", state.xrCombatHmdLocomotion != 0 ? 1 : 0);
     fprintf(file, "xr_laser_dot_mode=%d\n", state.xrLaserDotMode < 0 ? 0 : (state.xrLaserDotMode > 2 ? 2 : state.xrLaserDotMode));
     fprintf(file, "xr_physical_body_rotation=%d\n", state.xrPhysicalBodyRotation != 0 ? 1 : 0);
+    fprintf(file, "xr_ads_right_eye_alignment=%d\n", state.xrAdsRightEyeAlignment != 0 ? 1 : 0);
     fprintf(file, "xr_cutscene_suspend_tier=%d\n",
             state.xrCutsceneSuspendTier < -1 ? -1 : (state.xrCutsceneSuspendTier > 4 ? 4 : state.xrCutsceneSuspendTier));
     fprintf(file, "xr_xinput_install=%d\n", state.xrXInputInstall != 0 ? 1 : 0);
@@ -1029,6 +1038,7 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
     g_liveControls.xrLaserDotMode =
         (state->xrLaserDotMode < 0) ? 0 : (state->xrLaserDotMode > 2 ? 2 : state->xrLaserDotMode);
     g_liveControls.xrPhysicalBodyRotation = state->xrPhysicalBodyRotation != 0 ? 1 : 0;
+    g_liveControls.xrAdsRightEyeAlignment = state->xrAdsRightEyeAlignment != 0 ? 1 : 0;
     g_liveControls.xrCutsceneSuspendTier =
         (state->xrCutsceneSuspendTier < -1) ? -1
                                            : (state->xrCutsceneSuspendTier > 4 ? 4 : state->xrCutsceneSuspendTier);

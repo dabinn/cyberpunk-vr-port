@@ -242,7 +242,10 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
     const bool nonVrik = g_pSharedHands && g_VRBind <= 0 && CyberpunkVR_NonVrikAdsStabilizer &&
                          g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
     const bool aiming = g_isAiming;
-    const bool active = aiming && (headAim || nonVrik);
+    const bool alignmentEnabled = g_pSharedHands &&
+                                  g_pSharedHands[vrshared::kAdsRightEyeAlignment] > 0.5f;
+    const bool nonVrikEyeAlignment = nonVrik && alignmentEnabled;
+    const bool active = aiming && (headAim || nonVrikEyeAlignment);
 
     AimArmPose* pose = nullptr;
     for (auto& entry : g_aimArmPose) {
@@ -251,7 +254,12 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
         if (!pose && entry.boneBuf == nullptr) pose = &entry;
     }
     if (!active || !pose) {
-        if (!aiming) { s_headAnchorValid = false; s_nonVrikAnchorValid = false; }
+        if (!aiming) {
+            s_headAnchorValid = false;
+            s_nonVrikAnchorValid = false;
+        } else if (!alignmentEnabled) {
+            s_nonVrikAnchorValid = false;
+        }
         s_prevHeadAim = headAim;
         s_prevAiming = aiming;
         return;
@@ -321,7 +329,8 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
         for (int k = 0; k < 3; ++k) s_headCentreOffsetCam[k] = headOffsetCam[k];
         s_headAnchorValid = true;
     }
-    if (nonVrik && aiming && (!s_prevAiming || s_prevHeadAim || !s_nonVrikAnchorValid)) {
+    if (nonVrikEyeAlignment && aiming &&
+        (!s_prevAiming || s_prevHeadAim || !s_nonVrikAnchorValid)) {
         for (int k = 0; k < 3; ++k) s_nonVrikEyeOffsetCam[k] = eyeOffsetCam[k];
         s_nonVrikAnchorValid = true;
     }
@@ -332,13 +341,15 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
 
     float anchor[3], delta[4];
     if (headAim && s_headAnchorValid) {
-        // Head aim: the latched head centre plus the LIVE right-eye orbit, and the arms rotate with
-        // the head so the sight stays on the eye through a head turn.
+        // Head aim always rotates the arms around the latched head centre. The toggle only adds the
+        // live right-eye offset; disabling it keeps the authored cyclopean ADS position.
         float headOff[3];
         VRIK_QuatRotateVec(centreRot, s_headCentreOffsetCam, headOff);
-        for (int k = 0; k < 3; ++k) anchor[k] = camPos[k] + headOff[k] + eyeRight[k];
+        for (int k = 0; k < 3; ++k) {
+            anchor[k] = camPos[k] + headOff[k] + (alignmentEnabled ? eyeRight[k] : 0.0f);
+        }
         for (int k = 0; k < 4; ++k) delta[k] = liveDelta[k];
-    } else if (nonVrik && s_nonVrikAnchorValid) {
+    } else if (nonVrikEyeAlignment && s_nonVrikAnchorValid) {
         // Hand aim: the game still owns the direction, so only the translation moves onto the eye.
         float eyeOff[3];
         VRIK_QuatRotateVec(centreRot, s_nonVrikEyeOffsetCam, eyeOff);
