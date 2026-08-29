@@ -153,23 +153,9 @@ void DrawVRHandsControls() {
                           "for tuning the arm IK. Same as the CET 'Log VR Diag' button.");
     }
 
-    ImGui::Separator();
-    // Physical body rotation (default OFF). Self-contained: read/flip/persist via the
-    // LiveControls bridge so it survives restarts (vrport.ini xr_physical_body_rotation).
     {
         LiveControlsUiState st{};
         GetLiveControlsUiState(&st);
-        bool bodyRot = st.xrPhysicalBodyRotation != 0;
-        if (ImGui::Checkbox("Physical body rotation", &bodyRot)) {
-            st.xrPhysicalBodyRotation = bodyRot ? 1 : 0;
-            SetLiveControlsUiState(&st, 1);
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("OFF (default): classic VR heading -- turn with stick / snap-turn, the head only looks.\n"
-                              "ON: the character physically turns to follow your head, through the game's own\n"
-                              "heading -- so aim, movement and collision follow it. The view stays where you are\n"
-                              "looking and recentring is untouched. Vehicles are unaffected.");
-        }
         // Cutscene VRIK suspend (PR #40). Picks the minimum scene tier at which the plugin fully
         // suspends the body+arm solve so the engine authored cinematic pose plays clean. Persisted
         // through the LiveControls bridge (vrport.ini xr_cutscene_suspend_tier) and republished to
@@ -201,6 +187,21 @@ void DrawVRHandsControls() {
                 "scene tier the avatar is left entirely to the engine's cutscene pose.\n"
                 "'Cinematics (Tier 4+)' is the safe default; lower tiers also suspend during\n"
                 "lighter staged/walk-and-talk moments. Vehicles use their own arms-only path.");
+        }
+
+        ImGui::Separator();
+        // Physical body rotation (default OFF). Self-contained: read/flip/persist via the
+        // LiveControls bridge so it survives restarts (vrport.ini xr_physical_body_rotation).
+        bool bodyRot = st.xrPhysicalBodyRotation != 0;
+        if (ImGui::Checkbox("Physical body rotation", &bodyRot)) {
+            st.xrPhysicalBodyRotation = bodyRot ? 1 : 0;
+            SetLiveControlsUiState(&st, 1);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("OFF (default): classic VR heading -- turn with stick / snap-turn, the head only looks.\n"
+                              "ON: the character physically turns to follow your head, through the game's own\n"
+                              "heading -- so aim, movement and collision follow it. The view stays where you are\n"
+                              "looking and recentring is untouched. Vehicles are unaffected.");
         }
         // The one number the feature has. Everything else -- the rate, when it starts, when it stops --
         // follows from it: whatever is outside the cone is asked for in the frame it appears.
