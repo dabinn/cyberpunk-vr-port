@@ -4,5 +4,5 @@ using System.Reflection;
 [assembly: AssemblyDescription("Standalone installer for Cyberpunk VR Port releases")]
 [assembly: AssemblyCompany("Tofu Express")]
 [assembly: AssemblyProduct("CyberpunkVRPort Auto Installer")]
-[assembly: AssemblyVersion("1.3.0.0")]
-[assembly: AssemblyFileVersion("1.3.0.0")]
+[assembly: AssemblyVersion("1.5.0.0")]
+[assembly: AssemblyFileVersion("1.5.0.0")]

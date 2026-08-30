@@ -9,7 +9,9 @@ $ErrorActionPreference = "Stop"
 
 $payloadRootPath = (Resolve-Path -LiteralPath $PayloadRoot).Path.TrimEnd('\', '/')
 $catalogFile = (Resolve-Path -LiteralPath $CatalogPath).Path
-$lines = [IO.File]::ReadAllLines($catalogFile)
+$catalogText = [IO.File]::ReadAllText($catalogFile)
+$newline = if ($catalogText.Contains("`r`n")) { "`r`n" } else { "`n" }
+$lines = @($catalogText -split "`r?`n")
 $sectionStart = [Array]::IndexOf($lines, "[PayloadFilesEver]")
 if ($sectionStart -lt 0) {
     throw "The catalog does not contain [PayloadFilesEver]: $catalogFile"
@@ -70,5 +72,5 @@ $updatedLines = [Collections.Generic.List[string]]::new()
 for ($index = 0; $index -lt $sectionEnd; $index++) { $updatedLines.Add($lines[$index]) }
 $updatedLines.AddRange($newEntries)
 for ($index = $sectionEnd; $index -lt $lines.Length; $index++) { $updatedLines.Add($lines[$index]) }
-[IO.File]::WriteAllLines($catalogFile, $updatedLines, [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText($catalogFile, ($updatedLines -join $newline), [Text.UTF8Encoding]::new($false))
 Write-Host "Added $($newEntries.Count) exact path(s) to [PayloadFilesEver]."
