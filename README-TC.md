@@ -28,6 +28,16 @@ Auto Installer 也包含 Developer Mode，方便開發者測試本機檔案。
 
 這個 Mod 並不侷限於 VR 控制器。如果你偏好使用手把，甚至鍵盤滑鼠，也可以自由選擇最適合自己的控制方式。
 
+### Classic Controller Mapping
+
+偏好傳統 Xbox／手把操作的玩家，可以選用 **Classic Controller Mapping**，不必採用 v0.1.2 之後加入的部分實體動作與手勢對應。
+
+* **步行時：**恢復遊戲原生的 **B = Dodge** 與 **R3 = Crouch**，B／R3 不再控制 physical reload。也能分別停用搖桿推到底的 **LS Sprint** 與 **RS-Y Dash / Crouch**。
+
+* **駕駛時：**單一的 **Classic Vehicle Controls** 開關會一併略過 physical wheel grab、controller-tilt steering、hub interaction，以及拔出武器時的 trigger／油門切換；駕駛時的 **Swap Triggers / Grips** 仍是獨立選項。
+
+* **Scanner：**保留左耳 Scanner 手勢。開啟 Scanner 後，改用遊戲正常的手把綁定，不使用 VR Port 自訂的 Scanner remapping。
+
 ## VR 控制器改進
 
 * **完整對應所有 Xbox 手把按鍵。** 已補上原版 Mod 缺少的輸入，現在可以透過 VR 控制器使用所有 Xbox 手把按鍵。
@@ -60,8 +70,27 @@ Auto Installer 也包含 Developer Mode，方便開發者測試本機檔案。
 
 * **ADS 使用右眼作為瞄準眼。** 使用 Head Aim 而非 Hand Aim 時，進入 ADS 會自動將武器瞄具移到右眼前方，而不是停在兩眼之間。高倍率瞄準時尤其明顯。
 
-* **實體身體旋轉系統已重新改寫。** 角色現在會跟隨頭部旋轉，而不會出現原版實作中令人不適的視角跳動。同時保留左右各 `45°` 的自由轉頭範圍，因此轉頭並不會直接鎖定身體前進方向。
+* **Physical Body Rotation 已重新改寫。** 角色身體會透過遊戲本身的 heading 跟隨實際頭部旋轉，不會直接拖動玩家視角或造成跳動。Free-look cone 可在 F10 調整，目前預設為 `25°`。Recenter 行為也已重新處理，不會再因 Physical Body Rotation 搞亂身體與視角的對齊；PBR 關閉時保留遊戲原生 recenter，只有開啟時才由 Mod 對齊 body／base rotation。
 
+### 更漂亮、更真實的 Laser Dot
+
+外部 Laser Dot 的視覺效果已重新製作，現在帶有明亮核心、柔和光暈與透明漸層，看起來更接近真正的雷射點，不再只是單純的紅色圓點。
+
+[觀看新版 Laser Dot 的實際效果](https://www.youtube.com/watch?v=HIZhhOGr0Ms)
+
+![TE4 新版 Laser Dot](images/te4-pretty-laser-dot.png)
+
+**Spot Radius** 可在 F10 選單中自訂。Dot rendering 也會依視角與角尺寸調整顯示，減少不同 VR rendering resolution 與頭戴裝置解析度造成的大小差異。
+
+Laser Dot 提供三種模式：
+
+* **Steady projection：**簡單、穩定的立體投影。
+
+* **Real world point：**將 Laser Dot 放在武器前方真實的 3D 空間位置。
+
+* **Surface raycast：**從槍口射出指向 ray，將 Laser Dot 放在實際命中的表面，表現更像真正的槍載雷射。沒有命中時會回到 **Steady projection**，不會讓 Laser Dot 消失或亂跳；另可開啟 **Scale with distance**，讓看起來的大小隨實際命中距離變化。
+
+[觀看 Surface Raycast 如何追蹤實際表面](https://www.youtube.com/watch?v=lIXc0hclnn0)
 
 ## 控制器設定
 

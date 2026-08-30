@@ -30,6 +30,14 @@ If you prefer to manage all your mods with Vortex, the Tofu Express archive layo
 
 The mod is not limited to VR controllers. If you prefer a gamepad or even keyboard and mouse, you can choose whichever control scheme suits you best.
 
+### Classic Controller Mapping
+
+**Classic Controller Mapping** is an optional mode for players who prefer traditional Xbox/gamepad-style controls instead of some of the physical and gesture mappings introduced in v0.1.2 and later.
+
+- **On foot:** restores native **B = Dodge** and **R3 = Crouch**, so those buttons no longer control physical reload. Full-stick **LS Sprint** and **RS-Y Dash / Crouch** can also be disabled separately.
+- **In vehicles:** a single **Classic Vehicle Controls** switch bypasses physical wheel grab, controller-tilt steering, hub interaction, and weapon-out trigger/throttle routing as a group. **Swap Triggers / Grips** remains available as a separate driving option.
+- **Scanner:** keeps the left-ear Scanner gesture, then uses the game's normal controller bindings while the Scanner is open instead of the VR Port's custom Scanner remapping.
+
 ## VR Controller Improvements
 
 - **Complete mapping for every Xbox controller button.** The inputs missing from the original mod have been added, so every Xbox controller button can now be accessed through VR controllers.
@@ -46,12 +54,31 @@ The mod is not limited to VR controllers. If you prefer a gamepad or even keyboa
 
 - **Fixed vertical view control.** Turning off **Disable Mouse Y** now correctly restores vertical view control through the mouse or right stick, giving advanced players more control.
 - **Decoupled VR Head Aim** is designed for players who prefer a gamepad. Unlike traditional head aiming—sometimes jokingly called "gun-face"—head and body rotation are independent. You can freely aim the weapon with your head without changing the body's facing direction.
+
 - **Bullets now originate from the live muzzle.** Head Aim no longer uses the original "shooting with your eyes" calculation. Both Head Aim and Hand Aim now use the weapon's current muzzle position and direction, so the laser dot, weapon sight, and actual point of impact share the same firing reference.
 - **Hip-fire and ADS aim stay aligned.** Raising the weapon into ADS no longer shifts it away from the original aiming point. Even with VRIK disabled, the mod tries to preserve the aiming direction from before entering ADS.
 - **The external muzzle dot is more stable during fast head turns.** Long trails and multiple separated dots are greatly reduced.
 - **Weapon sights stay aligned with the external dot.** Reflex reticles, sniper-scope crosshairs, the external muzzle dot, and the magnified ADS view no longer drift apart as the head turns.
 - **ADS uses the right eye as the aiming eye.** When using Head Aim instead of Hand Aim, ADS automatically moves the weapon sight to the right eye rather than leaving it between both eyes. This is especially noticeable at high magnification.
-- **Physical body rotation has been rewritten.** The character now follows head rotation without the uncomfortable view jumps caused by the original implementation. It also preserves `45°` of free look to either side, so turning your head does not directly lock the body's forward movement direction.
+- **Physical Body Rotation has been rewritten.** The character's body now follows physical head rotation through the game's own heading, without directly dragging or snapping the player's view. The free-look cone is adjustable from F10 and defaults to `25°`. Recenter behavior has also been reworked so Physical Body Rotation no longer disrupts body/view alignment: with PBR off, the game's native recenter behavior is preserved; with PBR on, the mod aligns its body and base rotation correctly.
+
+### Improved, More Realistic Laser Dot
+
+The external laser dot has been visually rebuilt with a bright central core, soft surrounding glow, and transparent falloff. It now looks much closer to a real laser dot instead of a simple flat red circle.
+
+[Watch the redesigned Laser Dot in action](https://www.youtube.com/watch?v=HIZhhOGr0Ms)
+
+![TE4 redesigned Laser Dot](images/te4-pretty-laser-dot.png)
+
+The **Spot Radius** can be customized from the F10 menu. View- and angular-size-aware rendering also keeps its apparent size more consistent across different VR rendering and headset resolutions.
+
+Choose from three Laser Dot modes:
+
+- **Steady projection:** a simple, stable stereo projection.
+- **Real world point:** places the dot at a real point in 3D space ahead of the weapon.
+- **Surface raycast:** casts a pointing ray from the weapon muzzle and places the dot on the actual surface it hits, behaving more like a real weapon-mounted laser. If the ray misses, it falls back to **Steady projection**, so the dot does not disappear or jump unpredictably. An optional **Scale with distance** setting can vary its apparent size with the actual hit distance.
+
+[Watch Surface Raycast tracking real surfaces](https://www.youtube.com/watch?v=lIXc0hclnn0)
 
 ## Controller Setup
 
