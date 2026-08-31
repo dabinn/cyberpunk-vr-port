@@ -656,6 +656,12 @@ bool DrawLiveControls(LiveControlsUiState& state) {
         }
 
         if (ImGui::BeginTabItem("Controls")) {
+            changed |= CheckboxInt("Allow Non-First-Person Views", &state.xrAllowNonFppViews);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Allow the game's non-first-person views and enable the generic VR camera path.\n"
+                                  "Off keeps Dari's camera handling. Surveillance/device takeover remains on its\n"
+                                  "dedicated bridge in either mode.");
+            }
             // Physical body rotation is gameplay heading policy, not VRIK calibration. Keep the
             // whole feature together here: toggle, free-look threshold, and its live readout.
             changed |= CheckboxInt("Physical body rotation", &state.xrPhysicalBodyRotation);
@@ -1132,8 +1138,6 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
             ImGui::Spacing();
             ImGui::TextUnformatted("In a vehicle (the gestures above do not apply):");
-            ImGui::BulletText("The camera is HELD IN FIRST PERSON: the perspective toggle does nothing,");
-            ImGui::BulletText("                and a car entered in third person is put back");
             ImGui::BulletText("HOLD X        - get out. B is never the exit here, so no stray press ejects you");
             ImGui::BulletText("Right A       - confirm a dialogue line (it is X on foot, and X is the");
             ImGui::BulletText("                exit in here). The handbrake on A keeps working");
