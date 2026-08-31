@@ -119,6 +119,7 @@ void InitRuntimePaths() {
     g_liveControls.xrClassicDisableLsSprint = 0;
     g_liveControls.xrClassicDisableRsDashCrouch = 0;
     g_liveControls.xrClassicVehicleControls = 0;
+    g_liveControls.xrAllowNonFppViews = 0;
     g_liveControls.xrClassicSwapTriggersGrips = 0;
     g_liveControls.xrClassicScannerControls = 0;
 
