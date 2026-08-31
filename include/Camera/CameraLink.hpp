@@ -99,6 +99,23 @@ void LocatedCameraFramePublish(const LocatedCameraFrame& f);
 // false when no frame has been published yet or a consistent read could not be taken.
 bool LocatedCameraFrameRead(LocatedCameraFrame* out);
 
+// ---- the last authoritative MAIN render camera ------------------------------------------------
+//
+// Published from FinalCamera only when the dispatcher says this is MAIN (view key 0). Unlike
+// g_camObjMain, which is specifically the player's FPP camera component, this remains the actual
+// rendered MAIN when the game hands authority to a vehicle orbit camera, cutscene camera, terminal,
+// surveillance camera, or another director-owned view.
+struct FinalMainCameraFrame {
+    float worldPos[3];
+    float worldQuat[4];
+    uint64_t timestampUs;
+    uint64_t callbackHit;
+    uint32_t locateSequence;
+    uint32_t sequence;
+};
+void FinalMainCameraFramePublish(const FinalMainCameraFrame& f);
+bool FinalMainCameraFrameRead(FinalMainCameraFrame* out);
+
 // ---- the view frame handed to the solve --------------------------------------------------------
 //
 // ONE STRUCT, ONE INSTANT, AND THAT IS THE WHOLE POINT.

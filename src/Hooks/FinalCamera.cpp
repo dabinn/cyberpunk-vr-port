@@ -71,6 +71,23 @@ extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
         if (isMain) {
             float camq[4] = {};
             if (ReadFloatArraySafe(rsiPtr + 4, camq, 4) && IsPlausibleUnitQuaternion(camq)) {
+                // Dispatcher MAIN (view key 0) is the camera authority, not the player FPP
+                // component. Publish the rendered eye pose so the selected VRCAM can follow any
+                // camera the game makes MAIN without knowing which scene or camera class did it.
+                const int32_t* posFP = reinterpret_cast<const int32_t*>(rsiPtr);
+                static std::atomic<uint32_t> s_finalMainSequence{0};
+                cvr::camera::FinalMainCameraFrame finalMain{};
+                finalMain.worldPos[0] = static_cast<float>(posFP[0]) / 131072.0f;
+                finalMain.worldPos[1] = static_cast<float>(posFP[1]) / 131072.0f;
+                finalMain.worldPos[2] = static_cast<float>(posFP[2]) / 131072.0f;
+                finalMain.worldQuat[0] = camq[0]; finalMain.worldQuat[1] = camq[1];
+                finalMain.worldQuat[2] = camq[2]; finalMain.worldQuat[3] = camq[3];
+                finalMain.timestampUs = XrDiagNowUs();
+                finalMain.callbackHit = g_finalCameraHits;
+                finalMain.locateSequence = locateSeq;
+                finalMain.sequence = s_finalMainSequence.fetch_add(1u, std::memory_order_relaxed) + 1u;
+                cvr::camera::FinalMainCameraFramePublish(finalMain);
+
                 // LATCHED, and for the reason the overlay already latched it on its own side: with
                 // no weapon the muzzle quaternion is identity and the publisher then sends its +Y as
                 // exactly (0,1,0) -- not a barrel direction, and it used to drag the aim point

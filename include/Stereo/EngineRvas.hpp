@@ -24,6 +24,7 @@ constexpr uintptr_t APPEND_TYPEA_VIEW_RVA  = 0xD6E480;
 constexpr uintptr_t VIEW_CONTEXT_ALLOC_RVA = 0x810818;  // sub_140810818: build view-tail owner X (own manager)
 constexpr uintptr_t VIEW_ITEM_VTABLE_RVA   = 0x2AC8688;
 constexpr uintptr_t CAMERA_WRITE_RVA       = 0x788A9C;
+constexpr uintptr_t RTT_CAMERA_REFRESH_RVA = 0xAC31C4;  // sub_140AC31C4
 constexpr uintptr_t FRAME_GATE_RVA         = 0x291748;
 constexpr uintptr_t VIEW_FINALIZE_RVA      = 0x29C81C;
 constexpr uintptr_t FG_BUILD_RVA           = 0xAA3904;
