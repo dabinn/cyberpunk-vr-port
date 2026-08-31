@@ -1069,9 +1069,9 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             ImGui::Spacing();
             changed |= CheckboxInt("Allow Non-First-Person Views", &state.xrAllowNonFppViews);
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Allow the game's non-first-person views and select the Tofu external-camera A/B side.\n"
+                ImGui::SetTooltip("Allow the game's non-first-person views and enable the generic VR camera path.\n"
                                   "Off keeps Dari's camera handling. Surveillance/device takeover remains on its\n"
-                                  "existing dedicated bridge in either mode.");
+                                  "dedicated bridge in either mode.");
             }
 
             ImGui::Spacing();

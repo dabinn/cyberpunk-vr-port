@@ -28,10 +28,265 @@
 #include "Utils/MemorySafe.hpp"
 
 #include <windows.h>
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstddef>
+#include <limits>
+#include <mutex>
+
+namespace {
+
+struct StereoRenderEyeSample {
+    float pos[3]{};
+    float quat[4]{};
+    uint64_t timestampUs = 0;
+    uint64_t frameAimEpoch = 0;
+    bool valid = false;
+};
+
+std::mutex g_stereoRenderHistoryMutex;
+constexpr size_t kStereoRenderHistory = 16;
+std::array<StereoRenderEyeSample, kStereoRenderHistory> g_stereoRenderMainHistory{};
+std::array<StereoRenderEyeSample, kStereoRenderHistory> g_stereoRenderVrcamHistory{};
+size_t g_stereoRenderMainSlot = 0;
+size_t g_stereoRenderVrcamSlot = 0;
+
+void PublishStereoRenderEyeSample(bool isVrcam, const int32_t posFP[3], const float quat[4]) {
+    if (!posFP || !quat) return;
+
+    StereoRenderEyeSample sample{};
+    for (int i = 0; i < 3; ++i) {
+        sample.pos[i] = static_cast<float>(posFP[i]) / 131072.0f;
+    }
+    for (int i = 0; i < 4; ++i) sample.quat[i] = quat[i];
+    sample.timestampUs = XrDiagNowUs();
+    sample.valid = true;
+
+    OpenXRHeadPose matched{};
+    uint32_t age = 0, ties = 0;
+    if (cvr::camera::CamWriteRecordFind(quat, &matched, &age, &ties) && matched.valid) {
+        sample.frameAimEpoch = matched.frameAimEpoch;
+    }
+
+    std::lock_guard<std::mutex> lock(g_stereoRenderHistoryMutex);
+    if (isVrcam) {
+        g_stereoRenderVrcamHistory[g_stereoRenderVrcamSlot++ % kStereoRenderHistory] = sample;
+    } else {
+        g_stereoRenderMainHistory[g_stereoRenderMainSlot++ % kStereoRenderHistory] = sample;
+    }
+}
+
+bool ReadStableFppPose(float outPos[3], float outQuat[4]) {
+    const uintptr_t component = g_camObjMain.load(std::memory_order_acquire);
+    if (component < 0x10000 || !outPos || !outQuat) return false;
+
+    uint32_t firstPos[3]{};
+    uint32_t secondPos[3]{};
+    float firstQuat[4]{};
+    float secondQuat[4]{};
+    for (int i = 0; i < 3; ++i) {
+        if (!ReadU32Safe(component + 0xE0u + static_cast<uintptr_t>(i) * 4u, &firstPos[i])) return false;
+    }
+    if (!ReadFloatArraySafe(reinterpret_cast<const float*>(component + 0xF0u), firstQuat, 4)) return false;
+    for (int i = 0; i < 3; ++i) {
+        if (!ReadU32Safe(component + 0xE0u + static_cast<uintptr_t>(i) * 4u, &secondPos[i])) return false;
+    }
+    if (!ReadFloatArraySafe(reinterpret_cast<const float*>(component + 0xF0u), secondQuat, 4)) return false;
+
+    for (int i = 0; i < 3; ++i) {
+        if (firstPos[i] != secondPos[i]) return false;
+        outPos[i] = static_cast<float>(static_cast<int32_t>(secondPos[i])) / 131072.0f;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (firstQuat[i] != secondQuat[i]) return false;
+        outQuat[i] = secondQuat[i];
+    }
+    return IsPlausibleUnitQuaternion(outQuat);
+}
+
+bool IsDetachedFromFpp(const int32_t mainPosFP[3], const float mainQuat[4]) {
+    if (g_liveControls.xrAllowNonFppViews == 0) return false;
+
+    float fppPos[3]{};
+    float fppQuat[4]{};
+    if (!ReadStableFppPose(fppPos, fppQuat)) return false;
+
+    const float dx = static_cast<float>(mainPosFP[0]) / 131072.0f - fppPos[0];
+    const float dy = static_cast<float>(mainPosFP[1]) / 131072.0f - fppPos[1];
+    const float dz = static_cast<float>(mainPosFP[2]) / 131072.0f - fppPos[2];
+    const float positionGap = std::sqrt(dx * dx + dy * dy + dz * dz);
+    double dot = 0.0;
+    for (int i = 0; i < 4; ++i) dot += static_cast<double>(mainQuat[i]) * fppQuat[i];
+    dot = std::clamp(std::abs(dot), 0.0, 1.0);
+    const float orientationGap = static_cast<float>(2.0 * std::acos(dot) *
+                                                    (180.0 / 3.14159265358979323846));
+
+    static std::atomic<bool> s_detached{false};
+    const bool wasDetached = s_detached.load(std::memory_order_acquire);
+    const bool detached = wasDetached
+        ? (positionGap >= 0.20f || orientationGap >= 6.0f)
+        : (positionGap >= 0.75f || orientationGap >= 20.0f);
+    s_detached.store(detached, std::memory_order_release);
+    return detached;
+}
+
+bool FindSameEpochVrcamSample(const float mainQuat[4], StereoRenderEyeSample* out) {
+    if (!mainQuat || !out) return false;
+
+    OpenXRHeadPose mainHead{};
+    uint32_t age = 0;
+    uint32_t ties = 0;
+    if (!cvr::camera::CamWriteRecordFind(mainQuat, &mainHead, &age, &ties) ||
+        !mainHead.valid || mainHead.frameAimEpoch == 0) {
+        return false;
+    }
+
+    const uint64_t nowUs = XrDiagNowUs();
+    bool found = false;
+    uint64_t bestAgeUs = UINT64_MAX;
+    std::lock_guard<std::mutex> lock(g_stereoRenderHistoryMutex);
+    for (const auto& sample : g_stereoRenderVrcamHistory) {
+        if (!sample.valid || sample.frameAimEpoch != mainHead.frameAimEpoch) continue;
+        const uint64_t sampleAgeUs = nowUs >= sample.timestampUs
+            ? nowUs - sample.timestampUs
+            : sample.timestampUs - nowUs;
+        if (sampleAgeUs >= bestAgeUs) continue;
+        bestAgeUs = sampleAgeUs;
+        *out = sample;
+        found = true;
+    }
+    return found;
+}
+
+bool FindSameEpochMainSample(const float vrcamQuat[4], StereoRenderEyeSample* out) {
+    if (!vrcamQuat || !out) return false;
+
+    OpenXRHeadPose vrcamHead{};
+    uint32_t age = 0;
+    uint32_t ties = 0;
+    if (!cvr::camera::CamWriteRecordFind(vrcamQuat, &vrcamHead, &age, &ties) ||
+        !vrcamHead.valid || vrcamHead.frameAimEpoch == 0) {
+        return false;
+    }
+
+    const uint64_t nowUs = XrDiagNowUs();
+    bool found = false;
+    uint64_t bestAgeUs = UINT64_MAX;
+    std::lock_guard<std::mutex> lock(g_stereoRenderHistoryMutex);
+    for (const auto& sample : g_stereoRenderMainHistory) {
+        if (!sample.valid || sample.frameAimEpoch != vrcamHead.frameAimEpoch) continue;
+        const uint64_t sampleAgeUs = nowUs >= sample.timestampUs
+            ? nowUs - sample.timestampUs
+            : sample.timestampUs - nowUs;
+        if (sampleAgeUs >= bestAgeUs) continue;
+        bestAgeUs = sampleAgeUs;
+        *out = sample;
+        found = true;
+    }
+    return found;
+}
+
+bool AlignMainToRenderedVrcamOnSourceSwitch(float* rsiPtr, float renderedQuat[4]) {
+    if (!rsiPtr || !renderedQuat || g_liveControls.xrAllowNonFppViews == 0) return false;
+
+    int32_t* const mainPosFP = reinterpret_cast<int32_t*>(rsiPtr);
+    StereoRenderEyeSample vrcam{};
+    if (!FindSameEpochVrcamSample(renderedQuat, &vrcam)) return false;
+
+    float right[3]{};
+    ComputeRightVectorFromQuaternion(vrcam.quat, right);
+    if (!IsPlausibleUnitVector3(right)) return false;
+
+    const float expectedDist = 2.0f * GetDesiredHalfIpd();
+    if (!(expectedDist > 0.0001f) || !std::isfinite(expectedDist)) return false;
+    const float expectedRight = CyberpunkVR_MainIsRightEye ? -expectedDist : expectedDist;
+
+    float expectedMainPos[3]{};
+    float positionErrorSq = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        expectedMainPos[i] = vrcam.pos[i] - right[i] * expectedRight;
+        const float current = static_cast<float>(mainPosFP[i]) / 131072.0f;
+        const float delta = current - expectedMainPos[i];
+        positionErrorSq += delta * delta;
+    }
+    const float positionError = std::sqrt(positionErrorSq);
+
+    double dot = 0.0;
+    for (int i = 0; i < 4; ++i) dot += static_cast<double>(renderedQuat[i]) * vrcam.quat[i];
+    dot = std::clamp(std::abs(dot), 0.0, 1.0);
+    const float orientationError = static_cast<float>(2.0 * std::acos(dot) *
+                                                      (180.0 / 3.14159265358979323846));
+
+    // VRCAM is rendered before MAIN. When CameraDirector changes owner between those two graph
+    // passes, both eyes can legitimately reference the same XR epoch but different gameplay
+    // cameras. Keep the pair binocularly coherent for that one boundary frame; on the next frame
+    // VRCAM observes the new owner and both eyes advance together.
+    if (positionError < 0.02f && orientationError < 0.5f) return false;
+
+    for (int i = 0; i < 3; ++i) {
+        const int64_t fixed = static_cast<int64_t>(std::llround(expectedMainPos[i] * 131072.0f));
+        if (fixed < std::numeric_limits<int32_t>::min() ||
+            fixed > std::numeric_limits<int32_t>::max()) {
+            return false;
+        }
+        mainPosFP[i] = static_cast<int32_t>(fixed);
+    }
+    for (int i = 0; i < 4; ++i) renderedQuat[i] = vrcam.quat[i];
+    WriteRenderCameraBasis(rsiPtr, renderedQuat);
+
+    return true;
+}
+
+bool AlignVrcamToRenderedMain(float* rsiPtr, float renderedQuat[4]) {
+    if (!rsiPtr || !renderedQuat || g_liveControls.xrAllowNonFppViews == 0) return false;
+
+    StereoRenderEyeSample main{};
+    if (!FindSameEpochMainSample(renderedQuat, &main)) return false;
+
+    float right[3]{};
+    ComputeRightVectorFromQuaternion(main.quat, right);
+    if (!IsPlausibleUnitVector3(right)) return false;
+
+    const float expectedDist = 2.0f * GetDesiredHalfIpd();
+    if (!(expectedDist > 0.0001f) || !std::isfinite(expectedDist)) return false;
+    const float expectedRight = CyberpunkVR_MainIsRightEye ? -expectedDist : expectedDist;
+
+    int32_t* const vrcamPosFP = reinterpret_cast<int32_t*>(rsiPtr);
+    float expectedVrcamPos[3]{};
+    float positionErrorSq = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        expectedVrcamPos[i] = main.pos[i] + right[i] * expectedRight;
+        const float current = static_cast<float>(vrcamPosFP[i]) / 131072.0f;
+        const float delta = current - expectedVrcamPos[i];
+        positionErrorSq += delta * delta;
+    }
+    const float positionError = std::sqrt(positionErrorSq);
+
+    double dot = 0.0;
+    for (int i = 0; i < 4; ++i) dot += static_cast<double>(renderedQuat[i]) * main.quat[i];
+    dot = std::clamp(std::abs(dot), 0.0, 1.0);
+    const float orientationError = static_cast<float>(2.0 * std::acos(dot) *
+                                                      (180.0 / 3.14159265358979323846));
+    if (positionError < 0.02f && orientationError < 0.5f) return false;
+
+    for (int i = 0; i < 3; ++i) {
+        const int64_t fixed = static_cast<int64_t>(std::llround(expectedVrcamPos[i] * 131072.0f));
+        if (fixed < std::numeric_limits<int32_t>::min() ||
+            fixed > std::numeric_limits<int32_t>::max()) {
+            return false;
+        }
+        vrcamPosFP[i] = static_cast<int32_t>(fixed);
+    }
+    for (int i = 0; i < 4; ++i) renderedQuat[i] = main.quat[i];
+    WriteRenderCameraBasis(rsiPtr, renderedQuat);
+
+    return true;
+}
+
+}  // namespace
 
 extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
     g_finalCameraHits++;
@@ -68,6 +323,59 @@ extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
     if (CyberpunkVR_StereoModuleLoaded) {
         const bool isVrcam = CyberpunkVR_IsVrcamViewActive() != 0;
         const bool isMain  = !isVrcam && CyberpunkVR_IsMainViewActive() != 0;
+
+        float renderedQuat[4]{};
+        const bool haveRenderedQuat = ReadFloatArraySafe(rsiPtr + 4, renderedQuat, 4) &&
+                                      IsPlausibleUnitQuaternion(renderedQuat);
+        if (isMain && haveRenderedQuat) {
+            AlignMainToRenderedVrcamOnSourceSwitch(rsiPtr, renderedQuat);
+        }
+        if (isVrcam && haveRenderedQuat) {
+            AlignVrcamToRenderedMain(rsiPtr, renderedQuat);
+        }
+        if ((isMain || isVrcam) && haveRenderedQuat) {
+            PublishStereoRenderEyeSample(isVrcam,
+                                         reinterpret_cast<const int32_t*>(rsiPtr), renderedQuat);
+        }
+        if (isMain && haveRenderedQuat) {
+            const int32_t* posFP = reinterpret_cast<const int32_t*>(rsiPtr);
+            const bool detached = IsDetachedFromFpp(posFP, renderedQuat);
+            cvr::camera::GenericNonFppActivePublish(detached);
+
+            float baseQuat[4] = { renderedQuat[0], renderedQuat[1],
+                                  renderedQuat[2], renderedQuat[3] };
+            bool haveBase = true;
+            OpenXRHeadPose head{};
+            const bool hmdComposed = detached &&
+                cvr::camera::CamWriteRecordFindExact(renderedQuat, &head) && head.valid;
+            if (hmdComposed) {
+                // rendered = cleanBase * mappedHmd, so multiply by mappedHmd^-1 to recover the
+                // gameplay-owned orbit/rear-view base without feeding an old HMD turn forward.
+                MulQuat(renderedQuat[0], renderedQuat[1], renderedQuat[2], renderedQuat[3],
+                        -head.oriX, head.oriZ, -head.oriY, head.oriW,
+                        baseQuat[0], baseQuat[1], baseQuat[2], baseQuat[3]);
+                NormalizeQuat(baseQuat[0], baseQuat[1], baseQuat[2], baseQuat[3]);
+                haveBase = IsPlausibleUnitQuaternion(baseQuat);
+            }
+
+            if (haveBase) {
+                static std::atomic<uint32_t> s_finalMainSequence{0};
+                cvr::camera::FinalMainCameraFrame finalMain{};
+                finalMain.worldPos[0] = static_cast<float>(posFP[0]) / 131072.0f;
+                finalMain.worldPos[1] = static_cast<float>(posFP[1]) / 131072.0f;
+                finalMain.worldPos[2] = static_cast<float>(posFP[2]) / 131072.0f;
+                finalMain.worldQuat[0] = baseQuat[0]; finalMain.worldQuat[1] = baseQuat[1];
+                finalMain.worldQuat[2] = baseQuat[2]; finalMain.worldQuat[3] = baseQuat[3];
+                if (hmdComposed) finalMain.hmdPose = head;
+                finalMain.hmdComposed = hmdComposed ? 1u : 0u;
+                finalMain.timestampUs = XrDiagNowUs();
+                finalMain.callbackHit = g_finalCameraHits;
+                finalMain.locateSequence = locateSeq;
+                finalMain.sequence = s_finalMainSequence.fetch_add(1u, std::memory_order_relaxed) + 1u;
+                cvr::camera::FinalMainCameraFramePublish(finalMain);
+            }
+        }
+
         if (isMain) {
             float camq[4] = {};
             if (ReadFloatArraySafe(rsiPtr + 4, camq, 4) && IsPlausibleUnitQuaternion(camq)) {
@@ -161,6 +469,7 @@ extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
     // DEFAULT OFF. The pose-binding work in this same build has to be measurable on its own
     // first -- two changes at once and a regression tells you nothing. Flip live to compare.
     {
+        if (g_liveControls.xrAllowNonFppViews != 0 && cvr::camera::GenericNonFppActiveRead()) return;
         if (!CyberpunkVR_CamWriteInFinal) return;
 
         // ASK THE DISPATCHER, DO NOT HASH A NAME.
