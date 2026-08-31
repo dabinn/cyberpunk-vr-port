@@ -130,6 +130,8 @@ void VRWristGuard(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, 
 // Which surveillance camera the player took over, published from a CET tick because the plugin's own
 // poll runs on the worker thread and must not call the script VM. See src/Natives/RemoteCamera.cpp.
 void VRRemoteCamera(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t a4);
+// Read the native F10 policy that allows vehicle/non-FPP views while keeping remote-camera publishing alive.
+void VRAllowNonFPP(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t a4);
 // Where the live player's camera component is, so MAIN can be told from a replacer's camera of the
 // same name while a braindance is running.
 void VRPlayerCamera(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t a4);
