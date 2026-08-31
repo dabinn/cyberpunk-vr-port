@@ -66,6 +66,7 @@ end
 
 local S = {
   on = true,
+  allowNonFpp = false,
   sceneGate = true,    -- open the scene-camera path for ORDINARY scenes, not only braindances
   sceneInTakeover = false,  -- ...and during a device takeover as well: an A/B, see the panel
   latched = false,     -- this scene was judged to need the fix, decided once on entry
@@ -789,6 +790,26 @@ local function publishBraindance()
   S.bdFov = fov
 end
 
+-- The F10 non-FPP switch is also the A/B ownership boundary for external-camera work.
+-- When the Tofu side is selected, Dari's newer scene/braindance camera bridge must stand down or
+-- both paths can claim the same VRCAM. Surveillance/device takeover is deliberately NOT released
+-- here: it is the established exception and continues to be published independently below.
+local function releaseSceneCameraForNonFpp()
+  if type(VRBraindance) == "function" then
+    pcall(function() VRBraindance(0, 0.0) end)
+  end
+  if type(VRSceneCamera) == "function" then
+    pcall(function() VRSceneCamera(0, 0, 0, 0, 0, 0, 0, 1) end)
+  end
+  if type(VRPlayerCamera) == "function" then
+    pcall(function() VRPlayerCamera(0, 0.0, 0.0, 0.0) end)
+  end
+  S.latched = false
+  S.bd = false
+  S.bdOwns = false
+  S.scam = "disabled by Allow Non-First-Person Views"
+end
+
 registerForEvent("onInit", function()
   devcamLoad()
   devcamPush()
@@ -801,9 +822,19 @@ registerForEvent("onUpdate", function(dt)
   -- BEFORE the press, and the phone half of it is a single blackboard read.
   publishUiPopup(dt)
 
-  -- BEFORE the mod's own switch: a braindance is not a first-person preference, and the second eye has
-  -- to follow that camera whether or not the FPP hold is wanted.
-  publishBraindance()
+  -- A/B OWNERSHIP, not merely a vehicle-FPP preference. OFF is the complete Dari/upstream side,
+  -- including its scene/braindance camera bridge. ON reserves non-FPP camera ownership for the Tofu
+  -- generic path; the existing surveillance/device takeover bridge remains the intentional exception.
+  local allowNonFpp = false
+  if type(VRAllowNonFPP) == "function" then
+    pcall(function() allowNonFpp = VRAllowNonFPP() ~= 0 end)
+  end
+  if allowNonFpp then
+    if not S.allowNonFpp then releaseSceneCameraForNonFpp() end
+  else
+    publishBraindance()
+  end
+  S.allowNonFpp = allowNonFpp
 
   -- THE TAKEOVER POSITION, EVERY FRAME. The plugin believes a camera only within a metre and a half of
   -- what this publishes, and at four times a second a flying AV moves far further than that between
@@ -812,7 +843,6 @@ registerForEvent("onUpdate", function(dt)
   -- and with it went the fov, the lens and the second eye's base. Standing still it worked, which is why
   -- this took so long to see.
   publishRemoteCamera()
-  if not S.on then return end
   local pl = Game.GetPlayer()
   if pl == nil then
     S.applied = false            -- a load screen: the effect goes with the old player object
@@ -822,8 +852,16 @@ registerForEvent("onUpdate", function(dt)
   S.acc = S.acc + (dt or 0.016)
   if S.acc < 0.25 then return end
   S.acc = 0.0
-  ensureRestriction(pl)
-  forceFirstPerson(pl)
+
+  if allowNonFpp or not S.on then
+    dropRestriction()
+    S.note = allowNonFpp
+      and "non-first-person views allowed by F10 setting"
+      or "first-person hold disabled in CET"
+  else
+    ensureRestriction(pl)
+    forceFirstPerson(pl)
+  end
 end)
 
 registerForEvent("onShutdown", function()
@@ -838,10 +876,15 @@ registerForEvent("onDraw", function()
   if not overlay then return end
   pcall(function()
     ImGui.Begin("VR force FPP")
+    if S.allowNonFpp then ImGui.BeginDisabled() end
     local b, ch = ImGui.Checkbox("hold the player in first person", S.on)
     if ch then
       S.on = b
       if not b then dropRestriction() end
+    end
+    if S.allowNonFpp then ImGui.EndDisabled() end
+    if S.allowNonFpp then
+      ImGui.TextDisabled('Disabled by F10 "Allow Non-First-Person Views"')
     end
     ImGui.Text("restriction applied: " .. tostring(S.applied))
     ImGui.Text("UI overlay owning B: " .. tostring(S.popupWhat or "-"))

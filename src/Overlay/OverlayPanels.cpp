@@ -1067,6 +1067,14 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             ImGui::Unindent();
 
             ImGui::Spacing();
+            changed |= CheckboxInt("Allow Non-First-Person Views", &state.xrAllowNonFppViews);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Allow the game's non-first-person views and select the Tofu external-camera A/B side.\n"
+                                  "Off keeps Dari's camera handling. Surveillance/device takeover remains on its\n"
+                                  "existing dedicated bridge in either mode.");
+            }
+
+            ImGui::Spacing();
             changed |= CheckboxInt("While using Scanner", &state.xrClassicScannerControls);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Keep the ear gesture and Scanner toggle, but use the game's normal\n"
@@ -1132,8 +1140,12 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
             ImGui::Spacing();
             ImGui::TextUnformatted("In a vehicle (the gestures above do not apply):");
-            ImGui::BulletText("The camera is HELD IN FIRST PERSON: the perspective toggle does nothing,");
-            ImGui::BulletText("                and a car entered in third person is put back");
+            if (state.xrAllowNonFppViews != 0) {
+                ImGui::BulletText("Vehicle perspective switching - allowed");
+            } else {
+                ImGui::BulletText("The camera is HELD IN FIRST PERSON: the perspective toggle does nothing,");
+                ImGui::BulletText("                and a car entered in third person is put back");
+            }
             ImGui::BulletText("HOLD X        - get out. B is never the exit here, so no stray press ejects you");
             ImGui::BulletText("Right A       - confirm a dialogue line (it is X on foot, and X is the");
             ImGui::BulletText("                exit in here). The handbrake on A keeps working");

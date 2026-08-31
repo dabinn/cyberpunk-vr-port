@@ -21,6 +21,7 @@
 #include <cstdint>
 
 #include "Camera/CameraState.hpp"    // g_remoteCamOn, g_remoteCamPosFP
+#include "Core/LiveControls.hpp"
 #include "Core/VrCoreShared.hpp"      // Log
 
 extern "C" __declspec(dllexport) extern int CyberpunkVR_BdFovWrite;
@@ -282,6 +283,14 @@ void VRBraindance(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, 
     PatchFastDisarm();                                   // see the note at the other arm site
     g_bdActive.store(1, std::memory_order_release);
     if (aOut) *aOut = 1;
+}
+
+void VRAllowNonFPP(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t a4)
+{
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *aOut = g_liveControls.xrAllowNonFppViews != 0 ? 1 : 0;
 }
 
 void VRRemoteCamera(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t a4)
