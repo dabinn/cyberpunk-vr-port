@@ -232,6 +232,7 @@ void PollLiveControls() {
     int xrClassicDisableLsSprint = g_liveControls.xrClassicDisableLsSprint;
     int xrClassicDisableRsDashCrouch = g_liveControls.xrClassicDisableRsDashCrouch;
     int xrClassicVehicleControls = g_liveControls.xrClassicVehicleControls;
+    int xrAllowNonFppViews = g_liveControls.xrAllowNonFppViews;
     int xrClassicSwapTriggersGrips = g_liveControls.xrClassicSwapTriggersGrips;
     int xrClassicScannerControls = g_liveControls.xrClassicScannerControls;
     int xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
@@ -566,6 +567,11 @@ void PollLiveControls() {
             xrClassicVehicleControls = intValue;
             continue;
         }
+        if (sscanf_s(line, "xr_allow_non_fpp_views=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_allow_non_fpp_views = %d", &intValue) == 1) {
+            xrAllowNonFppViews = intValue;
+            continue;
+        }
         if (sscanf_s(line, "xr_classic_swap_triggers_grips=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_classic_swap_triggers_grips = %d", &intValue) == 1) {
             xrClassicSwapTriggersGrips = intValue;
@@ -688,6 +694,7 @@ void PollLiveControls() {
         g_liveControls.xrClassicDisableLsSprint != xrClassicDisableLsSprint ||
         g_liveControls.xrClassicDisableRsDashCrouch != xrClassicDisableRsDashCrouch ||
         g_liveControls.xrClassicVehicleControls != xrClassicVehicleControls ||
+        g_liveControls.xrAllowNonFppViews != xrAllowNonFppViews ||
         g_liveControls.xrClassicSwapTriggersGrips != xrClassicSwapTriggersGrips ||
         g_liveControls.xrClassicScannerControls != xrClassicScannerControls ||
         g_liveControls.xrRuntime != xrRuntime ||
@@ -743,6 +750,7 @@ void PollLiveControls() {
     g_liveControls.xrClassicDisableLsSprint = xrClassicDisableLsSprint != 0 ? 1 : 0;
     g_liveControls.xrClassicDisableRsDashCrouch = xrClassicDisableRsDashCrouch != 0 ? 1 : 0;
     g_liveControls.xrClassicVehicleControls = xrClassicVehicleControls != 0 ? 1 : 0;
+    g_liveControls.xrAllowNonFppViews = xrAllowNonFppViews != 0 ? 1 : 0;
     g_liveControls.xrClassicSwapTriggersGrips = xrClassicSwapTriggersGrips != 0 ? 1 : 0;
     g_liveControls.xrClassicScannerControls = xrClassicScannerControls != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = xrMonoXQueueWait != 0 ? 1 : 0;
@@ -886,6 +894,7 @@ LiveControlsUiState MakeLiveControlsUiState() {
     state.xrClassicDisableLsSprint = g_liveControls.xrClassicDisableLsSprint;
     state.xrClassicDisableRsDashCrouch = g_liveControls.xrClassicDisableRsDashCrouch;
     state.xrClassicVehicleControls = g_liveControls.xrClassicVehicleControls;
+    state.xrAllowNonFppViews = g_liveControls.xrAllowNonFppViews;
     state.xrClassicSwapTriggersGrips = g_liveControls.xrClassicSwapTriggersGrips;
     state.xrClassicScannerControls = g_liveControls.xrClassicScannerControls;
     state.xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
@@ -985,6 +994,7 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_classic_disable_ls_sprint=%d\n", state.xrClassicDisableLsSprint != 0 ? 1 : 0);
     fprintf(file, "xr_classic_disable_rs_dash_crouch=%d\n", state.xrClassicDisableRsDashCrouch != 0 ? 1 : 0);
     fprintf(file, "xr_classic_vehicle_controls=%d\n", state.xrClassicVehicleControls != 0 ? 1 : 0);
+    fprintf(file, "xr_allow_non_fpp_views=%d\n", state.xrAllowNonFppViews != 0 ? 1 : 0);
     fprintf(file, "xr_classic_swap_triggers_grips=%d\n", state.xrClassicSwapTriggersGrips != 0 ? 1 : 0);
     fprintf(file, "xr_classic_scanner_controls=%d\n", state.xrClassicScannerControls != 0 ? 1 : 0);
     fprintf(file, "xr_mono_xqueue_wait=%d\n", state.xrMonoXQueueWait != 0 ? 1 : 0);
@@ -1078,6 +1088,7 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
     g_liveControls.xrClassicDisableLsSprint = state->xrClassicDisableLsSprint != 0 ? 1 : 0;
     g_liveControls.xrClassicDisableRsDashCrouch = state->xrClassicDisableRsDashCrouch != 0 ? 1 : 0;
     g_liveControls.xrClassicVehicleControls = state->xrClassicVehicleControls != 0 ? 1 : 0;
+    g_liveControls.xrAllowNonFppViews = state->xrAllowNonFppViews != 0 ? 1 : 0;
     g_liveControls.xrClassicSwapTriggersGrips = state->xrClassicSwapTriggersGrips != 0 ? 1 : 0;
     g_liveControls.xrClassicScannerControls = state->xrClassicScannerControls != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = state->xrMonoXQueueWait != 0 ? 1 : 0;

@@ -70,6 +70,7 @@ struct LiveControlsUiState {
     int xrClassicDisableLsSprint;
     int xrClassicDisableRsDashCrouch;
     int xrClassicVehicleControls;
+    int xrAllowNonFppViews;
     int xrClassicSwapTriggersGrips;
     int xrClassicScannerControls;
     // Mono submit safety flags. Defaults 0 keep CP2077 mono mode from hanging on

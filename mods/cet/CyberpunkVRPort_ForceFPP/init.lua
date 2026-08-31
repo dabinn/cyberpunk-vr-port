@@ -1,4 +1,4 @@
--- CyberpunkVRPort_ForceFPP -- the player stays in first person, and cannot be switched out of it.
+-- CyberpunkVRPort_ForceFPP -- upstream vehicle-FPP policy plus surveillance-camera publication.
 --
 -- WHY IT IS THESE TWO THINGS AND NOT A HOOK. Third person in this game is the VEHICLE camera, and the
 -- game already owns both halves of the problem; both were read out of its own scripts rather than
@@ -35,6 +35,7 @@ local RESTRICTION = "GameplayRestriction.VehicleFPP"
 
 local S = {
   on = true,
+  allowNonFpp = false,
   remote = false,
   remotePos = "-",
   applied = false,
@@ -133,11 +134,10 @@ local function publishRemoteCamera()
 end
 
 registerForEvent("onInit", function()
-  print("[ForceFPP] ready; the vehicle camera will be held in first person")
+  print("[ForceFPP] ready; vehicle camera policy follows the native F10 setting")
 end)
 
 registerForEvent("onUpdate", function(dt)
-  if not S.on then return end
   local pl = Game.GetPlayer()
   if pl == nil then
     S.applied = false            -- a load screen: the effect goes with the old player object
@@ -146,8 +146,23 @@ registerForEvent("onUpdate", function(dt)
   S.acc = S.acc + (dt or 0.016)
   if S.acc < 0.25 then return end
   S.acc = 0.0
-  ensureRestriction(pl)
-  forceFirstPerson(pl)
+
+  local allowNonFpp = false
+  if type(VRAllowNonFPP) == "function" then
+    pcall(function() allowNonFpp = VRAllowNonFPP() ~= 0 end)
+  end
+  S.allowNonFpp = allowNonFpp
+
+  if allowNonFpp or not S.on then
+    dropRestriction()
+    S.note = allowNonFpp
+      and "non-first-person views allowed by F10 setting"
+      or "first-person hold disabled in CET"
+  else
+    ensureRestriction(pl)
+    forceFirstPerson(pl)
+  end
+
   -- four times a second: fast enough that the second eye reaches the camera within a blink of the
   -- takeover, cheap enough that it is one scriptable-system call and one position read
   publishRemoteCamera()
@@ -165,10 +180,15 @@ registerForEvent("onDraw", function()
   if not overlay then return end
   pcall(function()
     ImGui.Begin("VR force FPP")
+    if S.allowNonFpp then ImGui.BeginDisabled() end
     local b, ch = ImGui.Checkbox("hold the player in first person", S.on)
     if ch then
       S.on = b
       if not b then dropRestriction() end
+    end
+    if S.allowNonFpp then ImGui.EndDisabled() end
+    if S.allowNonFpp then
+      ImGui.TextDisabled('Disabled by F10 "Allow Non-First-Person Views"')
     end
     ImGui.Text("restriction applied: " .. tostring(S.applied))
     ImGui.Text(string.format("camera put back %d time(s)", S.forced))

@@ -80,6 +80,9 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     fRC->AddParam("Int32", "active"); fRC->AddParam("Float", "x"); fRC->AddParam("Float", "y");
     fRC->AddParam("Float", "z"); rtti->RegisterFunction(fRC);
 
+    auto fAllowNonFPP = RED4ext::CGlobalFunction::Create("VRAllowNonFPP", "VRAllowNonFPP", &VRAllowNonFPP);
+    fAllowNonFPP->flags = flags; fAllowNonFPP->SetReturnType("Int32"); rtti->RegisterFunction(fAllowNonFPP);
+
     auto fWG = RED4ext::CGlobalFunction::Create("VRWristGuard", "VRWristGuard", &VRWristGuard);
     fWG->flags = flags; fWG->SetReturnType("Int32"); fWG->AddParam("Int32", "mode"); rtti->RegisterFunction(fWG);
 
