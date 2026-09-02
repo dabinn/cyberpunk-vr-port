@@ -573,6 +573,13 @@ bool DrawLiveControls(LiveControlsUiState& state) {
         if (ImGui::BeginTabItem("General")) {
             if (ImGui::CollapsingHeader("View / Resolution", ImGuiTreeNodeFlags_DefaultOpen)) {
                 changed |= DrawFovControl(state);
+                ImGui::Separator();
+                changed |= CheckboxInt("Allow Non-First-Person Views", &state.xrAllowNonFppViews);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Allow the game to use non-first-person camera views such as vehicle TPP.\n"
+                                      "Off keeps upstream v0.1.5's forced vehicle first-person policy.");
+                }
+                ImGui::Separator();
                 changed |= CheckboxInt("VR menu quad", &state.xrMenuRect);
                 changed |= ImGui::SliderFloat("VR menu FOV", &state.xrMenuFov, 30.0f, 120.0f, "%.1f deg");
             }
@@ -999,13 +1006,6 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
             if (state.xrClassicVehicleControls == 0) ImGui::EndDisabled();
             ImGui::Unindent();
-
-            ImGui::Spacing();
-            changed |= CheckboxInt("Allow Non-First-Person Views", &state.xrAllowNonFppViews);
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Disable the port's forced vehicle first-person policy so the game's normal\n"
-                                  "perspective switching can work. Off keeps upstream v0.1.5 behavior.");
-            }
 
             ImGui::Spacing();
             changed |= CheckboxInt("While using Scanner", &state.xrClassicScannerControls);

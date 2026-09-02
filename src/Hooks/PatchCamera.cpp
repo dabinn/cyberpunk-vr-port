@@ -37,10 +37,65 @@
 #include <cstdint>
 #include <cstddef>
 
+extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugGenericDetachedPatchWrites = 0;
+extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugGenericDetachedCandidates = 0;
+
+static void ObserveGenericDetachedPatchCandidate(uintptr_t owner, const float quat[4]) {
+    if (!cvr::camera::GenericNonFppActiveRead() || owner < 0x10000 ||
+        !IsPlausibleUnitQuaternion(quat)) return;
+
+    cvr::camera::FinalMainCameraFrame finalMain{};
+    const uint64_t nowUs = XrDiagNowUs();
+    if (!cvr::camera::FinalMainCameraFrameRead(&finalMain) || finalMain.sequence == 0 ||
+        nowUs < finalMain.timestampUs || nowUs - finalMain.timestampUs > 100000u) return;
+
+    uint32_t rawPos[3]{};
+    for (int i = 0; i < 3; ++i) {
+        if (!ReadU32Safe(owner + 0xE0 + static_cast<uintptr_t>(i) * 4u, &rawPos[i])) return;
+    }
+    float d2 = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        const float p = static_cast<float>(static_cast<int32_t>(rawPos[i])) / 131072.0f;
+        const float d = p - finalMain.worldPos[i];
+        d2 += d * d;
+    }
+    if (d2 > 0.25f) return; // 0.5 m: cheap positional reject before quaternion math.
+
+    double dot = 0.0;
+    for (int i = 0; i < 4; ++i) dot += static_cast<double>(quat[i]) * finalMain.worldQuat[i];
+    dot = std::fmin(1.0, std::fabs(dot));
+    const float gapDeg = static_cast<float>(2.0 * std::acos(dot) * 57.29577951308232);
+    if (gapDeg > 20.0f) return;
+
+    static std::atomic<uintptr_t> s_owner[8]{};
+    static std::atomic<uint64_t> s_hits[8]{};
+    int slot = -1;
+    for (int i = 0; i < 8; ++i) {
+        uintptr_t cur = s_owner[i].load(std::memory_order_acquire);
+        if (cur == owner) { slot = i; break; }
+        if (cur == 0) {
+            uintptr_t expected = 0;
+            if (s_owner[i].compare_exchange_strong(expected, owner, std::memory_order_acq_rel)) {
+                slot = i;
+                break;
+            }
+        }
+    }
+    if (slot < 0) return;
+    const uint64_t hits = s_hits[slot].fetch_add(1u, std::memory_order_relaxed) + 1u;
+    ++CyberpunkVR_DebugGenericDetachedCandidates;
+    if (hits == 1u || (hits % 120u) == 0u) {
+        Log("[generic-detached-candidate] slot=%d owner=%p hits=%llu dM=%.4f gapDeg=%.3f hmd=%u\n",
+            slot, reinterpret_cast<void*>(owner), static_cast<unsigned long long>(hits),
+            std::sqrt(d2), gapDeg, finalMain.hmdComposed);
+    }
+}
+
 extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* ownerState) {
     g_patchCameraHits++;
 
     const int camKind = ClassifyPatchCameraOwner(ownerState);
+    const bool genericNonFppEnabled = g_liveControls.xrAllowNonFppViews != 0;
 
     if (!cameraState || reinterpret_cast<uintptr_t>(cameraState) < 0x10000) return;
 
@@ -64,11 +119,53 @@ extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* owner
     // eye -- there is no way for a composition to feed on its own output. The knob exists so the head
     // steering can be tried again from a build, not so it can be left on by accident.
     //
-    // ONLY the two cameras we drive. Measured: this site fires ~16.3M times for ordinary
+    const uintptr_t owner = reinterpret_cast<uintptr_t>(ownerState);
+    const bool detachedOwner = genericNonFppEnabled && camKind == 0 &&
+        cvr::camera::DetachedCameraWasObservedRecently(owner, XrDiagNowUs(), 100000u);
+
+    if (genericNonFppEnabled && camKind == 0 && !detachedOwner) {
+        ObserveGenericDetachedPatchCandidate(owner, quat);
+    }
+
+    // ONLY the cameras we drive. Measured: this site fires ~16.3M times for ordinary
     // placed components against ~12k for the cameras, so an unfiltered write puts the head
     // pose into animated components and slots a thousand times more often than into a camera.
     // That is the "world slides, weapon drags with the head" failure at its source.
-    if (camKind == 0) return;
+    if (camKind == 0 && !detachedOwner) return;
+
+    // LocateCamera observed this exact component in the active CameraDirector table during a
+    // recent frame. Compose at the component's own post-store hook, before the engine's natural
+    // transform notification. Unlike editing the serialized mixer copy, this updates every
+    // derived camera consumer from one authored base while leaving the gameplay orbit state to be
+    // refreshed by the engine on its next store.
+    if (detachedOwner) {
+        OpenXRHeadPose head{};
+        if (IsPlausibleUnitQuaternion(quat) &&
+            OpenXRManager::Get().AcquireFrameHeadSample(&head) && head.valid) {
+            float composed[4]{};
+            MulQuat(quat[0], quat[1], quat[2], quat[3],
+                    head.oriX, -head.oriZ, head.oriY, head.oriW,
+                    composed[0], composed[1], composed[2], composed[3]);
+            NormalizeQuat(composed[0], composed[1], composed[2], composed[3]);
+            if (IsPlausibleUnitQuaternion(composed)) {
+                const uintptr_t q = reinterpret_cast<uintptr_t>(cameraState);
+                WriteFloatSafe(q + 0x00, composed[0]);
+                WriteFloatSafe(q + 0x04, composed[1]);
+                WriteFloatSafe(q + 0x08, composed[2]);
+                WriteFloatSafe(q + 0x0C, composed[3]);
+                cvr::camera::CamWriteRecordPush(composed, head);
+                cvr::camera::CamWriteQuatPublish(composed[0], composed[1], composed[2], composed[3]);
+                OpenXRManager::Get().PushRenderHeadPose(head);
+                ++CyberpunkVR_DebugGenericDetachedPatchWrites;
+                if ((CyberpunkVR_DebugGenericDetachedPatchWrites % 240u) == 1u) {
+                    Log("[generic-detached] component=%p patchWrites=%llu\n",
+                        reinterpret_cast<void*>(owner),
+                        static_cast<unsigned long long>(CyberpunkVR_DebugGenericDetachedPatchWrites));
+                }
+            }
+        }
+        return;
+    }
 
     {
         const uint32_t tid = GetCurrentThreadId();
@@ -78,7 +175,15 @@ extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* owner
         }
     }
 
-    const uintptr_t owner = reinterpret_cast<uintptr_t>(ownerState);
+    // A detached MAIN is copied temporarily into VRCAM and synchronously serialized through its
+    // natural transform-changed callback. During that one callback LocateCamera owns orientation
+    // and the temporary pose already owns eye position, so this component writer must leave both
+    // untouched. Thread-local scope prevents a stale frame or another camera graph from inheriting
+    // the handoff.
+    if (genericNonFppEnabled && camKind == 2 &&
+        cvr::camera::GenericVrcamLocateScopeMatches(owner)) {
+        return;
+    }
 
     // ---- HEAD TRANSLATION into the SECOND view ---------------------------------------------
     //
@@ -436,7 +541,7 @@ extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* owner
                     // published product, so while the base differed per kind whichever camera claimed the
                     // epoch decided the base for all three -- body-based one frame, lens-based the next.
                     // One base leaves the race nothing to decide.
-                    if (CyberpunkVR_DeviceCamOrient && DeviceCamActive() &&
+                    if (!genericNonFppEnabled && CyberpunkVR_DeviceCamOrient && DeviceCamActive() &&
                         g_devCamAimValid.load(std::memory_order_acquire)) {
                         // THE LENS YAW, AND THE PITCH HALF THAT MAIN USES -- not the mount's own pitch.
                         // The mount is 9.4 degrees nose-down, and composing that in started the view
@@ -543,7 +648,7 @@ extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* owner
     // THE SECOND EYE TAKES THE CAMERA'S OWN AIM, not a head-composed one, so both eyes look the same way
     // -- one eye steering while the other does not is worse than neither steering. Replaces the composed
     // quaternion outright, and the IPD right-vector below is then computed from the aim actually written.
-    if (camKind == 2 && DeviceCamActive()) {
+    if (!genericNonFppEnabled && camKind == 2 && DeviceCamActive()) {
         // WITH THE HEAD STEERING ON, VRCAM COMPOSES THROUGH THE ORDINARY MACHINERY and this block does
         // nothing. Handing it g_devCamViewQuat -- the quaternion the device camera was written with -- was
         // the VRCAM judder: when VRCAM is patched BEFORE the device camera in a frame that value is a
@@ -570,6 +675,12 @@ extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* owner
     // it is a test and not a setting, but if the jitter goes with it the fight is ours, and if the
     // jitter stays the orientation was never the thing moving.
     if (g_isInVehicle && CyberpunkVR_CamWriteOrientInVehicle == 0) haveWriteQuat = false;
+
+    // Generic detached-camera free-look above is restricted to exact recently observed camKind 0
+    // owners. Leave the separately classified surveillance lens on only one ownership path while
+    // generic mode is enabled; mixing its legacy device-camera composition with the generic
+    // handoff would double-own the rendered pose.
+    if (genericNonFppEnabled && camKind == 3) haveWriteQuat = false;
 
     // A device camera is left exactly as the engine wrote it unless the head steering is on.
     if (camKind == 3 && !CyberpunkVR_DeviceCamOrient) haveWriteQuat = false;
@@ -680,7 +791,7 @@ extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* owner
             // SET, NEVER CLEARED HERE. A failed read is a reason to keep the last known lens position,
             // not a reason to drop the second eye back onto the player. Cleared on release only.
             if (ok) g_devCamPosValid.store(1, std::memory_order_release);
-        } else if (camKind == 2 && ok && DeviceCamActive() &&
+        } else if (!genericNonFppEnabled && camKind == 2 && ok && DeviceCamActive() &&
                    g_devCamPosValid.load(std::memory_order_acquire)) {
             for (int i = 0; i < 3; ++i) p[i] = g_devCamPosFP[i].load(std::memory_order_relaxed);
             dirty = true;

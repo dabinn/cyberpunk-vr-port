@@ -684,6 +684,9 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     auto fProjRtti = RED4ext::CGlobalFunction::Create("DumpVRProjectileRtti", "DumpVRProjectileRtti", &DumpVRProjectileRtti);
     fProjRtti->flags = flags; fProjRtti->SetReturnType("Int32"); rtti->RegisterFunction(fProjRtti);
 
+    auto fCameraRtti = RED4ext::CGlobalFunction::Create("DumpVRCameraRtti", "DumpVRCameraRtti", &DumpVRCameraRtti);
+    fCameraRtti->flags = flags; fCameraRtti->SetReturnType("Int32"); rtti->RegisterFunction(fCameraRtti);
+
     auto fPaInstall = RED4ext::CGlobalFunction::Create("InstallVRPrepareAttack", "InstallVRPrepareAttack", &InstallVRPrepareAttack);
     fPaInstall->flags = flags; fPaInstall->SetReturnType("Int32"); rtti->RegisterFunction(fPaInstall);
     auto fPaSwap = RED4ext::CGlobalFunction::Create("SetVRPrepareAttackSwap", "SetVRPrepareAttackSwap", &SetVRPrepareAttackSwap);

@@ -82,6 +82,23 @@ void CamWriteRecordPush(const float q[4], const OpenXRHeadPose& p);
 // Identify the frame's pose from the quaternion the engine is about to render with. `outAge` is how
 // many writes back it was found, `outTies` how many records were within tolerance.
 bool CamWriteRecordFind(const float q[4], OpenXRHeadPose* out, uint32_t* outAge, uint32_t* outTies);
+// Strict provenance check used by generic detached MAIN: true only when the rendered quaternion is
+// bit-identical to a quaternion this plugin actually filed in the write ring.
+bool CamWriteRecordFindExact(const float q[4], OpenXRHeadPose* out);
+
+// ---- CameraDirector blend provenance ----------------------------------------------------------
+//
+// CameraDirector serializes all non-zero-weight active cameras synchronously on one worker thread,
+// then nlerps their quaternions. A thread-local scope lets each concrete serializer prove which HMD
+// sample its entry already contains. The final blended quaternion may then be filed in the ordinary
+// write ring only when EVERY active entry was composed from the exact same sample.
+void CameraDirectorBlendScopeBegin(const uintptr_t* cameraObjects, uint32_t capturedCount,
+                                   uint32_t activeCount, const OpenXRHeadPose* preferredHead);
+void CameraDirectorBlendScopeEnd();
+bool CameraDirectorBlendScopeContains(uintptr_t cameraObject);
+bool CameraDirectorBlendScopeReadHead(uintptr_t cameraObject, OpenXRHeadPose* outHead);
+bool CameraDirectorBlendScopeMarkComposed(uintptr_t cameraObject, const OpenXRHeadPose& head);
+bool CameraDirectorBlendScopeAllComposed(OpenXRHeadPose* outHead);
 
 // ---- the located camera frame used by native VRIK pairing -------------------------------------
 //
@@ -108,13 +125,48 @@ bool LocatedCameraFrameRead(LocatedCameraFrame* out);
 struct FinalMainCameraFrame {
     float worldPos[3];
     float worldQuat[4];
+    OpenXRHeadPose hmdPose{};
     uint64_t timestampUs;
     uint64_t callbackHit;
     uint32_t locateSequence;
     uint32_t sequence;
+    uint32_t hmdComposed;
 };
 void FinalMainCameraFramePublish(const FinalMainCameraFrame& f);
 bool FinalMainCameraFrameRead(FinalMainCameraFrame* out);
+
+// ---- generic detached-camera ownership ---------------------------------------------------------
+//
+// FinalCamera publishes whether authoritative MAIN is detached from the player's FPP component.
+// It uses this only to recover the clean gameplay base from the already composed MAIN pose for the
+// next VRCAM handoff; the flag must never gate a producer-side camera write.
+void GenericNonFppActivePublish(bool active);
+bool GenericNonFppActiveRead();
+
+// The selected VRCAM is temporarily pointed at the previous authoritative MAIN during its natural
+// transform-changed callback. That callback is synchronous, so a thread-local scope can hand the
+// matching HMD sample to VRCAM's own LocateCamera call without leaking ownership to another camera
+// graph or another frame. Exchange returns the previous scope so callers can restore nesting safely.
+struct GenericVrcamLocateScope {
+    uintptr_t cameraObject = 0;
+    OpenXRHeadPose head{};
+    bool active = false;
+    bool entryAlreadyComposed = false;
+    bool locateConsumed = false;
+};
+GenericVrcamLocateScope GenericVrcamLocateScopeExchange(const GenericVrcamLocateScope& scope);
+bool GenericVrcamLocateScopeMatches(uintptr_t cameraObject);
+bool GenericVrcamLocateScopeEntryAlreadyComposed(uintptr_t cameraObject);
+bool GenericVrcamLocateScopeRead(uintptr_t cameraObject, OpenXRHeadPose* outHead);
+
+// LocateCamera identifies the heap-backed detached camera objects that currently participate in
+// CameraDirector blending. PatchCamera runs earlier in the next camera update, so it accepts an
+// exact owner pointer only while that identity has been observed recently. Stale pointers are
+// never dereferenced through this channel; the reader only compares them with the object the engine
+// is already updating at its own post-store hook.
+void DetachedCameraObserve(uintptr_t cameraObject, uint64_t timestampUs);
+bool DetachedCameraWasObservedRecently(uintptr_t cameraObject, uint64_t nowUs,
+                                       uint64_t maximumAgeUs);
 
 // ---- the view frame handed to the solve --------------------------------------------------------
 //

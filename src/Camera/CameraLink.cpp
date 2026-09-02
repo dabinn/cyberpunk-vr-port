@@ -22,14 +22,48 @@ namespace {
 struct AtomicFinalMainCameraFrame {
     std::atomic<float> worldPos[3]{};
     std::atomic<float> worldQuat[4]{};
+    std::atomic<float> hmdPos[3]{};
+    std::atomic<float> hmdOri[4]{};
+    std::atomic<float> recenterPos[3]{};
+    std::atomic<float> recenterOri[4]{};
+    std::atomic<uint64_t> hmdFrameAimEpoch{0};
+    std::atomic<uint32_t> hmdValid{0};
+    std::atomic<uint32_t> hmdRecenterBaseValid{0};
     std::atomic<uint64_t> timestampUs{0};
     std::atomic<uint64_t> callbackHit{0};
     std::atomic<uint32_t> locateSequence{0};
     std::atomic<uint32_t> sequence{0};
+    std::atomic<uint32_t> hmdComposed{0};
 };
 
 AtomicFinalMainCameraFrame g_finalMain{};
 std::atomic<uint32_t> g_finalMainSeq{0};
+std::atomic<bool> g_genericNonFppActive{false};
+thread_local cvr::camera::GenericVrcamLocateScope g_genericVrcamLocateScope{};
+
+constexpr uint32_t kDetachedCameraSlots = 8;
+struct DetachedCameraSlot {
+    std::atomic<uintptr_t> cameraObject{0};
+    std::atomic<uint64_t> timestampUs{0};
+};
+DetachedCameraSlot g_detachedCameraSlots[kDetachedCameraSlots]{};
+std::atomic<uint32_t> g_detachedCameraHead{0};
+
+struct CameraDirectorBlendScopeEntry {
+    uintptr_t cameraObject = 0;
+    OpenXRHeadPose head{};
+    bool composed = false;
+};
+
+struct CameraDirectorBlendScopeState {
+    CameraDirectorBlendScopeEntry entries[8]{};
+    OpenXRHeadPose preferredHead{};
+    uint32_t count = 0;
+    bool active = false;
+    bool preferredHeadValid = false;
+};
+
+thread_local CameraDirectorBlendScopeState g_cameraDirectorBlendScope{};
 }  // namespace
 
 void cvr::camera::FinalMainCameraFramePublish(const FinalMainCameraFrame& f) {
@@ -40,10 +74,29 @@ void cvr::camera::FinalMainCameraFramePublish(const FinalMainCameraFrame& f) {
     for (int i = 0; i < 4; ++i) {
         g_finalMain.worldQuat[i].store(f.worldQuat[i], std::memory_order_relaxed);
     }
+    g_finalMain.hmdPos[0].store(f.hmdPose.posX, std::memory_order_relaxed);
+    g_finalMain.hmdPos[1].store(f.hmdPose.posY, std::memory_order_relaxed);
+    g_finalMain.hmdPos[2].store(f.hmdPose.posZ, std::memory_order_relaxed);
+    g_finalMain.hmdOri[0].store(f.hmdPose.oriX, std::memory_order_relaxed);
+    g_finalMain.hmdOri[1].store(f.hmdPose.oriY, std::memory_order_relaxed);
+    g_finalMain.hmdOri[2].store(f.hmdPose.oriZ, std::memory_order_relaxed);
+    g_finalMain.hmdOri[3].store(f.hmdPose.oriW, std::memory_order_relaxed);
+    g_finalMain.recenterPos[0].store(f.hmdPose.recenterBase.position.x, std::memory_order_relaxed);
+    g_finalMain.recenterPos[1].store(f.hmdPose.recenterBase.position.y, std::memory_order_relaxed);
+    g_finalMain.recenterPos[2].store(f.hmdPose.recenterBase.position.z, std::memory_order_relaxed);
+    g_finalMain.recenterOri[0].store(f.hmdPose.recenterBase.orientation.x, std::memory_order_relaxed);
+    g_finalMain.recenterOri[1].store(f.hmdPose.recenterBase.orientation.y, std::memory_order_relaxed);
+    g_finalMain.recenterOri[2].store(f.hmdPose.recenterBase.orientation.z, std::memory_order_relaxed);
+    g_finalMain.recenterOri[3].store(f.hmdPose.recenterBase.orientation.w, std::memory_order_relaxed);
+    g_finalMain.hmdFrameAimEpoch.store(f.hmdPose.frameAimEpoch, std::memory_order_relaxed);
+    g_finalMain.hmdValid.store(f.hmdPose.valid ? 1u : 0u, std::memory_order_relaxed);
+    g_finalMain.hmdRecenterBaseValid.store(f.hmdPose.recenterBaseValid ? 1u : 0u,
+                                           std::memory_order_relaxed);
     g_finalMain.timestampUs.store(f.timestampUs, std::memory_order_relaxed);
     g_finalMain.callbackHit.store(f.callbackHit, std::memory_order_relaxed);
     g_finalMain.locateSequence.store(f.locateSequence, std::memory_order_relaxed);
     g_finalMain.sequence.store(f.sequence, std::memory_order_relaxed);
+    g_finalMain.hmdComposed.store(f.hmdComposed, std::memory_order_relaxed);
     g_finalMainSeq.fetch_add(1u, std::memory_order_release);
 }
 
@@ -60,15 +113,87 @@ bool cvr::camera::FinalMainCameraFrameRead(FinalMainCameraFrame* out) {
         for (int i = 0; i < 4; ++i) {
             tmp.worldQuat[i] = g_finalMain.worldQuat[i].load(std::memory_order_relaxed);
         }
+        tmp.hmdPose.posX = g_finalMain.hmdPos[0].load(std::memory_order_relaxed);
+        tmp.hmdPose.posY = g_finalMain.hmdPos[1].load(std::memory_order_relaxed);
+        tmp.hmdPose.posZ = g_finalMain.hmdPos[2].load(std::memory_order_relaxed);
+        tmp.hmdPose.oriX = g_finalMain.hmdOri[0].load(std::memory_order_relaxed);
+        tmp.hmdPose.oriY = g_finalMain.hmdOri[1].load(std::memory_order_relaxed);
+        tmp.hmdPose.oriZ = g_finalMain.hmdOri[2].load(std::memory_order_relaxed);
+        tmp.hmdPose.oriW = g_finalMain.hmdOri[3].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.position.x = g_finalMain.recenterPos[0].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.position.y = g_finalMain.recenterPos[1].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.position.z = g_finalMain.recenterPos[2].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.orientation.x = g_finalMain.recenterOri[0].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.orientation.y = g_finalMain.recenterOri[1].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.orientation.z = g_finalMain.recenterOri[2].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.orientation.w = g_finalMain.recenterOri[3].load(std::memory_order_relaxed);
+        tmp.hmdPose.frameAimEpoch = g_finalMain.hmdFrameAimEpoch.load(std::memory_order_relaxed);
+        tmp.hmdPose.valid = g_finalMain.hmdValid.load(std::memory_order_relaxed) != 0;
+        tmp.hmdPose.recenterBaseValid =
+            g_finalMain.hmdRecenterBaseValid.load(std::memory_order_relaxed) != 0;
         tmp.timestampUs = g_finalMain.timestampUs.load(std::memory_order_relaxed);
         tmp.callbackHit = g_finalMain.callbackHit.load(std::memory_order_relaxed);
         tmp.locateSequence = g_finalMain.locateSequence.load(std::memory_order_relaxed);
         tmp.sequence = g_finalMain.sequence.load(std::memory_order_relaxed);
+        tmp.hmdComposed = g_finalMain.hmdComposed.load(std::memory_order_relaxed);
 
         if (g_finalMainSeq.load(std::memory_order_acquire) == s0) {
             *out = tmp;
             return true;
         }
+    }
+    return false;
+}
+
+void cvr::camera::GenericNonFppActivePublish(bool active) {
+    g_genericNonFppActive.store(active, std::memory_order_release);
+}
+
+bool cvr::camera::GenericNonFppActiveRead() {
+    return g_genericNonFppActive.load(std::memory_order_acquire);
+}
+
+cvr::camera::GenericVrcamLocateScope cvr::camera::GenericVrcamLocateScopeExchange(
+    const GenericVrcamLocateScope& scope) {
+    const GenericVrcamLocateScope previous = g_genericVrcamLocateScope;
+    g_genericVrcamLocateScope = scope;
+    return previous;
+}
+
+bool cvr::camera::GenericVrcamLocateScopeMatches(uintptr_t cameraObject) {
+    return g_genericVrcamLocateScope.active && cameraObject != 0 &&
+           g_genericVrcamLocateScope.cameraObject == cameraObject;
+}
+
+bool cvr::camera::GenericVrcamLocateScopeEntryAlreadyComposed(uintptr_t cameraObject) {
+    return GenericVrcamLocateScopeMatches(cameraObject) &&
+           g_genericVrcamLocateScope.entryAlreadyComposed;
+}
+
+bool cvr::camera::GenericVrcamLocateScopeRead(uintptr_t cameraObject, OpenXRHeadPose* outHead) {
+    if (!outHead || !GenericVrcamLocateScopeMatches(cameraObject)) return false;
+    *outHead = g_genericVrcamLocateScope.head;
+    g_genericVrcamLocateScope.locateConsumed = true;
+    return true;
+}
+
+void cvr::camera::DetachedCameraObserve(uintptr_t cameraObject, uint64_t timestampUs) {
+    if (cameraObject < 0x10000 || timestampUs == 0) return;
+    const uint32_t index = g_detachedCameraHead.fetch_add(1u, std::memory_order_relaxed) %
+                           kDetachedCameraSlots;
+    DetachedCameraSlot& slot = g_detachedCameraSlots[index];
+    slot.timestampUs.store(0, std::memory_order_relaxed);
+    slot.cameraObject.store(cameraObject, std::memory_order_relaxed);
+    slot.timestampUs.store(timestampUs, std::memory_order_release);
+}
+
+bool cvr::camera::DetachedCameraWasObservedRecently(uintptr_t cameraObject, uint64_t nowUs,
+                                                    uint64_t maximumAgeUs) {
+    if (cameraObject < 0x10000 || nowUs == 0) return false;
+    for (const DetachedCameraSlot& slot : g_detachedCameraSlots) {
+        const uint64_t timestampUs = slot.timestampUs.load(std::memory_order_acquire);
+        if (timestampUs == 0 || nowUs < timestampUs || nowUs - timestampUs > maximumAgeUs) continue;
+        if (slot.cameraObject.load(std::memory_order_relaxed) == cameraObject) return true;
     }
     return false;
 }
@@ -130,6 +255,114 @@ void cvr::camera::CamWriteRecordPush(const float q[4], const OpenXRHeadPose& p) 
     std::atomic_thread_fence(std::memory_order_release);
     r.valid = 1;
     g_camWriteRingHead.fetch_add(1, std::memory_order_release);
+}
+
+bool cvr::camera::CamWriteRecordFindExact(const float q[4], OpenXRHeadPose* out) {
+    if (!q) return false;
+    const uint64_t head = g_camWriteRingHead.load(std::memory_order_acquire);
+    const uint64_t n = head < kCamWriteRing ? head : kCamWriteRing;
+    for (uint64_t i = 1; i <= n; ++i) {
+        const CamWriteRecord& r = g_camWriteRing[(head - i) % kCamWriteRing];
+        if (!r.valid) continue;
+        if (r.quat[0] == q[0] && r.quat[1] == q[1] &&
+            r.quat[2] == q[2] && r.quat[3] == q[3]) {
+            if (out) *out = r.pose;
+            return true;
+        }
+    }
+    return false;
+}
+
+namespace {
+bool SameHeadSample(const OpenXRHeadPose& a, const OpenXRHeadPose& b) {
+    if (!a.valid || !b.valid || a.frameAimEpoch != b.frameAimEpoch ||
+        a.recenterBaseValid != b.recenterBaseValid) {
+        return false;
+    }
+    if (a.posX != b.posX || a.posY != b.posY || a.posZ != b.posZ ||
+        a.oriX != b.oriX || a.oriY != b.oriY || a.oriZ != b.oriZ || a.oriW != b.oriW) {
+        return false;
+    }
+    if (!a.recenterBaseValid) return true;
+    return a.recenterBase.position.x == b.recenterBase.position.x &&
+           a.recenterBase.position.y == b.recenterBase.position.y &&
+           a.recenterBase.position.z == b.recenterBase.position.z &&
+           a.recenterBase.orientation.x == b.recenterBase.orientation.x &&
+           a.recenterBase.orientation.y == b.recenterBase.orientation.y &&
+           a.recenterBase.orientation.z == b.recenterBase.orientation.z &&
+           a.recenterBase.orientation.w == b.recenterBase.orientation.w;
+}
+}  // namespace
+
+void cvr::camera::CameraDirectorBlendScopeBegin(const uintptr_t* cameraObjects,
+                                                uint32_t capturedCount, uint32_t activeCount,
+                                                const OpenXRHeadPose* preferredHead) {
+    g_cameraDirectorBlendScope = {};
+    if (!cameraObjects || activeCount == 0 || capturedCount != activeCount || capturedCount > 8) {
+        return;
+    }
+    g_cameraDirectorBlendScope.count = capturedCount;
+    g_cameraDirectorBlendScope.active = true;
+    for (uint32_t i = 0; i < capturedCount; ++i) {
+        g_cameraDirectorBlendScope.entries[i].cameraObject = cameraObjects[i];
+    }
+    if (preferredHead && preferredHead->valid) {
+        g_cameraDirectorBlendScope.preferredHead = *preferredHead;
+        g_cameraDirectorBlendScope.preferredHeadValid = true;
+    }
+}
+
+void cvr::camera::CameraDirectorBlendScopeEnd() {
+    g_cameraDirectorBlendScope = {};
+}
+
+bool cvr::camera::CameraDirectorBlendScopeContains(uintptr_t cameraObject) {
+    if (!g_cameraDirectorBlendScope.active || cameraObject < 0x10000) return false;
+    for (uint32_t i = 0; i < g_cameraDirectorBlendScope.count; ++i) {
+        if (g_cameraDirectorBlendScope.entries[i].cameraObject == cameraObject) return true;
+    }
+    return false;
+}
+
+bool cvr::camera::CameraDirectorBlendScopeReadHead(uintptr_t cameraObject, OpenXRHeadPose* outHead) {
+    if (!outHead || !CameraDirectorBlendScopeContains(cameraObject) ||
+        !g_cameraDirectorBlendScope.preferredHeadValid) {
+        return false;
+    }
+    *outHead = g_cameraDirectorBlendScope.preferredHead;
+    return outHead->valid;
+}
+
+bool cvr::camera::CameraDirectorBlendScopeMarkComposed(uintptr_t cameraObject,
+                                                       const OpenXRHeadPose& head) {
+    if (!head.valid || !g_cameraDirectorBlendScope.active || cameraObject < 0x10000) return false;
+    for (uint32_t i = 0; i < g_cameraDirectorBlendScope.count; ++i) {
+        CameraDirectorBlendScopeEntry& entry = g_cameraDirectorBlendScope.entries[i];
+        if (entry.cameraObject != cameraObject) continue;
+        if (entry.composed && !SameHeadSample(entry.head, head)) return false;
+        entry.head = head;
+        entry.composed = true;
+        if (!g_cameraDirectorBlendScope.preferredHeadValid) {
+            g_cameraDirectorBlendScope.preferredHead = head;
+            g_cameraDirectorBlendScope.preferredHeadValid = true;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool cvr::camera::CameraDirectorBlendScopeAllComposed(OpenXRHeadPose* outHead) {
+    if (!outHead || !g_cameraDirectorBlendScope.active || g_cameraDirectorBlendScope.count == 0) {
+        return false;
+    }
+    const CameraDirectorBlendScopeEntry& first = g_cameraDirectorBlendScope.entries[0];
+    if (!first.composed || !first.head.valid) return false;
+    for (uint32_t i = 1; i < g_cameraDirectorBlendScope.count; ++i) {
+        const CameraDirectorBlendScopeEntry& entry = g_cameraDirectorBlendScope.entries[i];
+        if (!entry.composed || !SameHeadSample(first.head, entry.head)) return false;
+    }
+    *outHead = first.head;
+    return true;
 }
 
 // Frames identified by a BIT-FOR-BIT match (the normal path) versus by nearest-neighbour (the

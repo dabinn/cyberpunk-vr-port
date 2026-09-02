@@ -7,12 +7,14 @@
 //
 // FPP keeps the current player-camera component as a low-latency fast path. If the dispatcher MAIN
 // separates from that component (vehicle TPP, cutscene, terminal, surveillance, another director
-// camera), the last authoritative view-key-0 MAIN packet takes over. There are deliberately no
-// scene names or camera-class checks here; exceptions belong above this generic path only if runtime
-// testing proves a particular camera cannot use it.
+// camera), the last authoritative view-key-0 MAIN packet takes over. With the user-facing non-FPP
+// switch off this file makes no pose change, which keeps the upstream/Dari path as a clean A/B side.
+// There are deliberately no scene names or camera-class checks in the generic side; exceptions
+// belong above it only if runtime testing proves a particular camera cannot use it.
 
 #include "Camera/CameraLink.hpp"
 #include "Camera/CameraState.hpp"
+#include "Core/LiveControls.hpp"
 #include "Stereo/DetourRegistry.hpp"
 #include "Stereo/EngineRvas.hpp"
 #include "Stereo/StereoInternal.hpp"
@@ -40,6 +42,8 @@ struct RawPlacedPose {
 struct MainSourceSelection {
     RawPlacedPose pose{};
     bool useTrueMain = false;
+    bool hmdComposed = false;
+    OpenXRHeadPose hmdPose{};
     bool finalMainValid = false;
     int64_t finalAgeUs = -1;
     float positionGap = 0.0f;
@@ -53,6 +57,7 @@ static std::atomic<uint64_t> g_publishFailures{0};
 static std::atomic<uint64_t> g_restoreFailures{0};
 static std::atomic<uint64_t> g_stableRejected{0};
 static std::atomic<uint64_t> g_sourceHandoffs{0};
+static std::atomic<uint64_t> g_locateScopeMisses{0};
 static std::atomic<uintptr_t> g_sourceStateComponent{0};
 static std::atomic<bool> g_useTrueMain{false};
 
@@ -188,6 +193,8 @@ static MainSourceSelection SelectMainSource(uintptr_t vrcamComponent,
         if (EncodePose(finalMain.worldPos, finalMain.worldQuat, &trueMain)) {
             selected.pose = trueMain;
             selected.useTrueMain = true;
+            selected.hmdComposed = finalMain.hmdComposed != 0 && finalMain.hmdPose.valid;
+            if (selected.hmdComposed) selected.hmdPose = finalMain.hmdPose;
         } else {
             g_useTrueMain.store(false, std::memory_order_release);
         }
@@ -195,11 +202,12 @@ static MainSourceSelection SelectMainSource(uintptr_t vrcamComponent,
     return selected;
 }
 
-static bool BuildOppositeEyePose(const RawPlacedPose& mainPose, RawPlacedPose* out,
-                                 float* outSignedOffset) {
+static bool BuildOppositeEyePose(const RawPlacedPose& mainPose, const float* eyeOrientation,
+                                 RawPlacedPose* out, float* outSignedOffset) {
     if (!out) return false;
     float q[4]{};
-    std::memcpy(q, mainPose.quaternion, sizeof(q));
+    if (eyeOrientation) std::memcpy(q, eyeOrientation, sizeof(q));
+    else std::memcpy(q, mainPose.quaternion, sizeof(q));
     if (!IsPlausibleUnitQuaternion(q)) return false;
 
     float right[3]{};
@@ -247,13 +255,46 @@ static void PublishActiveMainToVrcam(uintptr_t vrcamComponent) {
     }
 
     const MainSourceSelection selection = SelectMainSource(vrcamComponent, currentFpp);
+
+    // The detached camera remains the positional/orbit authority. The temporary component keeps
+    // the clean engine base quaternion. Its synchronous transform-changed callback receives the
+    // matching HMD sample through a thread-local LocateCamera scope, while the composed basis below
+    // is used only to choose the opposite-eye IPD axis.
+    float eyeOrientation[4]{};
+    const float* eyeOrientationPtr = nullptr;
+    OpenXRHeadPose genericHead{};
+    if (selection.useTrueMain && selection.hmdComposed) {
+        float baseQuat[4]{};
+        std::memcpy(baseQuat, selection.pose.quaternion, sizeof(baseQuat));
+        genericHead = selection.hmdPose;
+        if (!IsPlausibleUnitQuaternion(baseQuat) || !genericHead.valid) {
+            g_publishFailures.fetch_add(1u, std::memory_order_relaxed);
+            return;
+        }
+        MulQuat(baseQuat[0], baseQuat[1], baseQuat[2], baseQuat[3],
+                genericHead.oriX, -genericHead.oriZ, genericHead.oriY, genericHead.oriW,
+                eyeOrientation[0], eyeOrientation[1], eyeOrientation[2], eyeOrientation[3]);
+        NormalizeQuat(eyeOrientation[0], eyeOrientation[1], eyeOrientation[2], eyeOrientation[3]);
+        if (!IsPlausibleUnitQuaternion(eyeOrientation)) {
+            g_publishFailures.fetch_add(1u, std::memory_order_relaxed);
+            return;
+        }
+        eyeOrientationPtr = eyeOrientation;
+    }
+
     RawPlacedPose vrcamPose{};
     float signedOffset = 0.0f;
-    if (!BuildOppositeEyePose(selection.pose, &vrcamPose, &signedOffset)) {
+    if (!BuildOppositeEyePose(selection.pose, eyeOrientationPtr, &vrcamPose, &signedOffset)) {
         g_publishFailures.fetch_add(1u, std::memory_order_relaxed);
         return;
     }
-
+    if (selection.useTrueMain && selection.hmdComposed) {
+        // Publish an already composed temporary transform. The +0x240 callback is proven to copy
+        // this pose into RTT-owned camera state, but it is not proven to call LocateCamera
+        // synchronously on every path. The scope tells PatchCamera to leave it alone and tells a
+        // synchronous LocateCamera call to record it without multiplying the HMD a second time.
+        std::memcpy(vrcamPose.quaternion, eyeOrientation, sizeof(vrcamPose.quaternion));
+    }
     RawPlacedPose original{};
     const auto transformChanged = GetTransformChangedCallback(vrcamComponent);
     if (!ReadRawPose(vrcamComponent, &original) || !transformChanged) {
@@ -264,6 +305,18 @@ static void PublishActiveMainToVrcam(uintptr_t vrcamComponent) {
     bool writeAttempted = false;
     bool wroteTemporary = false;
     bool callbackCompleted = false;
+    bool locateScopeInstalled = false;
+    cvr::camera::GenericVrcamLocateScope previousScope{};
+    cvr::camera::GenericVrcamLocateScope completedScope{};
+    if (selection.useTrueMain && selection.hmdComposed) {
+        cvr::camera::GenericVrcamLocateScope scope{};
+        scope.cameraObject = vrcamComponent;
+        scope.head = genericHead;
+        scope.active = true;
+        scope.entryAlreadyComposed = true;
+        previousScope = cvr::camera::GenericVrcamLocateScopeExchange(scope);
+        locateScopeInstalled = true;
+    }
     __try {
         writeAttempted = true;
         wroteTemporary = WriteRawPose(vrcamComponent, vrcamPose);
@@ -274,6 +327,9 @@ static void PublishActiveMainToVrcam(uintptr_t vrcamComponent) {
         }
     }
     __finally {
+        if (locateScopeInstalled) {
+            completedScope = cvr::camera::GenericVrcamLocateScopeExchange(previousScope);
+        }
         // WriteRawPose can fail after a partial field write. Restore after every attempted write,
         // not only after a fully successful one, so a fault cannot leave the selected VRCAM half
         // updated in engine-owned memory.
@@ -287,16 +343,25 @@ static void PublishActiveMainToVrcam(uintptr_t vrcamComponent) {
         g_publishFailures.fetch_add(1u, std::memory_order_relaxed);
         return;
     }
+    if (selection.useTrueMain && selection.hmdComposed && !completedScope.locateConsumed) {
+        g_locateScopeMisses.fetch_add(1u, std::memory_order_relaxed);
+        cvr::camera::CamWriteRecordPush(eyeOrientation, genericHead);
+        cvr::camera::CamWriteQuatPublish(eyeOrientation[0], eyeOrientation[1],
+                                         eyeOrientation[2], eyeOrientation[3]);
+    }
 
     const uint64_t published = g_publishes.load(std::memory_order_relaxed);
     if ((published % 240u) == 1u || !restoredExactly) {
-        Log("[vrcam-handoff] hits=%llu publishes=%llu failures=%llu restores=%llu source=%s "
-            "handoffs=%llu finalValid=%d finalAgeUs=%lld gapM=%.4f gapDeg=%.3f eyeOffset=%.5f\n",
+        Log("[vrcam-handoff] hits=%llu publishes=%llu failures=%llu restores=%llu scopeMisses=%llu "
+            "source=%s hmd=%d handoffs=%llu finalValid=%d finalAgeUs=%lld gapM=%.4f gapDeg=%.3f "
+            "eyeOffset=%.5f\n",
             static_cast<unsigned long long>(g_boundHits.load(std::memory_order_relaxed)),
             static_cast<unsigned long long>(published),
             static_cast<unsigned long long>(g_publishFailures.load(std::memory_order_relaxed)),
             static_cast<unsigned long long>(g_restoreFailures.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(g_locateScopeMisses.load(std::memory_order_relaxed)),
             selection.useTrueMain ? "true-main" : "fpp-current",
+            selection.hmdComposed ? 1 : 0,
             static_cast<unsigned long long>(g_sourceHandoffs.load(std::memory_order_relaxed)),
             selection.finalMainValid ? 1 : 0,
             static_cast<long long>(selection.finalAgeUs),
@@ -308,7 +373,13 @@ static void __fastcall Detour_RttCameraRefresh(uintptr_t component) {
     const uintptr_t selectedVrcam = g_vrcam_comp.load(std::memory_order_acquire);
     if (component && component == selectedVrcam) {
         g_boundHits.fetch_add(1u, std::memory_order_relaxed);
-        PublishActiveMainToVrcam(component);
+        if (g_liveControls.xrAllowNonFppViews != 0) {
+            PublishActiveMainToVrcam(component);
+        } else {
+            // OFF is the upstream/Dari A/B side: no generic pose ownership reaches the selected
+            // VRCAM, including surveillance cameras that have their own device-camera bridge.
+            cvr::camera::GenericNonFppActivePublish(false);
+        }
     }
     g_orig_rtt_camera_refresh(component);
 }

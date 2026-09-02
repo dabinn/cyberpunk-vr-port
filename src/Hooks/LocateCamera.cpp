@@ -45,6 +45,8 @@
 
 // MAIN's live ADS magnification, recovered from its own projection by the stereo module.
 extern "C" float CyberpunkVR_MainAdsZoomFactor;
+extern "C" void TraceCameraLocateEntryTelemetry(const float* setup, uintptr_t cameraObject,
+                                                 bool stackBacked);
 
 // ---- ADS: THE WEAPON LAYER AND THE WORLD MAGNIFIED BY DIFFERENT AMOUNTS ------------------------
 //
@@ -68,6 +70,8 @@ extern "C" float CyberpunkVR_MainAdsZoomFactor;
 extern "C" __declspec(dllexport) int32_t  CyberpunkVR_AdsWeaponZoomSync = 1;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugAdsZoomWrites = 0;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugAdsZoomRejects = 0;
+extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugGenericDetachedObservations = 0;
+extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugGenericLocateVrcamWrites = 0;
 
 // The telemetry snapshot lives here, next to the only place that can produce it: this hook is where
 // the engine's own camera residual is visible before VR adds anything to it.
@@ -157,7 +161,8 @@ static void SyncAdsWeaponZoomToWorld() {
     s_prevAiming = aiming;
 }
 
-extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val) {
+extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val,
+                                                    uintptr_t cameraObject) {
     (void)xmm0_val;
     g_locateCameraHits++;
     if (g_telemetry) {
@@ -170,8 +175,9 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
     int32_t* posFP = reinterpret_cast<int32_t*>(rbxPtr);
     float* quat = reinterpret_cast<float*>(rbxPtr + 4); // +16 bytes = +4 floats
 
-    float dummy;
-    if (!ReadFloatSafe(reinterpret_cast<uintptr_t>(quat), &dummy)) return;
+    float entryBaseQuat[4]{};
+    if (!ReadFloatArraySafe(quat, entryBaseQuat, 4) ||
+        !IsPlausibleUnitQuaternion(entryBaseQuat)) return;
     // Raw ENGINE view at entry (yaw + pos), for the [dx-win] snap-window diag.
     g_dbgEntryYaw = atan2f(2.0f * (quat[3] * quat[2] + quat[0] * quat[1]),
                            1.0f - 2.0f * (quat[1] * quat[1] + quat[2] * quat[2]));
@@ -181,12 +187,16 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
 
     // The real gameplay camera is heap-backed. The juddery second bake came from
     // transient camera transforms built on the current thread stack, so reject those.
+    // Trace the untouched entry first so the CameraDirector chain log can distinguish normal
+    // blended inputs from the stack-backed override-camera branch without changing either pose.
     {
         const NT_TIB* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
         const uintptr_t cp  = reinterpret_cast<uintptr_t>(rbxPtr);
         const uintptr_t sLo = reinterpret_cast<uintptr_t>(tib->StackLimit);
         const uintptr_t sHi = reinterpret_cast<uintptr_t>(tib->StackBase);
-        if (cp >= sLo && cp < sHi) {
+        const bool stackBacked = cp >= sLo && cp < sHi;
+        TraceCameraLocateEntryTelemetry(rbxPtr, cameraObject, stackBacked);
+        if (stackBacked) {
             static uint32_t s_scRej = 0;
             static uint64_t s_scMs = 0;
             ++s_scRej;
@@ -198,6 +208,18 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
                 s_scMs = scNow;
             }
             return;
+        }
+    }
+
+    // During a CameraDirector transition the FPP entry may already contain the quaternion written
+    // by PatchCamera before this serializer ran. Prove that fact from the ordinary write ring and
+    // attach its exact HMD sample to the current director blend scope. This is deliberately based
+    // on the untouched entry quaternion, not on the composition calculated later in this callback.
+    if (g_liveControls.xrAllowNonFppViews != 0 &&
+        cvr::camera::CameraDirectorBlendScopeContains(cameraObject)) {
+        OpenXRHeadPose entryHead{};
+        if (cvr::camera::CamWriteRecordFindExact(entryBaseQuat, &entryHead) && entryHead.valid) {
+            cvr::camera::CameraDirectorBlendScopeMarkComposed(cameraObject, entryHead);
         }
     }
 
@@ -485,6 +507,27 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
     const bool hasXR = CyberpunkVR_OneSamplePerFrame
         ? OpenXRManager::Get().AcquireFrameHeadSample(&xrPose)
         : OpenXRManager::Get().GetHeadPose(&xrPose);
+    OpenXRHeadPose scopedVrcamHead{};
+    const bool genericEnabled = g_liveControls.xrAllowNonFppViews != 0;
+    const bool scopedVrcamLocate = genericEnabled &&
+        cvr::camera::GenericVrcamLocateScopeRead(cameraObject, &scopedVrcamHead) &&
+        scopedVrcamHead.valid;
+    const bool scopedVrcamEntryAlreadyComposed = scopedVrcamLocate &&
+        cvr::camera::GenericVrcamLocateScopeEntryAlreadyComposed(cameraObject);
+    const uintptr_t fppCameraObject = g_camObjMain.load(std::memory_order_acquire);
+    const uintptr_t vrcamCameraObject = g_camObjVrcam.load(std::memory_order_acquire);
+    const bool detachedMainLocate = genericEnabled && !scopedVrcamLocate &&
+        cameraObject >= 0x10000 && fppCameraObject >= 0x10000 &&
+        cameraObject != fppCameraObject && cameraObject != vrcamCameraObject;
+    if (detachedMainLocate) {
+        cvr::camera::DetachedCameraObserve(cameraObject, XrDiagNowUs());
+        ++CyberpunkVR_DebugGenericDetachedObservations;
+        if ((CyberpunkVR_DebugGenericDetachedObservations % 240u) == 1u) {
+            Log("[generic-detached-observe] component=%p observations=%llu\n",
+                reinterpret_cast<void*>(cameraObject),
+                static_cast<unsigned long long>(CyberpunkVR_DebugGenericDetachedObservations));
+        }
+    }
     // Take the bridge value belonging to the same base/aim epoch as this head pose. A late camera
     // consumer can still finish an older epoch after the XR thread has folded the new one.
     const float bodyYawBridge = hasXR
@@ -667,17 +710,44 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         // Skip the HMD orientation write on the shot frame (or always, mode 1) so the game's
         // native aim/snap drives the camera -> the bullet follows the controller/stick aim.
         //
-        // CamWriteInPatch: LocateCamera COMPOSES, PatchCamera WRITES. This buffer is a
-        // serialised copy of the camera description and the engine refills part of it after we
-        // return, so a write here is only half-applied -- consumers that read the other
-        // representation see an unrotated camera. PatchCamera writes the component's own
-        // store, and it is the only site that can tell MAIN from VRCAM, which is what the
-        // second view needs to track at all.
+        // CamWriteInPatch: LocateCamera COMPOSES, PatchCamera WRITES for the player FPP path.
+        // The serialized entry remains useful for detached cameras: this hook runs after position
+        // and quaternion are stored, the remaining serializer only fills +0x20 and later fields,
+        // and CameraDirector blends this exact entry without writing its pose again.
         if (!skipHmdOrientation && !CyberpunkVR_CamWriteInPatch) {
             quat[0] = camera_qx;
             quat[1] = camera_qy;
             quat[2] = camera_qz;
             quat[3] = camera_qw;
+        }
+    }
+
+    // MAIN detached cameras are only IDENTIFIED here. Their serialized mixer entry proved to be a
+    // bad write boundary: derived component state and final pose diverged after this call. The next
+    // update's exact component owner is matched and written at PatchCamera instead. VRCAM is the one
+    // exception: its temporary true-MAIN transform is already composed by the scoped handoff, and a
+    // synchronous Locate call only records that pose without multiplying it again.
+    const OpenXRHeadPose* genericHead = scopedVrcamLocate ? &scopedVrcamHead : nullptr;
+    if (!skipHmdOrientation && genericHead && genericHead->valid &&
+        scopedVrcamLocate) {
+        float composed[4]{};
+        if (scopedVrcamEntryAlreadyComposed) {
+            composed[0] = entryBaseQuat[0]; composed[1] = entryBaseQuat[1];
+            composed[2] = entryBaseQuat[2]; composed[3] = entryBaseQuat[3];
+        } else {
+            MulQuat(entryBaseQuat[0], entryBaseQuat[1], entryBaseQuat[2], entryBaseQuat[3],
+                    genericHead->oriX, -genericHead->oriZ, genericHead->oriY, genericHead->oriW,
+                    composed[0], composed[1], composed[2], composed[3]);
+        }
+        NormalizeQuat(composed[0], composed[1], composed[2], composed[3]);
+        if (IsPlausibleUnitQuaternion(composed)) {
+            quat[0] = composed[0]; quat[1] = composed[1];
+            quat[2] = composed[2]; quat[3] = composed[3];
+            camera_qx = composed[0]; camera_qy = composed[1];
+            camera_qz = composed[2]; camera_qw = composed[3];
+            cvr::camera::CamWriteRecordPush(composed, *genericHead);
+            cvr::camera::CamWriteQuatPublish(composed[0], composed[1], composed[2], composed[3]);
+            ++CyberpunkVR_DebugGenericLocateVrcamWrites;
         }
     }
 
@@ -1154,6 +1224,8 @@ bool InstallLocateCameraHook() {
     code[pos++] = 0x48; code[pos++] = 0x89; code[pos++] = 0xD9; // mov rcx, rbx
     // Set arg2 (xmm1) = xmm0 (since float args go in xmm registers, xmm1 is 2nd arg)
     code[pos++] = 0x0F; code[pos++] = 0x28; code[pos++] = 0xC8; // movaps xmm1, xmm0
+    // Set arg3 (r8) = rsi, the LocateCamera object base that owns this serialized entry.
+    code[pos++] = 0x49; code[pos++] = 0x89; code[pos++] = 0xF0; // mov r8, rsi
 
     WriteMovRaxImm64(code, pos, reinterpret_cast<uintptr_t>(OnLocateCameraCallback));
     code[pos++] = 0xFF; code[pos++] = 0xD0; // call rax

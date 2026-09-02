@@ -6,7 +6,15 @@
 // Anim/WeaponAim.hpp.
 
 #include "Anim/WeaponAim.hpp"
+#include "Camera/CameraLink.hpp"
+#include "Camera/CameraState.hpp"
+#include "Core/LiveControls.hpp"
 #include "Hooks/Hook.hpp"   // CVR_HOOK: this family installs at boot now, see below
+#include "Runtimes/OpenXRManager.hpp"
+#include "Utils/MemorySafe.hpp"
+#include "Utils/StereoLog.hpp"
+
+#include <atomic>
 
 // EXPORTED MIRRORS of the two counters that decide where a missing shot signal is lost. The originals
 // are plain volatiles inside this module and a live probe cannot see them; without these the only way
@@ -261,9 +269,513 @@ extern "C" inline uintptr_t Hooked_WaHead(void* rcx, void* rdx, void* r8, void* 
 typedef void* (*WaProjFunc_t)(void*, void*, void*, void*);
 typedef void* (*WaTargetFunc_t)(void*, void*, void*, void*, void*, void*);
 typedef uint32_t (*WaClassifyFunc_t)(void*, void*);
+typedef void (*CameraDirectorBlendFunc_t)(void*);
+typedef void* (*CameraDirectorGetSetupFunc_t)(void*, void*);
+typedef void (*CameraSetupSerializerFunc_t)(void*, void*);
 inline WaProjFunc_t     OrigWaProj      = nullptr;
 inline WaTargetFunc_t   OrigWaTarget    = nullptr;
 inline WaClassifyFunc_t OrigWaClassify  = nullptr;
+inline CameraDirectorBlendFunc_t OrigCameraDirectorBlend = nullptr;
+inline CameraDirectorGetSetupFunc_t OrigCameraDirectorGetSetup = nullptr;
+inline CameraSetupSerializerFunc_t OrigGenericNonFppSerializer = nullptr;
+
+namespace {
+constexpr uint32_t kCameraDirectorBlendRva = 0x12752C;
+constexpr uint32_t kCameraDirectorGetSetupRva = 0x1274A4;
+constexpr uint32_t kCameraDirectorGetSetupRetRva = 0x12742A;
+constexpr uint32_t kCameraDirectorPublishCopyRetRva = 0x127436;
+constexpr uint32_t kGenericNonFppSerializerRva = 0x7FFBD0;
+std::atomic<uint64_t> g_cameraBlendTraceCalls{0};
+std::atomic<int> g_cameraBlendTraceDetached{-1};
+std::atomic<uint64_t> g_genericNonFppComposeCalls{0};
+std::atomic<uint64_t> g_genericNonFppBlendProvenance{0};
+std::atomic<uint64_t> g_cameraPublishTraceCalls{0};
+std::atomic<int> g_cameraPublishTraceDetached{-1};
+std::atomic<uint64_t> g_cameraChainTraceCalls{0};
+std::atomic<int> g_cameraChainTraceDetached{-1};
+std::atomic<uint64_t> g_cameraLocateTraceSeq{0};
+
+struct CameraBlendTraceEntry {
+    uintptr_t camera = 0;
+    uintptr_t interfaceObject = 0;
+    uintptr_t vtable = 0;
+    uintptr_t serializer = 0;
+    float weight = 0.0f;
+};
+
+struct CameraLocateTraceSample {
+    uint64_t seq = 0;
+    uint64_t timestampUs = 0;
+    uintptr_t setup = 0;
+    uintptr_t cameraObject = 0;
+    uint32_t kind = 0;  // 0=other, 1=player MAIN, 2=selected VRCAM
+    uint32_t stackBacked = 0;
+    float pos[3]{};
+    float quat[4]{};
+};
+
+struct CameraLocateTraceBatch {
+    uint32_t count = 0;
+    CameraLocateTraceSample first{};
+    CameraLocateTraceSample last{};
+};
+
+thread_local CameraLocateTraceBatch g_cameraLocateTraceBatch{};
+
+bool ReadCameraSetupPoseBase(void* setup, float outPos[3], float outQuat[4]) {
+    if (!setup || !outPos || !outQuat) return false;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(setup);
+    for (int i = 0; i < 3; ++i) {
+        uint32_t raw = 0;
+        if (!ReadU32Safe(base + static_cast<uintptr_t>(i) * sizeof(uint32_t), &raw)) return false;
+        outPos[i] = static_cast<float>(static_cast<int32_t>(raw)) / 131072.0f;
+    }
+    return ReadFloatArraySafe(reinterpret_cast<const float*>(base + 0x10), outQuat, 4) &&
+           IsPlausibleUnitQuaternion(outQuat);
+}
+
+bool ReadCameraSetupPose(void* setup, float outPos[3], float outQuat[4], float* outFov) {
+    if (!setup || !outPos || !outQuat || !outFov) return false;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(setup);
+    if (!ReadCameraSetupPoseBase(setup, outPos, outQuat) || !ReadFloatSafe(base + 0x20, outFov)) {
+        return false;
+    }
+    return std::isfinite(*outFov);
+}
+
+float CameraPosePositionGap(const float a[3], const float b[3]) {
+    const float dx = a[0] - b[0];
+    const float dy = a[1] - b[1];
+    const float dz = a[2] - b[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+float CameraPoseQuaternionGapDeg(const float a[4], const float b[4]) {
+    double dot = 0.0;
+    for (int i = 0; i < 4; ++i) dot += static_cast<double>(a[i]) * b[i];
+    dot = std::clamp(std::abs(dot), 0.0, 1.0);
+    return static_cast<float>(2.0 * std::acos(dot) * (180.0 / 3.14159265358979323846));
+}
+
+uint32_t CaptureCameraBlendEntries(void* director, CameraBlendTraceEntry outEntries[8],
+                                   uint32_t* outActiveCount) {
+    if (outActiveCount) *outActiveCount = 0;
+    if (!director || !outEntries) return 0;
+
+    const uintptr_t directorAddr = reinterpret_cast<uintptr_t>(director);
+    uintptr_t table = 0;
+    uint32_t countWord = 0;
+    if (!ReadPtrSafe(directorAddr + 0x48, &table) || !table ||
+        !ReadU32Safe(directorAddr + 0x54, &countWord)) {
+        return 0;
+    }
+
+    const uint32_t tableCount = countWord & 0xFFu;
+    uint32_t activeCount = 0;
+    uint32_t captured = 0;
+    for (uint32_t i = 0; i < tableCount; ++i) {
+        const uintptr_t slot = table + static_cast<uintptr_t>(i) * 0x20u;
+        float weight = 0.0f;
+        if (!ReadFloatSafe(slot + 0x10, &weight) || weight == 0.0f) continue;
+        ++activeCount;
+        if (captured >= 8) continue;
+
+        CameraBlendTraceEntry entry{};
+        entry.weight = weight;
+        if (ReadPtrSafe(slot, &entry.camera) && entry.camera) {
+            entry.interfaceObject = entry.camera + 0x120u;
+            if (ReadPtrSafe(entry.interfaceObject, &entry.vtable) && entry.vtable) {
+                ReadPtrSafe(entry.vtable + 0x20u, &entry.serializer);
+            }
+        }
+        outEntries[captured++] = entry;
+    }
+    if (outActiveCount) *outActiveCount = activeCount;
+    return captured;
+}
+
+bool CameraBlendHasGenericNonFppSerializer(const CameraBlendTraceEntry entries[8],
+                                           uint32_t capturedCount) {
+    if (!g_waExeBase) return false;
+    const uintptr_t target = g_waExeBase + kGenericNonFppSerializerRva;
+    for (uint32_t i = 0; i < capturedCount; ++i) {
+        if (entries[i].serializer == target) return true;
+    }
+    return false;
+}
+
+bool FindCameraBlendPreferredHead(const CameraBlendTraceEntry entries[8], uint32_t capturedCount,
+                                  OpenXRHeadPose* outHead) {
+    if (!outHead) return false;
+    const uintptr_t mainObject = g_camObjMain.load(std::memory_order_acquire);
+    if (mainObject >= 0x10000) {
+        for (uint32_t i = 0; i < capturedCount; ++i) {
+            if (entries[i].camera != mainObject) continue;
+            float q[4]{};
+            if (ReadFloatArraySafe(reinterpret_cast<const float*>(mainObject + 0xF0u), q, 4) &&
+                IsPlausibleUnitQuaternion(q) &&
+                cvr::camera::CamWriteRecordFindExact(q, outHead) && outHead->valid) {
+                return true;
+            }
+        }
+    }
+    return OpenXRManager::Get().AcquireFrameHeadSample(outHead) && outHead->valid;
+}
+
+extern "C" void Hooked_GenericNonFppSerializer(void* interfaceObject, void* setup) {
+    if (OrigGenericNonFppSerializer) OrigGenericNonFppSerializer(interfaceObject, setup);
+    if (g_liveControls.xrAllowNonFppViews == 0 || !interfaceObject || !setup) return;
+
+    const uintptr_t interfaceAddr = reinterpret_cast<uintptr_t>(interfaceObject);
+    if (interfaceAddr < 0x120u) return;
+    const uintptr_t cameraObject = interfaceAddr - 0x120u;
+    if (!cvr::camera::CameraDirectorBlendScopeContains(cameraObject)) return;
+
+    OpenXRHeadPose head{};
+    if (!cvr::camera::CameraDirectorBlendScopeReadHead(cameraObject, &head) || !head.valid) {
+        if (!OpenXRManager::Get().AcquireFrameHeadSample(&head) || !head.valid) return;
+    }
+
+    float base[4]{};
+    const uintptr_t setupAddr = reinterpret_cast<uintptr_t>(setup);
+    if (!ReadFloatArraySafe(reinterpret_cast<const float*>(setupAddr + 0x10u), base, 4) ||
+        !IsPlausibleUnitQuaternion(base)) {
+        return;
+    }
+
+    float composed[4]{};
+    MulQuat(base[0], base[1], base[2], base[3],
+            head.oriX, -head.oriZ, head.oriY, head.oriW,
+            composed[0], composed[1], composed[2], composed[3]);
+    NormalizeQuat(composed[0], composed[1], composed[2], composed[3]);
+    if (!IsPlausibleUnitQuaternion(composed)) return;
+
+    if (!WriteFloatSafe(setupAddr + 0x10u, composed[0]) ||
+        !WriteFloatSafe(setupAddr + 0x14u, composed[1]) ||
+        !WriteFloatSafe(setupAddr + 0x18u, composed[2]) ||
+        !WriteFloatSafe(setupAddr + 0x1Cu, composed[3])) {
+        return;
+    }
+
+    // Do not write cameraObject+0x3B0 and do not publish through CamWriteQuat: both are mutable
+    // camera-state channels used by the existing FPP/VRCAM writer. This serializer owns only its
+    // temporary CameraSetup output. Provenance and the render-pose label are finalized after the
+    // CameraDirector blend below.
+    cvr::camera::CameraDirectorBlendScopeMarkComposed(cameraObject, head);
+    const uint64_t calls = g_genericNonFppComposeCalls.fetch_add(1u, std::memory_order_relaxed) + 1u;
+    if ((calls % 240u) == 1u) {
+        Log("[camera-nonfpp-compose] calls=%llu camera=%p epoch=%llu baseQ=(%.4f,%.4f,%.4f,%.4f) "
+            "outQ=(%.4f,%.4f,%.4f,%.4f)\n",
+            static_cast<unsigned long long>(calls), reinterpret_cast<void*>(cameraObject),
+            static_cast<unsigned long long>(head.frameAimEpoch),
+            base[0], base[1], base[2], base[3],
+            composed[0], composed[1], composed[2], composed[3]);
+    }
+}
+
+void TraceCameraDirectorBlend(void* director, const CameraBlendTraceEntry entries[8],
+                              uint32_t capturedCount, uint32_t activeCount) {
+    if (g_liveControls.xrAllowNonFppViews == 0) return;
+
+    const uint64_t calls = g_cameraBlendTraceCalls.fetch_add(1u, std::memory_order_relaxed) + 1u;
+    const bool detached = cvr::camera::GenericNonFppActiveRead();
+    const int previousDetached =
+        g_cameraBlendTraceDetached.exchange(detached ? 1 : 0, std::memory_order_acq_rel);
+    const bool transition = previousDetached != (detached ? 1 : 0);
+    if (!transition && (calls % 120u) != 1u) return;
+
+    float blendPos[3]{};
+    float blendQuat[4]{};
+    float blendFov = 0.0f;
+    const uintptr_t directorAddr = reinterpret_cast<uintptr_t>(director);
+    const bool blendOk = ReadCameraSetupPose(
+        director ? reinterpret_cast<void*>(directorAddr + 0x4C0u) : nullptr,
+        blendPos, blendQuat, &blendFov);
+    const uintptr_t mainObject = g_camObjMain.load(std::memory_order_acquire);
+    const uintptr_t vrcamObject = g_camObjVrcam.load(std::memory_order_acquire);
+
+    Log("[camera-blend-trace] calls=%llu tid=%lu detached=%d director=%p active=%u captured=%u "
+        "blendOk=%d blendFov=%.3f blendPos=(%.3f,%.3f,%.3f) "
+        "blendQ=(%.4f,%.4f,%.4f,%.4f) main=%p vrcam=%p\n",
+        static_cast<unsigned long long>(calls),
+        static_cast<unsigned long>(GetCurrentThreadId()),
+        detached ? 1 : 0, director, activeCount, capturedCount,
+        blendOk ? 1 : 0, blendFov,
+        blendPos[0], blendPos[1], blendPos[2],
+        blendQuat[0], blendQuat[1], blendQuat[2], blendQuat[3],
+        reinterpret_cast<void*>(mainObject), reinterpret_cast<void*>(vrcamObject));
+
+    for (uint32_t i = 0; i < capturedCount; ++i) {
+        const CameraBlendTraceEntry& entry = entries[i];
+        const uint32_t kind = entry.camera != 0 && entry.camera == mainObject ? 1u
+            : entry.camera != 0 && entry.camera == vrcamObject ? 2u
+            : 0u;
+        Log("[camera-blend-entry] chain=%llu idx=%u camera=%p kind=%u iface=%p vtable=%p "
+            "serializer=%p serializerRva=%08llX weight=%.6f\n",
+            static_cast<unsigned long long>(calls), i,
+            reinterpret_cast<void*>(entry.camera), kind,
+            reinterpret_cast<void*>(entry.interfaceObject),
+            reinterpret_cast<void*>(entry.vtable),
+            reinterpret_cast<void*>(entry.serializer),
+            static_cast<unsigned long long>(
+                g_waExeBase && entry.serializer >= g_waExeBase ? entry.serializer - g_waExeBase : 0u),
+            entry.weight);
+    }
+}
+
+extern "C" void Hooked_CameraDirectorBlend(void* director) {
+    CameraBlendTraceEntry entries[8]{};
+    uint32_t activeCount = 0;
+    const uint32_t capturedCount = g_liveControls.xrAllowNonFppViews != 0
+        ? CaptureCameraBlendEntries(director, entries, &activeCount)
+        : 0u;
+    const bool hasGenericNonFpp = g_liveControls.xrAllowNonFppViews != 0 &&
+        CameraBlendHasGenericNonFppSerializer(entries, capturedCount);
+    if (hasGenericNonFpp) {
+        uintptr_t cameraObjects[8]{};
+        for (uint32_t i = 0; i < capturedCount; ++i) cameraObjects[i] = entries[i].camera;
+        OpenXRHeadPose preferredHead{};
+        const bool havePreferredHead = FindCameraBlendPreferredHead(
+            entries, capturedCount, &preferredHead);
+        cvr::camera::CameraDirectorBlendScopeBegin(
+            cameraObjects, capturedCount, activeCount,
+            havePreferredHead ? &preferredHead : nullptr);
+    }
+    if (OrigCameraDirectorBlend) OrigCameraDirectorBlend(director);
+
+    if (hasGenericNonFpp) {
+        OpenXRHeadPose blendHead{};
+        float blendQuat[4]{};
+        const uintptr_t directorAddr = reinterpret_cast<uintptr_t>(director);
+        if (director && cvr::camera::CameraDirectorBlendScopeAllComposed(&blendHead) &&
+            ReadFloatArraySafe(reinterpret_cast<const float*>(directorAddr + 0x4D0u), blendQuat, 4) &&
+            IsPlausibleUnitQuaternion(blendQuat)) {
+            // nlerp(A*H, B*H) == nlerp(A, B)*H for one unit H. Filing the actual blender output
+            // preserves FinalCamera's strict bit-exact provenance even though a transition result
+            // cannot equal either individual serializer write.
+            cvr::camera::CamWriteRecordPush(blendQuat, blendHead);
+            OpenXRManager::Get().PushRenderHeadPose(blendHead);
+            const uint64_t n = g_genericNonFppBlendProvenance.fetch_add(
+                1u, std::memory_order_relaxed) + 1u;
+            if ((n % 240u) == 1u || activeCount > 1u) {
+                Log("[camera-blend-provenance] writes=%llu active=%u epoch=%llu q=(%.4f,%.4f,%.4f,%.4f)\n",
+                    static_cast<unsigned long long>(n), activeCount,
+                    static_cast<unsigned long long>(blendHead.frameAimEpoch),
+                    blendQuat[0], blendQuat[1], blendQuat[2], blendQuat[3]);
+            }
+        }
+        cvr::camera::CameraDirectorBlendScopeEnd();
+    }
+    TraceCameraDirectorBlend(director, entries, capturedCount, activeCount);
+}
+
+void ResetCameraLocateTraceBatch() {
+    g_cameraLocateTraceBatch = {};
+}
+
+void LogCameraLocateTraceSample(uint64_t chainCalls, const char* phase,
+                                const CameraLocateTraceSample& sample, uint64_t nowUs) {
+    const long long ageUs = sample.seq != 0 && nowUs >= sample.timestampUs
+        ? static_cast<long long>(nowUs - sample.timestampUs)
+        : -1ll;
+    Log("[camera-chain-locate] chain=%llu phase=%s seq=%llu ageUs=%lld setup=%p obj=%p "
+        "kind=%u stack=%u pos=(%.3f,%.3f,%.3f) q=(%.4f,%.4f,%.4f,%.4f)\n",
+        static_cast<unsigned long long>(chainCalls), phase,
+        static_cast<unsigned long long>(sample.seq), ageUs,
+        reinterpret_cast<void*>(sample.setup), reinterpret_cast<void*>(sample.cameraObject),
+        sample.kind, sample.stackBacked,
+        sample.pos[0], sample.pos[1], sample.pos[2],
+        sample.quat[0], sample.quat[1], sample.quat[2], sample.quat[3]);
+}
+
+void TraceCameraDirectorGetSetup(void* director, void* out, void* result,
+                                 const CameraLocateTraceBatch& preLocates,
+                                 const CameraLocateTraceBatch& insideLocates) {
+    if (g_liveControls.xrAllowNonFppViews == 0) return;
+
+    const uint64_t calls = g_cameraChainTraceCalls.fetch_add(1u, std::memory_order_relaxed) + 1u;
+    const bool detached = cvr::camera::GenericNonFppActiveRead();
+    const int previousDetached =
+        g_cameraChainTraceDetached.exchange(detached ? 1 : 0, std::memory_order_acq_rel);
+    const bool transition = previousDetached != (detached ? 1 : 0);
+    if (!transition && (calls % 120u) != 1u) return;
+
+    float blendPos[3]{};
+    float blendQuat[4]{};
+    float blendFov = 0.0f;
+    float outPos[3]{};
+    float outQuat[4]{};
+    float outFov = 0.0f;
+    const uintptr_t directorAddr = reinterpret_cast<uintptr_t>(director);
+    void* const blendSetup = director ? reinterpret_cast<void*>(directorAddr + 0x4C0) : nullptr;
+    void* const outputSetup = result ? result : out;
+    const bool blendOk = ReadCameraSetupPose(blendSetup, blendPos, blendQuat, &blendFov);
+    const bool outOk = ReadCameraSetupPose(outputSetup, outPos, outQuat, &outFov);
+    float resolvePosGap = -1.0f;
+    float resolveQuatGap = -1.0f;
+    float preBlendPosGap = -1.0f;
+    float preBlendQuatGap = -1.0f;
+    float insideOutPosGap = -1.0f;
+    float insideOutQuatGap = -1.0f;
+    if (blendOk && outOk) {
+        resolvePosGap = CameraPosePositionGap(blendPos, outPos);
+        resolveQuatGap = CameraPoseQuaternionGapDeg(blendQuat, outQuat);
+    }
+    if (blendOk && preLocates.count != 0) {
+        preBlendPosGap = CameraPosePositionGap(preLocates.last.pos, blendPos);
+        preBlendQuatGap = CameraPoseQuaternionGapDeg(preLocates.last.quat, blendQuat);
+    }
+    if (outOk && insideLocates.count != 0) {
+        insideOutPosGap = CameraPosePositionGap(insideLocates.last.pos, outPos);
+        insideOutQuatGap = CameraPoseQuaternionGapDeg(insideLocates.last.quat, outQuat);
+    }
+
+    uintptr_t overrideObject = 0;
+    uintptr_t overrideRef = 0;
+    if (director) {
+        ReadPtrSafe(directorAddr + 0x5A0, &overrideObject);
+        ReadPtrSafe(directorAddr + 0x5A8, &overrideRef);
+    }
+
+    const uint64_t nowUs = XrDiagNowUs();
+    Log("[camera-chain-trace] calls=%llu nowUs=%llu tid=%lu detached=%d director=%p out=%p result=%p "
+        "overrideObj=%p overrideRef=%p blendOk=%d outOk=%d blendFov=%.3f outFov=%.3f "
+        "resolveDM=%.5f resolveDeg=%.3f preBlendDM=%.5f preBlendDeg=%.3f "
+        "insideOutDM=%.5f insideOutDeg=%.3f blendPos=(%.3f,%.3f,%.3f) "
+        "blendQ=(%.4f,%.4f,%.4f,%.4f) outPos=(%.3f,%.3f,%.3f) "
+        "outQ=(%.4f,%.4f,%.4f,%.4f) preN=%u insideN=%u\n",
+        static_cast<unsigned long long>(calls),
+        static_cast<unsigned long long>(nowUs),
+        static_cast<unsigned long>(GetCurrentThreadId()),
+        detached ? 1 : 0,
+        director, out, result,
+        reinterpret_cast<void*>(overrideObject), reinterpret_cast<void*>(overrideRef),
+        blendOk ? 1 : 0, outOk ? 1 : 0,
+        blendFov, outFov,
+        resolvePosGap, resolveQuatGap,
+        preBlendPosGap, preBlendQuatGap,
+        insideOutPosGap, insideOutQuatGap,
+        blendPos[0], blendPos[1], blendPos[2],
+        blendQuat[0], blendQuat[1], blendQuat[2], blendQuat[3],
+        outPos[0], outPos[1], outPos[2],
+        outQuat[0], outQuat[1], outQuat[2], outQuat[3],
+        preLocates.count, insideLocates.count);
+
+    if (preLocates.count != 0) {
+        LogCameraLocateTraceSample(calls, "preFirst", preLocates.first, nowUs);
+        if (preLocates.count > 1) LogCameraLocateTraceSample(calls, "preLast", preLocates.last, nowUs);
+    }
+    if (insideLocates.count != 0) {
+        LogCameraLocateTraceSample(calls, "insideFirst", insideLocates.first, nowUs);
+        if (insideLocates.count > 1) LogCameraLocateTraceSample(calls, "insideLast", insideLocates.last, nowUs);
+    }
+}
+
+extern "C" void* Hooked_CameraDirectorGetSetup(void* director, void* out) {
+    const uintptr_t ret = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const uint32_t retRva = (g_waExeBase && ret >= g_waExeBase)
+        ? static_cast<uint32_t>(ret - g_waExeBase)
+        : 0;
+
+    if (retRva != kCameraDirectorGetSetupRetRva || g_liveControls.xrAllowNonFppViews == 0) {
+        return OrigCameraDirectorGetSetup ? OrigCameraDirectorGetSetup(director, out) : out;
+    }
+
+    const CameraLocateTraceBatch preLocates = g_cameraLocateTraceBatch;
+    ResetCameraLocateTraceBatch();
+    void* result = OrigCameraDirectorGetSetup ? OrigCameraDirectorGetSetup(director, out) : out;
+    const CameraLocateTraceBatch insideLocates = g_cameraLocateTraceBatch;
+    ResetCameraLocateTraceBatch();
+    TraceCameraDirectorGetSetup(director, out, result, preLocates, insideLocates);
+    return result;
+}
+
+void TraceCameraDirectorPublishCopy(void* dst, void* src) {
+    if (g_liveControls.xrAllowNonFppViews == 0) return;
+
+    const uint64_t calls = g_cameraPublishTraceCalls.fetch_add(1u, std::memory_order_relaxed) + 1u;
+    const bool detached = cvr::camera::GenericNonFppActiveRead();
+    const int previousDetached =
+        g_cameraPublishTraceDetached.exchange(detached ? 1 : 0, std::memory_order_acq_rel);
+    const bool transition = previousDetached != (detached ? 1 : 0);
+    if (!transition && (calls % 120u) != 1u) return;
+
+    float srcPos[3]{};
+    float srcQuat[4]{};
+    float srcFov = 0.0f;
+    float dstPos[3]{};
+    float dstQuat[4]{};
+    float dstFov = 0.0f;
+    const bool srcOk = ReadCameraSetupPose(src, srcPos, srcQuat, &srcFov);
+    const bool dstOk = ReadCameraSetupPose(dst, dstPos, dstQuat, &dstFov);
+
+    float copyPosGap = -1.0f;
+    float copyQuatGap = -1.0f;
+    if (srcOk && dstOk) {
+        copyPosGap = CameraPosePositionGap(srcPos, dstPos);
+        copyQuatGap = CameraPoseQuaternionGapDeg(srcQuat, dstQuat);
+    }
+
+    cvr::camera::FinalMainCameraFrame finalMain{};
+    const uint64_t nowUs = XrDiagNowUs();
+    const bool finalValid = cvr::camera::FinalMainCameraFrameRead(&finalMain) &&
+                            finalMain.sequence != 0 &&
+                            IsPlausibleUnitQuaternion(finalMain.worldQuat) &&
+                            nowUs >= finalMain.timestampUs;
+    int64_t finalAgeUs = -1;
+    float finalPosGap = -1.0f;
+    float finalQuatGap = -1.0f;
+    if (finalValid) {
+        finalAgeUs = static_cast<int64_t>(nowUs - finalMain.timestampUs);
+        if (dstOk) {
+            finalPosGap = CameraPosePositionGap(dstPos, finalMain.worldPos);
+            finalQuatGap = CameraPoseQuaternionGapDeg(dstQuat, finalMain.worldQuat);
+        }
+    }
+
+    Log("[camera-publish-trace] calls=%llu tid=%lu detached=%d src=%p dst=%p srcOk=%d dstOk=%d "
+        "srcFov=%.3f dstFov=%.3f copyDM=%.5f copyDeg=%.3f finalValid=%d finalSeq=%u "
+        "finalAgeUs=%lld finalDM=%.5f finalDeg=%.3f finalHmd=%u "
+        "srcPos=(%.3f,%.3f,%.3f) srcQ=(%.4f,%.4f,%.4f,%.4f)\n",
+        static_cast<unsigned long long>(calls),
+        static_cast<unsigned long>(GetCurrentThreadId()),
+        detached ? 1 : 0,
+        src, dst,
+        srcOk ? 1 : 0, dstOk ? 1 : 0,
+        srcFov, dstFov,
+        copyPosGap, copyQuatGap,
+        finalValid ? 1 : 0,
+        finalValid ? finalMain.sequence : 0u,
+        static_cast<long long>(finalAgeUs),
+        finalPosGap, finalQuatGap,
+        finalValid ? finalMain.hmdComposed : 0u,
+        srcPos[0], srcPos[1], srcPos[2],
+        srcQuat[0], srcQuat[1], srcQuat[2], srcQuat[3]);
+}
+}  // namespace
+
+extern "C" void TraceCameraLocateEntryTelemetry(const float* setup, uintptr_t cameraObject,
+                                                 bool stackBacked) {
+    if (g_liveControls.xrAllowNonFppViews == 0 || !setup) return;
+
+    CameraLocateTraceSample sample{};
+    if (!ReadCameraSetupPoseBase(const_cast<float*>(setup), sample.pos, sample.quat)) return;
+    sample.seq = g_cameraLocateTraceSeq.fetch_add(1u, std::memory_order_relaxed) + 1u;
+    sample.timestampUs = XrDiagNowUs();
+    sample.setup = reinterpret_cast<uintptr_t>(setup);
+    sample.cameraObject = cameraObject;
+    sample.stackBacked = stackBacked ? 1u : 0u;
+    const uintptr_t mainObject = g_camObjMain.load(std::memory_order_acquire);
+    const uintptr_t vrcamObject = g_camObjVrcam.load(std::memory_order_acquire);
+    sample.kind = cameraObject != 0 && cameraObject == mainObject ? 1u
+        : cameraObject != 0 && cameraObject == vrcamObject ? 2u
+        : 0u;
+
+    CameraLocateTraceBatch& batch = g_cameraLocateTraceBatch;
+    if (batch.count == 0) batch.first = sample;
+    batch.last = sample;
+    if (batch.count != UINT32_MAX) ++batch.count;
+}
 
 // --- shot-pipeline instrumentation (counter-only, to find the real bullet path) ---
 typedef uintptr_t (*WaCand_t)(void*, void*, void*, void*);
@@ -291,6 +803,9 @@ extern "C" inline void* Hooked_WaProj(void* rcx, void* rdx, void* r8, void* r9) 
     const uintptr_t ret = reinterpret_cast<uintptr_t>(_ReturnAddress());
     const uint32_t retRva = (g_waExeBase && ret >= g_waExeBase) ? static_cast<uint32_t>(ret - g_waExeBase) : 0;
     g_waProjLastRetRva = retRva;
+    if (retRva == kCameraDirectorPublishCopyRetRva) {
+        TraceCameraDirectorPublishCopy(rcx, rdx);
+    }
     if (retRva == 0x36F9FF) ++g_waProjRet36F9FF;
     else if (retRva == 0x36FD7C) ++g_waProjRet36FD7C;
     else if (retRva == 0x4E5109) ++g_waProjRet4E5109;
@@ -1734,6 +2249,31 @@ bool InstallWeaponAimHooks() {
     bool ok = true;
     if (MH_CreateHook(proj, &Hooked_WaProj, reinterpret_cast<void**>(&OrigWaProj)) != MH_OK) ok = false;
     else if (MH_EnableHook(proj) != MH_OK) ok = false;
+
+    // CameraDirector blend hook. Besides the retained telemetry, this opens a thread-local
+    // provenance scope around the exact active-camera serializer calls so transition blends can be
+    // certified only when every contributing camera used the same HMD sample.
+    void* cameraBlend = reinterpret_cast<void*>(g_waExeBase + kCameraDirectorBlendRva);
+    if (MH_CreateHook(cameraBlend, &Hooked_CameraDirectorBlend,
+                      reinterpret_cast<void**>(&OrigCameraDirectorBlend)) != MH_OK) ok = false;
+    else if (MH_EnableHook(cameraBlend) != MH_OK) ok = false;
+
+    // Vehicle TPP / R3 camera serializer. Runtime and disassembly show this vfunc copies the clean
+    // camera-owned pose into a temporary CameraSetup. Compose HMD only into that output; never write
+    // the camera object's authored/orbit state back.
+    void* genericNonFppSerializer = reinterpret_cast<void*>(
+        g_waExeBase + kGenericNonFppSerializerRva);
+    if (MH_CreateHook(genericNonFppSerializer, &Hooked_GenericNonFppSerializer,
+                      reinterpret_cast<void**>(&OrigGenericNonFppSerializer)) != MH_OK) ok = false;
+    else if (MH_EnableHook(genericNonFppSerializer) != MH_OK) ok = false;
+
+    // Read-only CameraDirector telemetry. This compares the blend result at director+0x4C0 with
+    // GetCurrentSetup's output immediately before the existing 0x28D4B8 publish-copy trace.
+    void* cameraGetSetup = reinterpret_cast<void*>(g_waExeBase + kCameraDirectorGetSetupRva);
+    if (MH_CreateHook(cameraGetSetup, &Hooked_CameraDirectorGetSetup,
+                      reinterpret_cast<void**>(&OrigCameraDirectorGetSetup)) != MH_OK) ok = false;
+    else if (MH_EnableHook(cameraGetSetup) != MH_OK) ok = false;
+
     if (MH_CreateHook(target, &Hooked_WaTarget, reinterpret_cast<void**>(&OrigWaTarget)) != MH_OK) ok = false;
     else if (MH_EnableHook(target) != MH_OK) ok = false;
     if (MH_CreateHook(classify, &Hooked_WaClassify, reinterpret_cast<void**>(&OrigWaClassify)) != MH_OK) ok = false;
@@ -1772,4 +2312,3 @@ bool InstallWeaponAimHooks() {
     CyberpunkVR_DebugWaInstalled = g_waInstalled;
     return ok;
 }
-
