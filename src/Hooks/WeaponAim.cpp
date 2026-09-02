@@ -288,6 +288,7 @@ constexpr uint32_t kGenericNonFppSerializerRva = 0x7FFBD0;
 std::atomic<uint64_t> g_cameraBlendTraceCalls{0};
 std::atomic<int> g_cameraBlendTraceDetached{-1};
 std::atomic<uint64_t> g_genericNonFppComposeCalls{0};
+std::atomic<float> g_lastStableFppFov{0.0f};
 std::atomic<uint64_t> g_genericNonFppBlendProvenance{0};
 std::atomic<uint64_t> g_cameraPublishTraceCalls{0};
 std::atomic<int> g_cameraPublishTraceDetached{-1};
@@ -431,13 +432,21 @@ extern "C" void Hooked_GenericNonFppSerializer(void* interfaceObject, void* setu
     const uintptr_t cameraObject = interfaceAddr - 0x120u;
     if (!cvr::camera::CameraDirectorBlendScopeContains(cameraObject)) return;
 
+    const uintptr_t setupAddr = reinterpret_cast<uintptr_t>(setup);
+    float externalFov = 0.0f;
+    const float fppFov = g_lastStableFppFov.load(std::memory_order_acquire);
+    const bool externalFovOk = ReadFloatSafe(setupAddr + 0x20u, &externalFov) &&
+        std::isfinite(externalFov) && externalFov > 1.0f && externalFov < 179.0f;
+    const bool fppFovOk = std::isfinite(fppFov) && fppFov > 1.0f && fppFov < 179.0f;
+    const bool fovCopied = externalFovOk && fppFovOk &&
+        WriteFloatSafe(setupAddr + 0x20u, fppFov);
+
     OpenXRHeadPose head{};
     if (!cvr::camera::CameraDirectorBlendScopeReadHead(cameraObject, &head) || !head.valid) {
         if (!OpenXRManager::Get().AcquireFrameHeadSample(&head) || !head.valid) return;
     }
 
     float base[4]{};
-    const uintptr_t setupAddr = reinterpret_cast<uintptr_t>(setup);
     if (!ReadFloatArraySafe(reinterpret_cast<const float*>(setupAddr + 0x10u), base, 4) ||
         !IsPlausibleUnitQuaternion(base)) {
         return;
@@ -465,11 +474,12 @@ extern "C" void Hooked_GenericNonFppSerializer(void* interfaceObject, void* setu
     const uint64_t calls = g_genericNonFppComposeCalls.fetch_add(1u, std::memory_order_relaxed) + 1u;
     if ((calls % 240u) == 1u) {
         Log("[camera-nonfpp-compose] calls=%llu camera=%p epoch=%llu baseQ=(%.4f,%.4f,%.4f,%.4f) "
-            "outQ=(%.4f,%.4f,%.4f,%.4f)\n",
+            "outQ=(%.4f,%.4f,%.4f,%.4f) fovRaw=%.3f fppFov=%.3f fovCopied=%d\n",
             static_cast<unsigned long long>(calls), reinterpret_cast<void*>(cameraObject),
             static_cast<unsigned long long>(head.frameAimEpoch),
             base[0], base[1], base[2], base[3],
-            composed[0], composed[1], composed[2], composed[3]);
+            composed[0], composed[1], composed[2], composed[3],
+            externalFov, fppFov, fovCopied ? 1 : 0);
     }
 }
 
@@ -542,6 +552,20 @@ extern "C" void Hooked_CameraDirectorBlend(void* director) {
             havePreferredHead ? &preferredHead : nullptr);
     }
     if (OrigCameraDirectorBlend) OrigCameraDirectorBlend(director);
+
+    // Cache only an unblended MAIN/FPP CameraDirector result. During vehicle TPP/R3 the MAIN
+    // camera is no longer the active entry, so this remains the last authoritative FPP projection
+    // instead of accidentally learning the detached camera's 69-degree FOV during a transition.
+    const uintptr_t mainObject = g_camObjMain.load(std::memory_order_acquire);
+    if (director && activeCount == 1u && capturedCount == 1u &&
+        entries[0].camera != 0 && entries[0].camera == mainObject) {
+        float stableFppFov = 0.0f;
+        const uintptr_t directorAddr = reinterpret_cast<uintptr_t>(director);
+        if (ReadFloatSafe(directorAddr + 0x4E0u, &stableFppFov) &&
+            std::isfinite(stableFppFov) && stableFppFov > 1.0f && stableFppFov < 179.0f) {
+            g_lastStableFppFov.store(stableFppFov, std::memory_order_release);
+        }
+    }
 
     if (hasGenericNonFpp) {
         OpenXRHeadPose blendHead{};
