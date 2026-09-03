@@ -35,6 +35,10 @@ tools/*
 !tools/launcher_tests/
 !tools/steam_frame_tests/
 !tools/autograss_tests/
+!tools/auto_installer/
+tools/auto_installer/bin/
+tools/auto_installer/obj/
+!tools/auto_installer/*.ps1
 releases/
 *.py
 !tools/autograss_tests/*.py
@@ -58,6 +62,8 @@ package.json
 !.opencode/memory/*.md
 *.zip
 *.ps1
+!tools/auto_installer/update_payload_catalog.ps1
+!tools/auto_installer/tests/*.ps1
 # ...except the probe layer install scripts, which are part of the tool,
 !tools/xr_probe/*.ps1
 # the install/uninstall pair, which is how the mod is meant to be deployed,
