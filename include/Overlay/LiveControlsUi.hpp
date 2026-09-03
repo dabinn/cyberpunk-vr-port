@@ -46,6 +46,8 @@ struct LiveControlsUiState {
     // 0..3 enum (0=Game, 1=HMD, 2=LeftHand, 3=RightHand). The overlay edits the
     // latter and the proxy mirrors it back into the legacy field.
     int xrMovementSource;
+    // When enabled, hand-directed locomotion switches to HMD while armed or aiming. Default 1.
+    int xrCombatHmdLocomotion;
     // Laser dot projection mode. 0 = steady projection, 1 = real world point, 2 = surface raycast.
     int xrLaserDotMode;
     // World-space radius in millimetres. Distance scaling applies only to surface raycast mode.
@@ -80,10 +82,8 @@ struct LiveControlsUiState {
     // ignoring visual holsters: over-shoulder = EquipmentSlot1, right hip = Slot2,
     // left hip = Slot3. Read by the CET Holster mod via GetVRSharedSlot(23).
     int xrImmersiveHolsters;
-    // Physical body rotation. 1 = the avatar body follows the HMD/aim heading
-    // (continuous body-yaw tracking on foot; aiming / holding a weapon switches the
-    // camera to full head-look + head-relative movement). 0 (default) = classic
-    // stick / snap-turn heading. Vehicles are unaffected either way. F10 -> VRIK tab.
+    // Physical body rotation. 1 = the avatar body follows HMD yaw on foot. 0 (default) =
+    // classic stick / snap-turn heading. Vehicles are unaffected either way. F10 -> VRIK tab.
     int xrPhysicalBodyRotation;
     // Cutscene VRIK suspend (PR #40). The minimum GameplayTier at which the plugin fully suspends
     // the body+arm solve (leaving the engine authored cinematic pose): -1 = never suspend, 0..4 =
