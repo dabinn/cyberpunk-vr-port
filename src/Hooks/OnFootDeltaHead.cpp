@@ -41,9 +41,12 @@ extern "C" void __fastcall OnOnFootDeltaHeadCallback(float* deltaHead) {
     // ONE GATE for the whole feature. The plugin-side mirror is what the camera write and the pose
     // path test on their hot paths, and it is set from here so the two can never disagree.
     const bool bodyRot = g_liveControls.xrPhysicalBodyRotation != 0;
-    CyberpunkVR_BodyYawFollow = bodyRot ? 1 : 0;
+    const bool bodyRotActive = bodyRot && !g_isInVehicle;
+    CyberpunkVR_BodyYawFollow = bodyRotActive ? 1 : 0;
     if(g_isInVehicle) {
-        if (!bodyRot) BodyYawFollowStep();
+        // Mounted poses own the character frame. Suspend physical body follow, but still
+        // retire any in-flight bridge step through the normal base-fold path.
+        BodyYawFollowStep();
         return;
     }
 

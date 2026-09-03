@@ -28,6 +28,7 @@
 // back out (see the call to VRIK_PlaceBodyUnderHMD), so the pose path does need to see these two.
 #include "Camera/CameraState.hpp"
 #include "Core/LiveControls.hpp"   // xrCutsceneSuspendTier, read straight out of the struct
+#include "Core/VrCoreShared.hpp"   // g_isInVehicle: mounted poses own the full entity frame
 #include "Anim/TwoHandGrip.hpp"
 #include "Anim/AdsEyeAlign.hpp"
 #include "Anim/AdsMuzzleStabilizer.hpp"
@@ -1308,7 +1309,7 @@ if (g_VRRecordFK) {
                                     // that angle -- the hands riding with the body. The census value is
                                     // also self-correcting: it is what the engine ACTUALLY ended up at,
                                     // so a heading it clamps or eases still leaves the hands put.
-                                    if (CyberpunkVR_BodyYawFollow && CyberpunkVR_BodyYawFinalValid) {
+                                    if (!g_isInVehicle && CyberpunkVR_BodyYawFollow && CyberpunkVR_BodyYawFinalValid) {
                                         vyaw = CyberpunkVR_BodyYawFinalRad;
                                     }
                                     const float hs = std::sin(vyaw * 0.5f);
@@ -1797,7 +1798,7 @@ if (g_VRRecordFK) {
                                     // that angle -- the hands riding with the body. The census value is
                                     // also self-correcting: it is what the engine ACTUALLY ended up at,
                                     // so a heading it clamps or eases still leaves the hands put.
-                                    if (CyberpunkVR_BodyYawFollow && CyberpunkVR_BodyYawFinalValid) {
+                                    if (!g_isInVehicle && CyberpunkVR_BodyYawFollow && CyberpunkVR_BodyYawFinalValid) {
                                         vyaw = CyberpunkVR_BodyYawFinalRad;
                                     }
                                     const float hs = std::sin(vyaw * 0.5f);
@@ -2162,6 +2163,5 @@ bool InstallAnimPoseHook() {
         return false;
     return true;
 }
-
 
 
