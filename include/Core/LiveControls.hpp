@@ -46,6 +46,7 @@ struct LiveControls {
     volatile int xrSnapTurn;        // 1 = discrete snap turn from right-stick X
     volatile float xrSnapTurnAngleDeg; // degrees per snap pulse
     volatile int xrMovementSource;  // 0 = Game, 1 = HMD, 2 = LeftHand, 3 = RightHand
+    volatile int xrCombatHmdLocomotion = 1; // 1 = hand-directed locomotion switches to HMD while armed or aiming
     volatile int xrLaserDotMode = 1; // 0 = steady projection, 1 = real world point, 2 = surface raycast
     volatile float xrLaserDotRadiusMm = 6.0f; // apparent world-space radius in millimetres
     volatile int xrLaserDotScaleWithDistance = 0; // mode 2 only: use the surface depth instead of the 2 m reference depth
@@ -87,7 +88,7 @@ struct LiveControls {
     volatile float xrWheelHornRadius;   // how near the wheel centre counts as "on the hub", metres. Default 0.12.
     volatile int xrVehicleGunTrigger;   // 1 (default) = with a weapon out in the driver seat the right trigger FIRES (pad RB) and the throttle is latched.
     volatile float xrVehicleThrottleTrim; // how much of the throttle's full travel the left stick adds or removes per second while a weapon is out. Default 0.5.
-    volatile int xrPhysicalBodyRotation; // 1 = physical body rotation (avatar body follows HMD/aim heading). 0 (default) = classic stick/snap heading. Gates the aiming/weapon body-turn paths; vehicles unaffected.
+    volatile int xrPhysicalBodyRotation; // 1 = physical body rotation (avatar body follows HMD yaw). 0 (default) = classic stick/snap heading; vehicles unaffected.
 };
 
 extern LiveControls g_liveControls;
