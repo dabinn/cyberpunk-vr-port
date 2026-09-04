@@ -47,6 +47,10 @@ namespace CyberpunkVRPort.AutoInstaller
             "xr_snap_turn=0\n" +
             "xr_snap_turn_angle_deg=30\n" +
             "xr_movement_source=0\n" +
+            "xr_movement_speed_mode=0\n" +
+            "xr_left_stick_deadzone=0.15\n" +
+            "xr_right_stick_deadzone=0.15\n" +
+            "xr_max_input_threshold=0.90\n" +
             "xr_xinput_install=1\n" +
             "xr_input_actions=1\n" +
             "xr_chord_activation=0\n" +

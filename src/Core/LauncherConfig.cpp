@@ -109,6 +109,11 @@ void InitRuntimePaths() {
     g_liveControls.xrInputActions = 1;
     g_liveControls.xrChordActivation = 0;
     g_liveControls.xrExtraChordActions = 1;
+    // Preserve the upstream v0.1.2+ default when an existing ini has no speed-mode key.
+    g_liveControls.xrMovementSpeedMode = 0;
+    g_liveControls.xrLeftStickDeadzone = 0.15f;
+    g_liveControls.xrRightStickDeadzone = 0.15f;
+    g_liveControls.xrMaxInputThreshold = 0.90f;
     // Classic mappings are opt-in so an existing or new installation keeps upstream v0.1.5 input.
     g_liveControls.xrClassicOnFootControls = 0;
     g_liveControls.xrClassicDisableLsSprint = 0;
@@ -193,6 +198,10 @@ void EnsureLiveControlFileExists() {
     fprintf(file, "xr_snap_turn=0\n");
     fprintf(file, "xr_snap_turn_angle_deg=30\n");
     fprintf(file, "xr_movement_source=0\n");
+    fprintf(file, "xr_movement_speed_mode=0\n");
+    fprintf(file, "xr_left_stick_deadzone=0.15\n");
+    fprintf(file, "xr_right_stick_deadzone=0.15\n");
+    fprintf(file, "xr_max_input_threshold=0.90\n");
     fprintf(file, "xr_combat_hmd_locomotion=1\n");
     fprintf(file, "xr_laser_dot_mode=1\n");
     fprintf(file, "xr_laser_dot_radius_mm=6\n");
