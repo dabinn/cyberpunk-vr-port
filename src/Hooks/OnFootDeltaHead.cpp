@@ -36,7 +36,7 @@ extern "C" void __fastcall OnOnFootDeltaHeadCallback(float* deltaHead) {
     }
     if (!deltaHead) return;
 
-    // Physical body rotation (F10 -> VRIK). OFF (default): no continuous body-yaw
+    // Physical body rotation (F10 -> Controls). OFF (default): no continuous body-yaw
     // tracking from the HMD -- only the discrete snap-turn is applied (classic heading).
     // ONE GATE for the whole feature. The plugin-side mirror is what the camera write and the pose
     // path test on their hot paths, and it is set from here so the two can never disagree.
