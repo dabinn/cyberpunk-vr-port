@@ -889,7 +889,54 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
 
             ImGui::Separator();
-            ImGui::TextUnformatted("Locomotion direction");
+            ImGui::TextUnformatted("Analog Stick Tuning");
+            int leftDeadzonePct = static_cast<int>(state.xrLeftStickDeadzone * 100.0f + 0.5f);
+            if (ImGui::SliderInt("Left stick deadzone", &leftDeadzonePct, 0, 30, "%d%%")) {
+                state.xrLeftStickDeadzone = static_cast<float>(leftDeadzonePct) / 100.0f;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Ignores small left-stick movement near the centre.\n"
+                                  "The remaining travel up to Max input threshold is remapped\n"
+                                  "to the full analog range.");
+            }
+            int rightDeadzonePct = static_cast<int>(state.xrRightStickDeadzone * 100.0f + 0.5f);
+            if (ImGui::SliderInt("Right stick deadzone", &rightDeadzonePct, 0, 30, "%d%%")) {
+                state.xrRightStickDeadzone = static_cast<float>(rightDeadzonePct) / 100.0f;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Ignores small right-stick movement near the centre.\n"
+                                  "The remaining travel up to Max input threshold is remapped\n"
+                                  "to the full analog range.");
+            }
+            int maxInputPct = static_cast<int>(state.xrMaxInputThreshold * 100.0f + 0.5f);
+            if (ImGui::SliderInt("Max input threshold", &maxInputPct, 80, 100, "%d%%")) {
+                state.xrMaxInputThreshold = static_cast<float>(maxInputPct) / 100.0f;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Sets the raw stick travel that counts as fully deflected.\n"
+                                  "Analog input between each stick's deadzone and this point is\n"
+                                  "remapped to 0-100%%. Also activates full-stick Sprint, Dash,\n"
+                                  "and Crouch.");
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Locomotion (left stick)");
+            const char* moveSpeedNames[] = { "Fixed", "Analog" };
+            int moveSpeedMode = state.xrMovementSpeedMode == 1 ? 1 : 0;
+            if (ImGui::Combo("Movement speed", &moveSpeedMode,
+                             moveSpeedNames, IM_ARRAYSIZE(moveSpeedNames))) {
+                state.xrMovementSpeedMode = moveSpeedMode;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Fixed  - any push past the deadzone uses a fixed movement speed.\n"
+                                  "Analog - movement speed follows how far the left stick is pushed.\n\n"
+                                  "Full-forward Sprint remains available in both modes.\n"
+                                  "Vehicles are not affected.");
+            }
             const char* moveSrcNames[] = { "Game (camera)", "HMD (head)", "Left hand", "Right hand" };
             int moveSrc = state.xrMovementSource;
             if (moveSrc < 0 || moveSrc > 3) moveSrc = state.xrMovementControl != 0 ? 1 : 0;
@@ -1009,10 +1056,17 @@ bool DrawLiveControls(LiveControlsUiState& state) {
 
             ImGui::Separator();
             ImGui::TextUnformatted("Current binding (on foot):");
+            const bool analogMovement = state.xrMovementSpeedMode == 1;
             if (state.xrClassicOnFootControls != 0) {
-                ImGui::BulletText(state.xrClassicDisableLsSprint != 0
-                    ? "Left stick    - walk / jog (LS-Y Sprint disabled)"
-                    : "Left stick    - walk / jog | FULL forward, HELD 0.2 s = sprint");
+                if (state.xrClassicDisableLsSprint != 0) {
+                    ImGui::BulletText(analogMovement
+                        ? "Left stick    - analog movement (LS-Y Sprint disabled)"
+                        : "Left stick    - fixed movement speed (LS-Y Sprint disabled)");
+                } else {
+                    ImGui::BulletText(analogMovement
+                        ? "Left stick    - analog walk / jog | FULL forward, HELD 0.2 s = sprint"
+                        : "Left stick    - fixed movement speed | FULL forward, HELD 0.2 s = sprint");
+                }
                 ImGui::BulletText("Right stick X/Y - turn / pitch (Y requires Disable Mouse Y off)");
                 if (state.xrClassicDisableRsDashCrouch != 0) {
                     ImGui::BulletText("Right stick Y - camera pitch only; Dash / Crouch disabled");
@@ -1021,7 +1075,9 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                 }
                 ImGui::BulletText("Right thumb click - crouch (R3)");
             } else {
-                ImGui::BulletText("Left stick    - walk / jog | FULL forward, HELD 0.2 s = sprint");
+                ImGui::BulletText(analogMovement
+                    ? "Left stick    - analog walk / jog | FULL forward, HELD 0.2 s = sprint"
+                    : "Left stick    - fixed movement speed | FULL forward, HELD 0.2 s = sprint");
                 ImGui::BulletText("Right stick X - turn camera (Y = pitch unless Disable Mouse Y is on)");
                 ImGui::BulletText("Right stick FULL up   - DASH / dodge (once per push)");
                 ImGui::BulletText("Right stick FULL down - crouch (R3)");
