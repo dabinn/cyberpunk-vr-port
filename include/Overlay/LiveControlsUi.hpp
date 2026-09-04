@@ -89,7 +89,7 @@ struct LiveControlsUiState {
     // left hip = Slot3. Read by the CET Holster mod via GetVRSharedSlot(23).
     int xrImmersiveHolsters;
     // Physical body rotation. 1 = the avatar body follows HMD yaw on foot. 0 (default) =
-    // classic stick / snap-turn heading. Vehicles are unaffected either way. F10 -> VRIK tab.
+    // classic stick / snap-turn heading. Vehicles are unaffected either way. F10 -> Controls tab.
     int xrPhysicalBodyRotation;
     // Move the authored ADS arm pose from the cyclopean camera axis toward the right eye.
     // Off by default so the vanilla pose remains the baseline for comparisons.

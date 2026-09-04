@@ -24,7 +24,7 @@
 #include <Xinput.h>
 
 // DASH on the right stick pushed fully UP. 1 = on. A knob rather than a hardcoded gesture like
-// sprint and crouch, because this one claims half of an axis that a user who turns "Disable Mouse Y"
+// sprint and crouch, because this one claims half of an axis that a user who turns "Disable pitch"
 // off is using for camera pitch -- and they should be able to have it back.
 // DISCRETE MOVEMENT SPEED. 1 = a push past the deadzone moves at ONE speed whatever the deflection,
 // which is what the keyboard does (LeftY_Axis binds IK_W at val="1.0"); 0 = the pad's analogue
@@ -1145,7 +1145,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
 
     // Right stick pushed near FULL UP => DASH (the game's Dodge_Button, pad B). The mirror image of
     // the crouch gesture above, in every respect: same 0.90 threshold, detected here BEFORE the pitch
-    // suppression so it works whichever way "Disable Mouse Y" is set, and its half of the axis is
+    // suppression so it works whichever way "Disable pitch" is set, and its half of the axis is
     // consumed so a dash never also pitches the camera.
     //
     // DASH LIVES HERE AND NOT ON A. A is Jump_Button and carries three things already -- jump, the
