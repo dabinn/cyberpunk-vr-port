@@ -46,6 +46,10 @@ struct LiveControls {
     volatile int xrSnapTurn;        // 1 = discrete snap turn from right-stick X
     volatile float xrSnapTurnAngleDeg; // degrees per snap pulse
     volatile int xrMovementSource;  // 0 = Game, 1 = HMD, 2 = LeftHand, 3 = RightHand
+    volatile int xrMovementSpeedMode = 0; // 0 = fixed magnitude after deadzone (upstream default), 1 = analog left-stick magnitude
+    volatile float xrLeftStickDeadzone = 0.15f; // raw left-stick travel ignored around centre
+    volatile float xrRightStickDeadzone = 0.15f; // raw right-stick travel ignored around centre
+    volatile float xrMaxInputThreshold = 0.90f; // raw travel treated as full deflection and used by full-stick gestures
     volatile int xrCombatHmdLocomotion = 1; // 1 = hand-directed locomotion switches to HMD while armed or aiming
     volatile int xrLaserDotMode = 1; // 0 = steady projection, 1 = real world point, 2 = surface raycast
     volatile float xrLaserDotRadiusMm = 6.0f; // apparent world-space radius in millimetres

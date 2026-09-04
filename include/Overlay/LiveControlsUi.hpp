@@ -46,6 +46,12 @@ struct LiveControlsUiState {
     // 0..3 enum (0=Game, 1=HMD, 2=LeftHand, 3=RightHand). The overlay edits the
     // latter and the proxy mirrors it back into the legacy field.
     int xrMovementSource;
+    // Left-stick locomotion magnitude. 0 = fixed after the deadzone (upstream default), 1 = analog.
+    int xrMovementSpeedMode;
+    // Raw stick tuning. Deadzones are per-stick; max threshold is shared by both sticks and full-stick gestures.
+    float xrLeftStickDeadzone;
+    float xrRightStickDeadzone;
+    float xrMaxInputThreshold;
     // When enabled, hand-directed locomotion switches to HMD while armed or aiming. Default 1.
     int xrCombatHmdLocomotion;
     // Laser dot projection mode. 0 = steady projection, 1 = real world point, 2 = surface raycast.

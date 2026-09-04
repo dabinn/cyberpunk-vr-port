@@ -244,6 +244,17 @@ static float ApplyStickDeadzone(float v, float dz) {
     return s * (a - dz) / (1.0f - dz);
 }
 
+static float ApplyStickRange(float v, float dz, float maxInput) {
+    if (!(dz >= 0.0f) || dz > 0.30f) dz = 0.15f;
+    if (!(maxInput >= 0.80f) || maxInput > 1.0f) maxInput = 0.90f;
+    float a = v < 0.0f ? -v : v;
+    if (a <= dz) return 0.0f;
+    float out = (a - dz) / (maxInput - dz);
+    if (out > 1.0f) out = 1.0f;
+    float s = v < 0.0f ? -1.0f : 1.0f;
+    return s * out;
+}
+
 DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     DWORD r = ERROR_DEVICE_NOT_CONNECTED;
     if (g_realXInputGetState) r = g_realXInputGetState(dwUserIndex, pState);
@@ -712,10 +723,23 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         pState->Gamepad.bRightTrigger = 0;
     }
 
-    // Left stick = locomotion (always merged when magnitude exceeds the
-    // physical pad's so the game uses our values).
-    float lx = ApplyStickDeadzone(vr.leftThumbX, 0.12f);
-    float ly = ApplyStickDeadzone(vr.leftThumbY, 0.12f);
+    // Stick tuning works in raw OpenXR travel. The centre deadzone and the outer full-input point are
+    // independent settings; the usable interval between them is remapped to the complete 0..1 analog
+    // range. Full-stick gestures below compare the raw travel directly, so changing the deadzone cannot
+    // move their physical activation point.
+    float leftDeadzone = g_liveControls.xrLeftStickDeadzone;
+    if (!(leftDeadzone >= 0.0f) || leftDeadzone > 0.30f) leftDeadzone = 0.15f;
+    float maxInputThreshold = g_liveControls.xrMaxInputThreshold;
+    if (!(maxInputThreshold >= 0.80f) || maxInputThreshold > 1.0f) maxInputThreshold = 0.90f;
+
+    // Left stick = locomotion (always merged when magnitude exceeds the physical pad's so the game
+    // uses our values). Keep a legacy-deadzone copy only for the scanner's existing private thresholds;
+    // that prevents this new output remap from moving unrelated scanner gestures.
+    const float rawLeftY = vr.leftThumbY;
+    const float legacyScannerLy = ApplyStickDeadzone(rawLeftY, 0.12f);
+    float lx = ApplyStickRange(vr.leftThumbX, leftDeadzone, maxInputThreshold);
+    float ly = ApplyStickRange(rawLeftY, leftDeadzone, maxInputThreshold);
+    float lyDetent = rawLeftY;
 
     // HOW FAR THE STICK IS ACTUALLY PUSHED, kept before the quantiser below rewrites it. The gesture
     // that means "to the stop" -- the sprint detent further down -- has to read the player's own
@@ -752,19 +776,20 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         if (!(navRearm >= 0.0f) || navRearm >= navFire) navRearm = navFire * 0.55f;
 
         int navDir = 0;
-        if (ly > navFire) navDir = +1;
-        else if (ly < -navFire) navDir = -1;
+        if (legacyScannerLy > navFire) navDir = +1;
+        else if (legacyScannerLy < -navFire) navDir = -1;
 
-        if (fabsf(ly) < navRearm) s_navArmedDir = 0;
+        if (fabsf(legacyScannerLy) < navRearm) s_navArmedDir = 0;
         if (navDir != 0 && navDir != s_navArmedDir) {
             s_navArmedDir = navDir;
             SendListKey(navDir > 0);
         }
 
-        if (navDir != 0) ly = 0.0f;   // at the stop the axis is the list's, not the legs'
+        if (navDir != 0) {
+            ly = 0.0f;        // at the stop the axis is the list's, not the legs'
+            lyDetent = 0.0f;  // and the same push must not also enter the sprint detent
+        }
     }
-
-    const float lyDetent = ly;
 
     // ONE SPEED PER PUSH. The pad's analogue magnitude is the odd one out in this game: the keyboard
     // binds the same axis at val="1.0", so W runs, sprint is its own key and walk is its own toggle. A
@@ -781,7 +806,8 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     {
         static bool s_walking = false;
         const float mag = sqrtf(lx * lx + ly * ly);
-        if (CyberpunkVR_MoveTiers != 0 && !g_isInVehicle && mag > 1e-4f) {
+        const bool fixedMovement = g_liveControls.xrMovementSpeedMode == 0;
+        if (fixedMovement && CyberpunkVR_MoveTiers != 0 && !g_isInVehicle && mag > 1e-4f) {
             float outMag = 1.0f;
             float walkMax = CyberpunkVR_MoveWalkMax;
             if (!(walkMax > 0.0f) || walkMax > 0.95f) walkMax = 0.0f;   // 0 = no band
@@ -965,7 +991,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
 
         const bool disableLsSprint = classicOnFoot
             && (g_liveControls.xrClassicDisableLsSprint != 0);
-        const bool detent = !disableLsSprint && (lyDetent > 0.90f)
+        const bool detent = !disableLsSprint && (lyDetent >= maxInputThreshold)
             && !g_isInVehicle && !crouchBlocks;
         if (detent) s_detentMs += dtMs; else s_detentMs = 0.0;
         const double holdMs = (CyberpunkVR_SprintHoldMs >= 0) ? CyberpunkVR_SprintHoldMs : 200;
@@ -1036,9 +1062,16 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         g_sprintInputActive = (sfPub >= 0) ? (sfPub != 0) : wantSprint;
     }
 
-    // Right stick = camera turn / pitch.
-    float rx = ApplyStickDeadzone(vr.rightThumbX, 0.18f);
-    float ry = ApplyStickDeadzone(vr.rightThumbY, 0.18f);
+    // Right stick = camera turn / pitch. As above, output uses the user-tuned analog range while
+    // legacy copies preserve the existing private thresholds for Scanner zoom and Snap Turn.
+    float rightDeadzone = g_liveControls.xrRightStickDeadzone;
+    if (!(rightDeadzone >= 0.0f) || rightDeadzone > 0.30f) rightDeadzone = 0.15f;
+    const float rawRightX = vr.rightThumbX;
+    const float rawRightY = vr.rightThumbY;
+    const float legacyRightX = ApplyStickDeadzone(rawRightX, 0.18f);
+    const float legacyRightY = ApplyStickDeadzone(rawRightY, 0.18f);
+    float rx = ApplyStickRange(rawRightX, rightDeadzone, maxInputThreshold);
+    float ry = ApplyStickRange(rawRightY, rightDeadzone, maxInputThreshold);
 
     // Right stick pushed near FULL down => CROUCH. Same bind as the right-stick click
     // (R3) used today; we assert R3 while the stick is held fully down and consume the
@@ -1090,9 +1123,9 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
             if (!(th > 0.05f) || th > 1.0f) th = 0.50f;
             const int32_t rep = (CyberpunkVR_ScannerZoomRepeatMs > 0)
                                     ? CyberpunkVR_ScannerZoomRepeatMs : 200;
-            if (ry > th || ry < -th) {
+            if (legacyRightY > th || legacyRightY < -th) {
                 if (now >= s_nextStepMs) {
-                    SendZoomKey(ry > 0.0f);
+                    SendZoomKey(legacyRightY > 0.0f);
                     s_nextStepMs = now + static_cast<uint64_t>(rep);
                 }
             } else {
@@ -1105,7 +1138,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         }
     }
 
-    const bool wantCrouch = !disableRsDashCrouch && (ry < -0.90f) && !g_isInVehicle
+    const bool wantCrouch = !disableRsDashCrouch && (rawRightY <= -maxInputThreshold) && !g_isInVehicle
                             && !deviceScreen && !scannerRemapActive
                             && !DeviceCamActive();   // in a camera the stick aims the camera
     if (wantCrouch) ry = 0.0f;
@@ -1135,13 +1168,13 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
                                && (g_menuModeValue == 0);    // in menus it navigates
         if (allowDash) {
             const uint64_t now = GetTickCount64();
-            if (ry > 0.90f) {
+            if (rawRightY >= maxInputThreshold) {
                 if (s_dashArmedDir == 0) {
                     s_dashArmedDir = 1;
                     const int ms = (CyberpunkVR_DashPulseMs > 0) ? CyberpunkVR_DashPulseMs : 100;
                     s_dashUntilMs = now + static_cast<uint64_t>(ms);
                 }
-            } else if (ry < 0.50f) {
+            } else if (legacyRightY < 0.50f) {
                 s_dashArmedDir = 0;
             }
             dashPulse = (now < s_dashUntilMs);
@@ -1150,7 +1183,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
             s_dashUntilMs = 0;
         }
     }
-    if (!disableRsDashCrouch && ry > 0.90f && !deviceScreen) {
+    if (!disableRsDashCrouch && rawRightY >= maxInputThreshold && !deviceScreen) {
         ry = 0.0f;   // consumed, exactly as the crouch half is
     }
 
@@ -1179,10 +1212,10 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         float rearm = CyberpunkVR_SnapTurnStickRearm;
         if (!(rearm >= 0.0f) || rearm >= fire) rearm = fire * 0.55f;
         int wantDir = 0;
-        if (rx > fire) wantDir = +1;
-        else if (rx < -fire) wantDir = -1;
+        if (legacyRightX > fire) wantDir = +1;
+        else if (legacyRightX < -fire) wantDir = -1;
 
-        if (fabsf(rx) < rearm) g_xinputSnapArmedDir = 0;
+        if (fabsf(legacyRightX) < rearm) g_xinputSnapArmedDir = 0;
 
         if (wantDir != 0 && wantDir != g_xinputSnapArmedDir) {
             g_xinputSnapArmedDir = wantDir;
