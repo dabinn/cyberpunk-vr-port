@@ -561,11 +561,11 @@ void DrawBarrelCrosshair() {
     if (displaySize.x <= 1.0f || displaySize.y <= 1.0f) return;
 
     // Convert the user-facing beam radius to pixels through the same live projection that places
-    // the dot. Modes 0/1 use a stable 2 m reference depth. In mode 2 the physical spot widens with
+    // the dot. Modes 0/1 use a stable 10 m reference depth. In mode 2 the physical spot widens with
     // beam travel, while perspective still makes its apparent size decrease toward the beam's
     // angular divergence. The far-size floor is therefore angular rather than a fixed pixel count.
     // The very large angular ceiling is only a numerical safety guard for near-zero view depth.
-    constexpr float kLaserDotReferenceDepthM = 2.0f;
+    constexpr float kLaserDotReferenceDepthM = 10.0f;
     constexpr float kLaserDotHalfDivergenceRad = 0.00075f;
     constexpr float kLaserDotMissAngularRadiusRad = 0.0005f;
     constexpr float kLaserDotSafetyMaxAngularRadius = 1.0f;
