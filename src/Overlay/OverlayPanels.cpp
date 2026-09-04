@@ -685,16 +685,14 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             // of the camera crosshair. Hooks the projectile launch orientation provider and feeds it
             // the game's own muzzle world transform. Writes shared[58]; the RED4ext plugin applies it.
             {
-                static bool s_weaponAim = true;   // default ON — backend's m_weaponAimEnable also defaults to 1
-                if (ImGui::Checkbox("Hand aim  (off = Decoupled VR Head Aim)", &s_weaponAim)) {
-                    OpenXRManager::Get().SetWeaponAimEnable(s_weaponAim ? 1 : 0);
+                static bool s_headAim = OpenXRManager::Get().GetWeaponAimEnable() == 0;
+                if (ImGui::Checkbox("Decoupled VR Head Aim", &s_headAim)) {
+                    OpenXRManager::Get().SetWeaponAimEnable(s_headAim ? 0 : 1);
                 }
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("ON (Hand Aim): the controller points the weapon and VRIK drives the arms.\n"
-                                      "OFF (Decoupled VR Head Aim): the WEAPON follows your head instead, the game\n"
-                                      "keeps owning its position and its ADS animations, and VRIK stands down for\n"
-                                      "the weapon arm. Either way the shot leaves the real muzzle, for guns and\n"
-                                      "projectiles alike, and free-look while aiming is preserved.");
+                    ImGui::SetTooltip("ON: Aim with your headset, decoupled from locomotion (3DoF Head Aim).\n"
+                                      "OFF: Aim with your VR controllers (6DoF Hand Aim).\n"
+                                      "Shots always fire from the actual weapon barrel.");
                 }
                 changed |= CheckboxInt("Align ADS sights to right eye", &state.xrAdsRightEyeAlignment);
                 if (ImGui::IsItemHovered()) {
