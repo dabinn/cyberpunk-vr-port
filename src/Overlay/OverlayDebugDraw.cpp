@@ -28,7 +28,6 @@
 #include "Overlay/OverlayInternal.hpp"
 
 extern volatile int g_verboseLog; // per-frame log spam toggle (default off)
-extern void Log(const char* fmt, ...);
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 extern volatile float g_lastLocateQuat[4];
 extern "C" int   CyberpunkVR_StereoModuleEnable;   // vr_core.cpp: did we install at all
@@ -616,19 +615,25 @@ void DrawBarrelCrosshair() {
     if (!(halfIpd > 0.0001f)) halfIpd = OpenXRManager::Get().GetSharedSlot(95);
     if (!(halfIpd > 0.0001f)) halfIpd = 0.0325f;
 
-    // Publish exactly the two synthetic eye origins used by the dot projection. Naming these
-    // MAIN/second avoids assuming which physical eye MAIN owns when the live eye sign is flipped.
-    // CET reads the pair through this seqlock before issuing its game-thread visibility rays.
+    // g_lastLocatePosFP is the MAIN render position on the normal camera path. With
+    // CyberpunkVR_IpdInWorldPos enabled, PatchCamera has already put MAIN's half-IPD into
+    // component+0xE0 before SerializeSetup feeds this value to LocateCamera. Treating it as a
+    // head centre here adds that half-IPD a second time and shifts BOTH projected dots sideways.
+    // Build the opposite eye from MAIN by one full IPD instead.
+    //
+    // CET reads this same pair through the seqlock before issuing its game-thread visibility rays.
     const float sMain = (CyberpunkVR_BarrelDotEyeSign >= 0) ? +1.0f : -1.0f;
     const float mainEye[3] = {
-        hcx + rgt[0] * halfIpd * sMain,
-        hcy + rgt[1] * halfIpd * sMain,
-        hcz + rgt[2] * halfIpd * sMain
+        hcx,
+        hcy,
+        hcz
     };
+    const float mainPhysicalSide = CyberpunkVR_MainIsRightEye ? +1.0f : -1.0f;
+    const float fullIpdFromMain = 2.0f * halfIpd * mainPhysicalSide;
     const float secondEye[3] = {
-        hcx - rgt[0] * halfIpd * sMain,
-        hcy - rgt[1] * halfIpd * sMain,
-        hcz - rgt[2] * halfIpd * sMain
+        hcx - rgt[0] * fullIpdFromMain,
+        hcy - rgt[1] * fullIpdFromMain,
+        hcz - rgt[2] * fullIpdFromMain
     };
     {
         static uint32_t s_eyeSeq = 0;
@@ -646,32 +651,29 @@ void DrawBarrelCrosshair() {
         s_eyeSeq = nextEven;
     }
 
-    // Screen position of the impact point as seen from one eye. sign: -1 = MAIN/left, +1 = VRCAM.
-    static float s_dbgLy[2] = {0.0f, 0.0f};
-    static float s_dbgWhy = 0.0f;
+    // Screen position of the impact point as seen from one eye. sign selects MAIN/second.
     auto dotForEye = [&](float sign, ImVec2* out) -> bool {
-        if (!haveWorld) { s_dbgWhy = 1.0f; return false; }
+        if (!haveWorld) return false;
         const float D = CyberpunkVR_BarrelDotDistM;
-        if (!(D > 0.5f)) { s_dbgWhy = 2.0f; return false; }
-        const float ex = hcx + rgt[0] * halfIpd * sign;
-        const float ey = hcy + rgt[1] * halfIpd * sign;
-        const float ez = hcz + rgt[2] * halfIpd * sign;
+        if (!(D > 0.5f)) return false;
+        const float* eye = (sign == sMain) ? mainEye : secondEye;
+        const float ex = eye[0];
+        const float ey = eye[1];
+        const float ez = eye[2];
         // The point the bullet reaches at D, and the ray from THIS eye to it.
         const float dx = (mpx + mfx * D) - ex;
         const float dy = (mpy + mfy * D) - ey;
         const float dz = (mpz + mfz * D) - ez;
         float lx = 0.0f, ly = 0.0f, lz = 0.0f;
         RotateVectorByQuaternion(dx, dy, dz, -cqx, -cqy, -cqz, cqw, &lx, &ly, &lz);
-        s_dbgLy[(sign > 0.0f) ? 1 : 0] = ly;
-        const bool okp = ProjectHeadSpacePointToScreen(lx, lz, -ly, displaySize, out);
-        if (!okp) s_dbgWhy = 3.0f;
-        return okp;
+        return ProjectHeadSpacePointToScreen(lx, lz, -ly, displaySize, out);
     };
     auto surfaceDotForEye = [&](float sign, ImVec2* out) -> bool {
         if (!haveRayHit) return false;
-        const float ex = hcx + rgt[0] * halfIpd * sign;
-        const float ey = hcy + rgt[1] * halfIpd * sign;
-        const float ez = hcz + rgt[2] * halfIpd * sign;
+        const float* eye = (sign == sMain) ? mainEye : secondEye;
+        const float ex = eye[0];
+        const float ey = eye[1];
+        const float ez = eye[2];
         float lx = 0.0f, ly = 0.0f, lz = 0.0f;
         RotateVectorByQuaternion(hitx - ex, hity - ey, hitz - ez,
                                  -cqx, -cqy, -cqz, cqw, &lx, &ly, &lz);
@@ -679,9 +681,7 @@ void DrawBarrelCrosshair() {
     };
 
     ImVec2 sc{};
-    // game-cam-local (Yfwd/Xright/Zup) -> OpenXR view convention (forward -Z, right +X, up +Y): (x, z, -y)
-    // The control number: the muzzle forward in camera axes. The old path projects exactly this
-    // and works, so its forward component tells whether the axis mapping below is the same one.
+    // Direction fallback is projected in camera-local axes.
     float vx = 0.0f, vy = 0.0f, vz = 0.0f;
     RotateVectorByQuaternion(mfx, mfy, mfz, -cqx, -cqy, -cqz, cqw, &vx, &vy, &vz);
     ImVec2 scRight{};
@@ -699,19 +699,6 @@ void DrawBarrelCrosshair() {
     // then lags and the two dots visibly part company. The simple form below has none of that:
     // one projection, plus a constant parallax for the second eye.
     const bool worldOk = mainOk && (surfaceMode ? haveRayHit : CyberpunkVR_BarrelDotWorld != 0);
-    {
-        static int s_said = -1;
-        const int now = worldOk ? 1 : 0;
-        if (now != s_said) {
-            s_said = now;
-            Log("BarrelDot: worldPath=%d why=%.0f ly=(%.3f %.3f) v=(%.3f %.3f %.3f) fwd=(%.3f %.3f %.3f) D=%.1f "
-                "ndc=(%.5f %.5f) muzzle=(%.3f %.3f %.3f) head=(%.3f %.3f %.3f) halfIpd=%.4f\n",
-                now, s_dbgWhy, s_dbgLy[0], s_dbgLy[1], vx, vy, vz, mfx, mfy, mfz,
-                CyberpunkVR_BarrelDotDistM,
-                CyberpunkVR_BarrelDotNdcX, CyberpunkVR_BarrelDotNdcX2,
-                mpx, mpy, mpz, hcx, hcy, hcz, halfIpd);
-        }
-    }
     // With world data present the direction path is not a fallback, it is a wrong answer.
     if (CyberpunkVR_BarrelDotWorld == 1 && haveWorld && !worldOk) return;
     if (worldOk || ProjectHeadSpacePointToScreen(vx, vz, -vy, displaySize, &sc)) {
