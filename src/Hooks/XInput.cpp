@@ -1074,10 +1074,10 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     float ry = ApplyStickRange(rawRightY, rightDeadzone, maxInputThreshold);
 
     // Right stick pushed near FULL down => CROUCH. Same bind as the right-stick click
-    // (R3) used today; we assert R3 while the stick is held fully down and consume the
-    // downward Y so it doesn't also drive camera pitch. Detected here, before the snap
-    // turn block may zero ry, so it works regardless of the turn mode.
-    // CROUCH IS THIS, AND ONLY THIS, since the click became the slide release: the stick past 0.90 down.
+    // (R3) used today; we assert R3 while the raw stick reaches the user-configured full-input
+    // threshold. The gesture does not consume analog Y; users who keep RS pitch enabled still own
+    // that axis, while Disable pitch below remains the explicit way to suppress camera pitch.
+    // CROUCH IS THIS, AND ONLY THIS, since the click became the slide release.
     // ON FOOT ONLY, for the same reason the dash below is: crouching means nothing in a car, and
     // R3 there is VehicleInverseCameraToggle_Button -- so the right stick pushed down was
     // flipping the driving camera. Found while fixing the exit button; same family of bug.
@@ -1088,8 +1088,8 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     //
     // The game scrolls a device screen -- a computer's message list, a terminal -- with
     // UI_MoveY_Axis, and its own r6\config\inputUserMappings.xml binds that to IK_Pad_RightAxisY
-    // and to nothing else. Three things here were eating exactly that: the crouch gesture and the
-    // dash gesture each consume their half of the axis, and xr_disable_mouse_y zeroes it outright
+    // and to nothing else. The original crouch/dash gestures used to consume their half of this axis,
+    // while xr_disable_mouse_y still zeroes it outright
     // for anyone who wants pitch from the headset only -- which is the shipped setting. So on a
     // computer the list could not be scrolled at all, and pushing the stick to read it dodged or
     // crouched instead.
@@ -1141,12 +1141,11 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     const bool wantCrouch = !disableRsDashCrouch && (rawRightY <= -maxInputThreshold) && !g_isInVehicle
                             && !deviceScreen && !scannerRemapActive
                             && !DeviceCamActive();   // in a camera the stick aims the camera
-    if (wantCrouch) ry = 0.0f;
 
     // Right stick pushed near FULL UP => DASH (the game's Dodge_Button, pad B). The mirror image of
-    // the crouch gesture above, in every respect: same 0.90 threshold, detected here BEFORE the pitch
-    // suppression so it works whichever way "Disable pitch" is set, and its half of the axis is
-    // consumed so a dash never also pitches the camera.
+    // the crouch gesture above: it uses the same user-configured full-input threshold and is detected
+    // before pitch suppression so it works whichever way "Disable pitch" is set. Like crouch, this
+    // gesture does not consume analog Y.
     //
     // DASH LIVES HERE AND NOT ON A. A is Jump_Button and carries three things already -- jump, the
     // double jump, and Charge Jump on the hold -- so a tap/hold split there has to spend one of them:
@@ -1182,9 +1181,6 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
             s_dashArmedDir = 0;
             s_dashUntilMs = 0;
         }
-    }
-    if (!disableRsDashCrouch && rawRightY >= maxInputThreshold && !deviceScreen) {
-        ry = 0.0f;   // consumed, exactly as the crouch half is
     }
 
     // Suppress pitch from the stick if the user wants HMD-only pitch.
@@ -1237,7 +1233,6 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
 
     if (fabsf(rx) > fabsf(pState->Gamepad.sThumbRX / 32767.0f)) pState->Gamepad.sThumbRX = FloatToSHORT(rx);
     if (fabsf(ry) > fabsf(pState->Gamepad.sThumbRY / 32767.0f)) pState->Gamepad.sThumbRY = FloatToSHORT(ry);
-
     // Stick-gesture buttons: full-forward left stick => sprint (L3), full-down right
     // stick => crouch (R3). OR'd in on top of any physical / VR button press.
     uint16_t synthButtons = 0;

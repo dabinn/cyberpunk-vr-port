@@ -1936,7 +1936,6 @@ DWORD OpenXRManager::FrameThreadMain() {
                 } else {
                     s_chord = {};
                 }
-
                 // Always publish a fresh snapshot so disabling gameplay actions cannot
                 // leave a button or axis latched in the XInput merge.
                 std::lock_guard<std::mutex> inLock(m_inputMutex);
