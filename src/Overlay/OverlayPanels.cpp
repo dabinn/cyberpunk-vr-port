@@ -189,34 +189,6 @@ void DrawVRHandsControls() {
                 "lighter staged/walk-and-talk moments. Vehicles use their own arms-only path.");
         }
 
-        ImGui::Separator();
-        // Physical body rotation (default OFF). Self-contained: read/flip/persist via the
-        // LiveControls bridge so it survives restarts (vrport.ini xr_physical_body_rotation).
-        bool bodyRot = st.xrPhysicalBodyRotation != 0;
-        if (ImGui::Checkbox("Physical body rotation", &bodyRot)) {
-            st.xrPhysicalBodyRotation = bodyRot ? 1 : 0;
-            SetLiveControlsUiState(&st, 1);
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("OFF (default): classic VR heading -- turn with stick / snap-turn, the head only looks.\n"
-                              "ON: the character physically turns to follow your head, through the game's own\n"
-                              "heading -- so aim, movement and collision follow it. The view stays where you are\n"
-                              "looking and recentring is untouched. Vehicles are unaffected.");
-        }
-        // The one number the feature has. Everything else -- the rate, when it starts, when it stops --
-        // follows from it: whatever is outside the cone is asked for in the frame it appears.
-        float cone = CyberpunkVR_BodyYawFollowDeadDeg;
-        if (ImGui::SliderFloat("Free-look cone", &cone, 0.0f, 60.0f, "%.0f deg")) {
-            CyberpunkVR_BodyYawFollowDeadDeg = cone;
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("How far your head may turn before the body starts coming around.\n"
-                              "The body stops as soon as your head is back inside the cone.");
-        }
-        if (bodyRot) {
-            ImGui::Text("realign %+.1f deg | head-vs-body %+.1f deg",
-                        CyberpunkVR_DebugBodyFollowOffsetDeg, CyberpunkVR_DebugBodyFollowErrDeg);
-        }
     }
 
     ImGui::Separator();
@@ -622,12 +594,6 @@ bool DrawLiveControls(LiveControlsUiState& state) {
 
             if (ImGui::CollapsingHeader("Tracking / Camera")) {
         ImGui::TextUnformatted("Locomotion direction is set in the Controls tab.");
-        changed |= CheckboxInt("Disable Mouse Y (Pitch)", &state.xrDisableMouseY);
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Suppress mouse/right-stick pitch so only the HMD controls\n"
-                              "vertical look. Applied by the CET VRIK mod and the\n"
-                              "XInput merge. On by default.");
-        }
         // "Fix Head" removed. It switched the view to 3DoF, and it did not stop at dropping the
         // head translation -- it dropped these three offsets and the calibration bakes with it,
         // then hid the very sliders that were needed to put the view right. The offsets are
@@ -676,11 +642,29 @@ bool DrawLiveControls(LiveControlsUiState& state) {
         }
 
         if (ImGui::BeginTabItem("Controls")) {
-            ImGui::TextWrapped("VR controller input is merged into XInput gamepad 0 so the game's "
-                               "native gamepad bindings apply (jump = A, dodge = B, reload = X, "
-                               "weapon swap = Y, fire = RT, aim = LT, grenade = RG, scanner = LG).");
-            ImGui::Separator();
+            // Physical body rotation is gameplay heading policy, not VRIK calibration. Keep the
+            // whole feature together here: toggle, free-look threshold, and its live readout.
+            changed |= CheckboxInt("Physical body rotation", &state.xrPhysicalBodyRotation);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("OFF (default): classic VR heading -- turn with stick / snap-turn, the head only looks.\n"
+                                  "ON: the character physically turns to follow your head, through the game's own\n"
+                                  "heading -- so aim, movement and collision follow it. The view stays where you are\n"
+                                  "looking and recentring is untouched. Vehicles are unaffected.");
+            }
+            float cone = CyberpunkVR_BodyYawFollowDeadDeg;
+            if (ImGui::SliderFloat("Free-look cone", &cone, 0.0f, 60.0f, "%.0f deg")) {
+                CyberpunkVR_BodyYawFollowDeadDeg = cone;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("How far your head may turn before the body starts coming around.\n"
+                                  "The body stops as soon as your head is back inside the cone.");
+            }
+            if (state.xrPhysicalBodyRotation != 0) {
+                ImGui::Text("realign %+.1f deg | head-vs-body %+.1f deg",
+                            CyberpunkVR_DebugBodyFollowOffsetDeg, CyberpunkVR_DebugBodyFollowErrDeg);
+            }
 
+            ImGui::Separator();
             // Weapon aim: bullets/projectiles fly down the WEAPON BARREL (controller-pointed) instead
             // of the camera crosshair. Hooks the projectile launch orientation provider and feeds it
             // the game's own muzzle world transform. Writes shared[58]; the RED4ext plugin applies it.
@@ -753,6 +737,9 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
             ImGui::Separator();
 
+            ImGui::TextWrapped("VR controller input is merged into XInput gamepad 0 so the game's "
+                               "native gamepad bindings apply (jump = A, dodge = B, reload = X, "
+                               "weapon swap = Y, fire = RT, aim = LT, grenade = RG, scanner = LG).");
             changed |= CheckboxInt("Enable VR -> XInput merge", &state.xrXInputHook);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("OR the VR controller state into XInput gamepad 0 every poll.\n"
@@ -760,6 +747,99 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
 
             ImGui::Separator();
+            ImGui::TextUnformatted("Analog Stick Tuning");
+            int leftDeadzonePct = static_cast<int>(state.xrLeftStickDeadzone * 100.0f + 0.5f);
+            if (ImGui::SliderInt("Left stick deadzone", &leftDeadzonePct, 0, 30, "%d%%")) {
+                state.xrLeftStickDeadzone = static_cast<float>(leftDeadzonePct) / 100.0f;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Ignores small left-stick movement near the centre.\n"
+                                  "The remaining travel up to Max input threshold is remapped\n"
+                                  "to the full analog range.");
+            }
+            int rightDeadzonePct = static_cast<int>(state.xrRightStickDeadzone * 100.0f + 0.5f);
+            if (ImGui::SliderInt("Right stick deadzone", &rightDeadzonePct, 0, 30, "%d%%")) {
+                state.xrRightStickDeadzone = static_cast<float>(rightDeadzonePct) / 100.0f;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Ignores small right-stick movement near the centre.\n"
+                                  "The remaining travel up to Max input threshold is remapped\n"
+                                  "to the full analog range.");
+            }
+            int maxInputPct = static_cast<int>(state.xrMaxInputThreshold * 100.0f + 0.5f);
+            if (ImGui::SliderInt("Max input threshold", &maxInputPct, 80, 100, "%d%%")) {
+                state.xrMaxInputThreshold = static_cast<float>(maxInputPct) / 100.0f;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Sets the raw stick travel that counts as fully deflected.\n"
+                                  "Analog input between each stick's deadzone and this point is\n"
+                                  "remapped to 0-100%%. Also activates full-stick Sprint, Dash,\n"
+                                  "and Crouch.");
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Locomotion (left stick)");
+            const char* moveSpeedNames[] = { "Fixed", "Analog" };
+            int moveSpeedMode = state.xrMovementSpeedMode == 1 ? 1 : 0;
+            if (ImGui::Combo("Movement speed", &moveSpeedMode,
+                             moveSpeedNames, IM_ARRAYSIZE(moveSpeedNames))) {
+                state.xrMovementSpeedMode = moveSpeedMode;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Fixed  - any push past the deadzone uses a fixed movement speed.\n"
+                                  "Analog - movement speed follows how far the left stick is pushed.\n\n"
+                                  "Full-forward Sprint remains available in both modes.\n"
+                                  "Vehicles are not affected.");
+            }
+            const char* moveSrcNames[] = { "Game (camera)", "HMD (head)", "Left hand", "Right hand" };
+            int moveSrc = state.xrMovementSource;
+            if (moveSrc < 0 || moveSrc > 3) moveSrc = state.xrMovementControl != 0 ? 1 : 0;
+            if (ImGui::Combo("Move source", &moveSrc, moveSrcNames, IM_ARRAYSIZE(moveSrcNames))) {
+                state.xrMovementSource = moveSrc;
+                state.xrMovementControl = moveSrc != 0 ? 1 : 0;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Game     - left stick walks the way the camera faces (vanilla).\n"
+                                  "HMD      - left stick walks the way the headset faces.\n"
+                                  "Left/Right hand - walks the way the chosen controller points.\n"
+                                  "Vehicles always keep game heading.");
+            }
+            const bool handDirectedLocomotion = moveSrc == 2 || moveSrc == 3;
+            if (!handDirectedLocomotion) ImGui::BeginDisabled();
+            changed |= CheckboxInt("Use HMD for hand-directed locomotion while armed or aiming",
+                                   &state.xrCombatHmdLocomotion);
+            if (!handDirectedLocomotion) ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("Prevents weapon handling from unintentionally changing your movement direction\n"
+                                  "during combat when using Left hand or Right hand locomotion.");
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Turning (right stick)");
+            changed |= CheckboxInt("Snap turn", &state.xrSnapTurn);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Convert the right-stick X axis into discrete snap pulses\n"
+                                  "instead of smooth rotation. Helps with motion sickness.");
+            }
+            if (state.xrSnapTurn != 0) {
+                changed |= ImGui::SliderFloat("Snap angle", &state.xrSnapTurnAngleDeg, 10.0f, 90.0f, "%.0f deg");
+            }
+            changed |= CheckboxInt("Disable pitch", &state.xrDisableMouseY);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Suppress mouse/right-stick pitch so only the HMD controls\n"
+                                  "vertical look. Applied by the CET VRIK mod and the\n"
+                                  "XInput merge. On by default.");
+            }
+
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Mapping")) {
             ImGui::TextUnformatted("Weapon holsters (reach + right grip)");
             changed |= CheckboxInt("Immersive holsters", &state.xrImmersiveHolsters);
             if (ImGui::IsItemHovered()) {
@@ -771,7 +851,6 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                     "      over-shoulder = EquipmentSlot1, right hip = Slot2, left hip = Slot3.\n"
                     "Reach to the zone and squeeze the RIGHT grip to equip / unequip.");
             }
-
 
             ImGui::Separator();
             ImGui::TextUnformatted("Driving -- hands on the wheel");
@@ -887,90 +966,6 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
 
             ImGui::Separator();
-            ImGui::TextUnformatted("Analog Stick Tuning");
-            int leftDeadzonePct = static_cast<int>(state.xrLeftStickDeadzone * 100.0f + 0.5f);
-            if (ImGui::SliderInt("Left stick deadzone", &leftDeadzonePct, 0, 30, "%d%%")) {
-                state.xrLeftStickDeadzone = static_cast<float>(leftDeadzonePct) / 100.0f;
-                changed = true;
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Ignores small left-stick movement near the centre.\n"
-                                  "The remaining travel up to Max input threshold is remapped\n"
-                                  "to the full analog range.");
-            }
-            int rightDeadzonePct = static_cast<int>(state.xrRightStickDeadzone * 100.0f + 0.5f);
-            if (ImGui::SliderInt("Right stick deadzone", &rightDeadzonePct, 0, 30, "%d%%")) {
-                state.xrRightStickDeadzone = static_cast<float>(rightDeadzonePct) / 100.0f;
-                changed = true;
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Ignores small right-stick movement near the centre.\n"
-                                  "The remaining travel up to Max input threshold is remapped\n"
-                                  "to the full analog range.");
-            }
-            int maxInputPct = static_cast<int>(state.xrMaxInputThreshold * 100.0f + 0.5f);
-            if (ImGui::SliderInt("Max input threshold", &maxInputPct, 80, 100, "%d%%")) {
-                state.xrMaxInputThreshold = static_cast<float>(maxInputPct) / 100.0f;
-                changed = true;
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Sets the raw stick travel that counts as fully deflected.\n"
-                                  "Analog input between each stick's deadzone and this point is\n"
-                                  "remapped to 0-100%%. Also activates full-stick Sprint, Dash,\n"
-                                  "and Crouch.");
-            }
-
-            ImGui::Separator();
-            ImGui::TextUnformatted("Locomotion (left stick)");
-            const char* moveSpeedNames[] = { "Fixed", "Analog" };
-            int moveSpeedMode = state.xrMovementSpeedMode == 1 ? 1 : 0;
-            if (ImGui::Combo("Movement speed", &moveSpeedMode,
-                             moveSpeedNames, IM_ARRAYSIZE(moveSpeedNames))) {
-                state.xrMovementSpeedMode = moveSpeedMode;
-                changed = true;
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Fixed  - any push past the deadzone uses a fixed movement speed.\n"
-                                  "Analog - movement speed follows how far the left stick is pushed.\n\n"
-                                  "Full-forward Sprint remains available in both modes.\n"
-                                  "Vehicles are not affected.");
-            }
-            const char* moveSrcNames[] = { "Game (camera)", "HMD (head)", "Left hand", "Right hand" };
-            int moveSrc = state.xrMovementSource;
-            if (moveSrc < 0 || moveSrc > 3) moveSrc = state.xrMovementControl != 0 ? 1 : 0;
-            if (ImGui::Combo("Move source", &moveSrc, moveSrcNames, IM_ARRAYSIZE(moveSrcNames))) {
-                state.xrMovementSource = moveSrc;
-                state.xrMovementControl = moveSrc != 0 ? 1 : 0;
-                changed = true;
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Game     - left stick walks the way the camera faces (vanilla).\n"
-                                  "HMD      - left stick walks the way the headset faces.\n"
-                                  "Left/Right hand - walks the way the chosen controller points.\n"
-                                  "Vehicles always keep game heading.");
-            }
-            const bool handDirectedLocomotion = moveSrc == 2 || moveSrc == 3;
-            if (!handDirectedLocomotion) ImGui::BeginDisabled();
-            changed |= CheckboxInt("Use HMD for hand-directed locomotion while armed or aiming",
-                                   &state.xrCombatHmdLocomotion);
-            if (!handDirectedLocomotion) ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip("Prevents weapon handling from unintentionally changing your movement direction\n"
-                                  "during combat when using Left hand or Right hand locomotion.");
-            }
-
-            ImGui::Separator();
-            ImGui::TextUnformatted("Turning (right stick)");
-            changed |= CheckboxInt("Snap turn", &state.xrSnapTurn);
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Convert the right-stick X axis into discrete snap pulses\n"
-                                  "instead of smooth rotation. Helps with motion sickness.");
-            }
-            if (state.xrSnapTurn != 0) {
-                changed |= ImGui::SliderFloat("Snap angle", &state.xrSnapTurnAngleDeg, 10.0f, 90.0f, "%.0f deg");
-            }
-
-            ImGui::Separator();
             ImGui::TextUnformatted("Emulate D-pad and Additional Controls");
             ImGui::TextUnformatted("Chord Activation Method");
             changed |= ImGui::RadioButton("L3 button - left thumbstick", &state.xrChordActivation, 0);
@@ -1065,7 +1060,7 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                         ? "Left stick    - analog walk / jog | FULL forward, HELD 0.2 s = sprint"
                         : "Left stick    - fixed movement speed | FULL forward, HELD 0.2 s = sprint");
                 }
-                ImGui::BulletText("Right stick X/Y - turn / pitch (Y requires Disable Mouse Y off)");
+                ImGui::BulletText("Right stick X/Y - turn / pitch (Y requires Disable pitch off)");
                 if (state.xrClassicDisableRsDashCrouch != 0) {
                     ImGui::BulletText("Right stick Y - camera pitch only; Dash / Crouch disabled");
                 } else {
@@ -1076,7 +1071,7 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                 ImGui::BulletText(analogMovement
                     ? "Left stick    - analog walk / jog | FULL forward, HELD 0.2 s = sprint"
                     : "Left stick    - fixed movement speed | FULL forward, HELD 0.2 s = sprint");
-                ImGui::BulletText("Right stick X - turn camera (Y = pitch unless Disable Mouse Y is on)");
+                ImGui::BulletText("Right stick X - turn camera (Y = pitch unless Disable pitch is on)");
                 ImGui::BulletText("Right stick FULL up   - DASH / dodge (once per push)");
                 ImGui::BulletText("Right stick FULL down - crouch (R3)");
                 ImGui::BulletText("Right thumb click - slide release: racks the weapon");

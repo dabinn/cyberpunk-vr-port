@@ -34,7 +34,7 @@ extern "C" void __fastcall OnPitchHookCallback(void* pitchState, float originalP
     // let the headset supply vertical look.
     //
     // BUT ONLY WHEN THE OPTION SAYS SO (dabinn, TofuExpress 11974ee5). Forcing zero unconditionally
-    // is what left "Disable Mouse Y" without an off state: turning it off changed the stick handling
+    // is what left "Disable pitch" without an off state: turning it off changed the stick handling
     // and nothing else, because the pitch was still being zeroed here and the compose was still
     // yaw-only. With the option off the game's pitch is preserved and composed with the HMD
     // orientation at both write sites.

@@ -515,7 +515,7 @@ extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* owner
                     }
                     // Same axis mapping LocateCamera uses: XR (x, y, z) -> game (x, -z, y). And the
                     // same yaw * pitch * HMD product it composes -- the pitch half is identity
-                    // unless the user turned "Disable Mouse Y" off.
+                    // unless the user turned "Disable pitch" off.
                     float headX, headY, headZ, headW;
                     MulQuat(0.0f, 0.0f, hSy, hCy,
                             g_headingPitchS, 0.0f, 0.0f, g_headingPitchC,
