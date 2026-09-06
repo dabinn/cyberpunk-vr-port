@@ -1294,6 +1294,8 @@ inline uint8_t* s_waPhysicalRayOriginRelay = nullptr;
 inline uint8_t* s_waPhysicalRayForwardRelay = nullptr;
 inline thread_local bool s_waPhysicalRayMine = false;
 inline thread_local uint32_t s_waPhysicalRayMuzzleSeq = 0xFFFFFFFFu;
+inline thread_local void* s_waPhysicalRayContext = nullptr;
+inline thread_local float s_waPhysicalRayOrigin[3] = {};
 inline thread_local float s_waPhysicalRayMuzzleForward[3] = {};
 inline thread_local float s_waPhysicalRayConeCenter[3] = {};
 inline thread_local bool s_waPhysicalRayHaveCentre = false;
@@ -1361,6 +1363,9 @@ extern volatile float g_lastLocateQuat[4];
 // absent field, a torn count -- falls out as "not ours", which leaves the shot vanilla.
 static constexpr uint64_t kWaPlayerOwnedWeaponCName = 0x8CB4C0891BD255EDull;  // FNV1a64
 static constexpr uint64_t kWaWeaponItemRecordCName  = 0x8DBDD9257C33612Full;  // FNV1a64
+static constexpr uint64_t kWaPositionCName          = 0x4CBF3A26FCA1D74Aull;  // FNV1a64("position")
+static constexpr uint64_t kWaForwardCName           = 0x1E65942E132F4F7Aull;  // FNV1a64("forward")
+static constexpr uintptr_t kWaSharedVector4SetRva   = 0x11F9AC;
 
 // Range and alignment only, copied from ProvPlausiblePtr in src/Natives/OrientationProvider.cpp rather
 // than reinvented: it is the same question asked in the same process, and this file needs the cheap half
@@ -1410,6 +1415,18 @@ static bool WaPlayerOwnedWeapon(const void* aBlackboard) {
         else playerOwned = entry[8] != 0;
     }
     return fromWeapon && playerOwned;
+}
+
+// Publish redirected shot geometry through the engine's typed shared-data setter so downstream
+// effect executors observe the same ray as PhysicalRay instead of the original camera ray.
+static bool WaWriteSharedVector4(void* aBlackboard, uint64_t aKey, const float* aValue, float aW) {
+    if (!aBlackboard || !aValue || !g_waExeBase) return false;
+    if (!std::isfinite(aValue[0]) || !std::isfinite(aValue[1]) || !std::isfinite(aValue[2])) return false;
+
+    using WaSharedVector4SetFn = bool (*)(void*, const uint64_t*, const float*, uint8_t);
+    const float value[4] = {aValue[0], aValue[1], aValue[2], aW};
+    auto setter = reinterpret_cast<WaSharedVector4SetFn>(g_waExeBase + kWaSharedVector4SetRva);
+    return setter(aBlackboard, &aKey, value, 0);
 }
 
 // A COUNTER READ FROM SIX THREADS MUST BE INCREMENTED FROM SIX THREADS.
@@ -1497,6 +1514,7 @@ static void WaRotateVector(const float* q, const float* v, float* out) {
 extern "C" inline char Hooked_WaPhysicalRayOrigin(void* rcx, void* rdx, float* out) {
     s_waPhysicalRayMine = false;
     s_waPhysicalRayMuzzleSeq = 0xFFFFFFFFu;
+    s_waPhysicalRayContext = nullptr;
     s_waPhysicalRayHaveCentre = false;
     s_waPhysicalRayMuzzleForward[0] = 0.0f;
     s_waPhysicalRayMuzzleForward[1] = 0.0f;
@@ -1562,6 +1580,10 @@ extern "C" inline char Hooked_WaPhysicalRayOrigin(void* rcx, void* rdx, float* o
         s_waPhysicalRayHaveCentre = WaCameraForward(s_waPhysicalRayConeCenter);
         WaCount(CyberpunkVR_DebugPhysicalRayMine);
         out[0] = muzzle[0]; out[1] = muzzle[1]; out[2] = muzzle[2]; out[3] = 1.0f;
+        s_waPhysicalRayContext = rdx;
+        s_waPhysicalRayOrigin[0] = muzzle[0];
+        s_waPhysicalRayOrigin[1] = muzzle[1];
+        s_waPhysicalRayOrigin[2] = muzzle[2];
         WaCount(CyberpunkVR_DebugPhysicalRayOriginWrites);
 
         const LONG recoilSeq = static_cast<LONG>(s_waPhysicalRayMuzzleSeq);
@@ -1573,6 +1595,7 @@ extern "C" inline char Hooked_WaPhysicalRayOrigin(void* rcx, void* rdx, float* o
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         s_waPhysicalRayMine = false;
+        s_waPhysicalRayContext = nullptr;
     }
     return result;
 }
@@ -1589,8 +1612,15 @@ extern "C" inline char Hooked_WaPhysicalRayForward(void* rcx, void* rdx, float* 
         s_waPhysicalRayMuzzleForward[1],
         s_waPhysicalRayMuzzleForward[2]
     };
+    void* sharedContext = s_waPhysicalRayContext;
+    const float finalOrigin[3] = {
+        s_waPhysicalRayOrigin[0],
+        s_waPhysicalRayOrigin[1],
+        s_waPhysicalRayOrigin[2]
+    };
     s_waPhysicalRayMine = false;
     s_waPhysicalRayMuzzleSeq = 0xFFFFFFFFu;
+    s_waPhysicalRayContext = nullptr;
     s_waPhysicalRayHaveCentre = false;
     if (!result || !redirect || !out || !CyberpunkVR_HitscanFromMuzzle) return result;
 
@@ -1658,6 +1688,11 @@ extern "C" inline char Hooked_WaPhysicalRayForward(void* rcx, void* rdx, float* 
         CyberpunkVR_DebugPhysicalRayOutForward[2] = out[2];
         CyberpunkVR_DebugPhysicalRayOutForward[3] = out[3];
         WaCount(CyberpunkVR_DebugPhysicalRayForwardWrites);
+
+        if (sharedContext && sharedContext == rdx) {
+            WaWriteSharedVector4(sharedContext, kWaPositionCName, finalOrigin, 1.0f);
+            WaWriteSharedVector4(sharedContext, kWaForwardCName, out, 0.0f);
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return result;
 }
@@ -1806,4 +1841,3 @@ bool InstallWeaponAimHooks() {
     CyberpunkVR_DebugWaInstalled = g_waInstalled;
     return ok;
 }
-
