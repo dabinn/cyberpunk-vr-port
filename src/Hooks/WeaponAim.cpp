@@ -6,6 +6,7 @@
 // Anim/WeaponAim.hpp.
 
 #include "Anim/WeaponAim.hpp"
+#include "Anim/AdsSightAim.hpp"
 #include "Hooks/Hook.hpp"   // CVR_HOOK: this family installs at boot now, see below
 
 // EXPORTED MIRRORS of the two counters that decide where a missing shot signal is lost. The originals
@@ -1579,11 +1580,20 @@ extern "C" inline char Hooked_WaPhysicalRayOrigin(void* rcx, void* rdx, float* o
         s_waPhysicalRayMuzzleForward[2] = forward[2];
         s_waPhysicalRayHaveCentre = WaCameraForward(s_waPhysicalRayConeCenter);
         WaCount(CyberpunkVR_DebugPhysicalRayMine);
-        out[0] = muzzle[0]; out[1] = muzzle[1]; out[2] = muzzle[2]; out[3] = 1.0f;
+        float origin[3] = {muzzle[0], muzzle[1], muzzle[2]};
+        if (VrAdsSightAimActive()) {
+            float sight[3] = {};
+            if (VrReadSightOrigin(sight)) {
+                origin[0] = sight[0];
+                origin[1] = sight[1];
+                origin[2] = sight[2];
+            }
+        }
+        out[0] = origin[0]; out[1] = origin[1]; out[2] = origin[2]; out[3] = 1.0f;
         s_waPhysicalRayContext = rdx;
-        s_waPhysicalRayOrigin[0] = muzzle[0];
-        s_waPhysicalRayOrigin[1] = muzzle[1];
-        s_waPhysicalRayOrigin[2] = muzzle[2];
+        s_waPhysicalRayOrigin[0] = origin[0];
+        s_waPhysicalRayOrigin[1] = origin[1];
+        s_waPhysicalRayOrigin[2] = origin[2];
         WaCount(CyberpunkVR_DebugPhysicalRayOriginWrites);
 
         const LONG recoilSeq = static_cast<LONG>(s_waPhysicalRayMuzzleSeq);

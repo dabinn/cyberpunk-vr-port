@@ -391,8 +391,14 @@ void SolvePreparedAimArms(uint8_t* boneBuf) {
     // rotation, or the stabilizer's correction -- so it is read back from the FK rather than
     // re-derived here. The left hand takes the rotated authored grip.
     VRIK_ComputeFK(boneBuf, VRIK_FKCount());
-    const float rightHandRot[4] = { g_fkRot[pose->bone[2]][0], g_fkRot[pose->bone[2]][1],
-                                    g_fkRot[pose->bone[2]][2], g_fkRot[pose->bone[2]][3] };
+    float rightHandRot[4] = { g_fkRot[pose->bone[2]][0], g_fkRot[pose->bone[2]][1],
+                              g_fkRot[pose->bone[2]][2], g_fkRot[pose->bone[2]][3] };
+    // Head Aim rotates the authored arm around the head centre, so targetHand[0] is the wrist
+    // position this solve will actually realize. Apply finite-distance ballistics here, after that
+    // target exists, rather than in the earlier weapon writer that only knows the pre-reanchor wrist.
+    if (IsHeadAimWeaponActive()) {
+        ApplyWristTargetAdsBallisticCorrection(boneBuf, pose->targetHand[0], rightHandRot);
+    }
     SolveAimArm(boneBuf, pose->bone[0], pose->bone[1], pose->bone[2],
                 &pose->rawPos[0], &pose->rawRot[0],
                 pose->targetHand[0], pose->targetElbow[0], rightHandRot);

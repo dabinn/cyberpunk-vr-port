@@ -12,6 +12,18 @@ namespace cvr::anim {
 // composes from that, so repeated passes cannot accumulate.
 void ApplyNonVrikAdsMuzzleStabilizer(uint8_t* boneBuf);
 
+// Update the mode/target lifecycle once per pose tick, before any orientation owner writes.
+void UpdateAdsBallisticCorrection();
+// Apply the finite-distance ADS correction about the RightHand/wrist pivot. The desired weapon
+// rotation is supplied in model space; weaponLocalOverride preserves the tick's authored grip.
+void ApplyAdsBallisticCorrectionToWeapon(uint8_t* boneBuf, int weaponIdx,
+                                         const float* wristModelPos, float* weaponModelRot,
+                                         const float* weaponLocalOverride = nullptr);
+// Apply the same geometry at a path's final wrist target, before that arm solver writes the wrist.
+// Used by full VRIK and Head Aim, whose final wrist positions are not the raw animated FK wrist.
+void ApplyWristTargetAdsBallisticCorrection(uint8_t* boneBuf, const float* wristTargetModel,
+                                            float* handModelRot);
+
 }  // namespace cvr::anim
 
 // 1 = correct the drift the vanilla aim-in animation adds to the muzzle direction (default).
