@@ -609,6 +609,75 @@ local function qrotv(i, j, k, r, x, y, z)
            y + r*ty + (k*tx - i*tz),
            z + r*tz + (i*ty - j*tx)
 end
+
+-- The firing hook only needs the sight ORIGIN. Its forward is already the live muzzle transform's
+-- +Y axis, which is also the weapon-mounted sight direction used by this mode. Prefer the game's own
+-- scope/iron offset; fall back to the corresponding weapon-rig slot for weapons whose accessor does
+-- not resolve. Every failed frame publishes invalid so a weapon swap cannot reuse the old sight.
+local function publishSightOrigin(wpn)
+    if type(SetVRSightOrigin) ~= 'function' then return end
+    if not wpn then
+        SetVRSightOrigin(0.0, 0.0, 0.0, 0)
+        return
+    end
+
+    local hasScope = false
+    pcall(function() hasScope = wpn:HasScope() == true end)
+
+    local base, rot, off = nil, nil, nil
+    pcall(function() base = wpn:GetWorldPosition() end)
+    pcall(function() rot = wpn:GetWorldOrientation() end)
+    pcall(function()
+        off = hasScope and wpn:GetScopeOffset() or wpn:GetIronSightOffset()
+    end)
+    if base and rot and off then
+        local ox, oy, oz = nil, nil, nil
+        pcall(function() ox, oy, oz = off.x, off.y, off.z end)
+        if type(ox) ~= 'number' then
+            pcall(function() ox, oy, oz = off.X, off.Y, off.Z end)
+        end
+        if type(ox) == 'number' and type(oy) == 'number' and type(oz) == 'number' then
+            local rx, ry, rz = qrotv(rot.i, rot.j, rot.k, rot.r, ox, oy, oz)
+            local x, y, z = base.x + rx, base.y + ry, base.z + rz
+            if x*x + y*y + z*z > 1.0 then
+                SetVRSightOrigin(x, y, z, 1)
+                return
+            end
+        end
+    end
+
+    local names = hasScope and { 'scope_slot', 'pos_ironsight' }
+                               or { 'pos_ironsight', 'scope_slot' }
+    local components = nil
+    pcall(function() components = wpn:GetComponents() end)
+    if components then
+        for i = 1, #components do
+            local component = components[i]
+            local isSlot = false
+            pcall(function()
+                isSlot = string.find(tostring(component:GetClassName()), 'SlotComponent', 1, true) ~= nil
+            end)
+            if isSlot then
+                for _, name in ipairs(names) do
+                    local ok, found, tr = pcall(function()
+                        return component:GetSlotTransform(CName.new(name))
+                    end)
+                    if ok and found and tr then
+                        local wp = nil
+                        pcall(function() wp = WorldPosition.ToVector4(tr.Position) end)
+                        if wp and type(wp.x) == 'number' and type(wp.y) == 'number' and
+                           type(wp.z) == 'number' and wp.x*wp.x + wp.y*wp.y + wp.z*wp.z > 1.0 then
+                            SetVRSightOrigin(wp.x, wp.y, wp.z, 1)
+                            return
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    SetVRSightOrigin(0.0, 0.0, 0.0, 0)
+end
 -- Slerp from identity toward (i,j,k,r) by w -- the way home for the offset's rotation half.
 local function qslerpId(i, j, k, r, w)
     if r < 0.0 then i, j, k, r = -i, -j, -k, -r end
@@ -1206,6 +1275,10 @@ registerForEvent('onUpdate', function(dt)
         -- immediately. Isolation belongs in the OTHER direction: the muzzle keeps its place and the
         -- newcomer gets its own pcall.
         if wpn then updateMuzzle(wpn) end
+        local okSight = pcall(function() publishSightOrigin(wpn) end)
+        if not okSight and type(SetVRSightOrigin) == 'function' then
+            SetVRSightOrigin(0.0, 0.0, 0.0, 0)
+        end
         local okRay, errRay = pcall(function()
             if wpn then updateBarrelRay(dt) else stopBarrelRay() end
         end)

@@ -54,6 +54,7 @@ struct LiveControls {
     volatile int xrLaserDotMode = 1; // 0 = steady projection, 1 = real world point, 2 = surface raycast
     volatile float xrLaserDotRadiusMm = 6.0f; // apparent world-space radius in millimetres
     volatile int xrLaserDotScaleWithDistance = 0; // mode 2 only: use the surface depth instead of the 2 m reference depth
+    volatile int xrHideLaserDotAds = 0; // 1 = hide the external dot while ADS and use the weapon sight origin for shots
     volatile int xrXInputInstall;   // 1 = install the XInput entry-point detour at startup (default 1, set 0 in vrport.ini to fully bypass)
     volatile int xrInputActions;    // 1 = create gameplay XrActions (thumbstick/trigger/buttons). 0 = pose-only legacy behaviour
     volatile int xrChordActivation; // 0 = left L3 + right stick, 1 = right R3 + left stick, 2 = right thumbrest + left stick

@@ -471,6 +471,7 @@ void PollLiveControls() {
     int xrLaserDotMode = g_liveControls.xrLaserDotMode;
     float xrLaserDotRadiusMm = g_liveControls.xrLaserDotRadiusMm > 0.0f ? g_liveControls.xrLaserDotRadiusMm : 6.0f;
     int xrLaserDotScaleWithDistance = g_liveControls.xrLaserDotScaleWithDistance;
+    int xrHideLaserDotAds = g_liveControls.xrHideLaserDotAds;
     int xrXInputInstall = g_liveControls.xrXInputInstall;
     int xrInputActions = g_liveControls.xrInputActions;
     int xrChordActivation = g_liveControls.xrChordActivation;
@@ -1123,6 +1124,11 @@ void PollLiveControls() {
             xrLaserDotScaleWithDistance = intValue;
             continue;
         }
+        if (sscanf_s(line, "xr_hide_laser_dot_ads=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_hide_laser_dot_ads = %d", &intValue) == 1) {
+            xrHideLaserDotAds = intValue;
+            continue;
+        }
         if (sscanf_s(line, "xr_cutscene_suspend_tier=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_cutscene_suspend_tier = %d", &intValue) == 1) {
             xrCutsceneSuspendTier = intValue;
@@ -1350,6 +1356,7 @@ void PollLiveControls() {
     g_liveControls.xrLaserDotRadiusMm =
         xrLaserDotRadiusMm < 1.0f ? 1.0f : (xrLaserDotRadiusMm > 50.0f ? 50.0f : xrLaserDotRadiusMm);
     g_liveControls.xrLaserDotScaleWithDistance = xrLaserDotScaleWithDistance != 0 ? 1 : 0;
+    g_liveControls.xrHideLaserDotAds = xrHideLaserDotAds != 0 ? 1 : 0;
     g_liveControls.xrMovementControl = xrMovementSource != 0 ? 1 : 0;
     g_liveControls.xrPhysicalBodyRotation = xrPhysicalBodyRotation != 0 ? 1 : 0;
     g_liveControls.xrAdsRightEyeAlignment = xrAdsRightEyeAlignment != 0 ? 1 : 0;
@@ -1586,6 +1593,7 @@ LiveControlsUiState MakeLiveControlsUiState() {
     state.xrLaserDotMode = g_liveControls.xrLaserDotMode;
     state.xrLaserDotRadiusMm = g_liveControls.xrLaserDotRadiusMm;
     state.xrLaserDotScaleWithDistance = g_liveControls.xrLaserDotScaleWithDistance;
+    state.xrHideLaserDotAds = g_liveControls.xrHideLaserDotAds;
     state.xrPhysicalBodyRotation = g_liveControls.xrPhysicalBodyRotation;
     state.xrAdsRightEyeAlignment = g_liveControls.xrAdsRightEyeAlignment;
     state.xrCutsceneSuspendTier = g_liveControls.xrCutsceneSuspendTier;
@@ -1841,6 +1849,7 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_laser_dot_radius_mm=%.0f\n",
             state.xrLaserDotRadiusMm < 1.0f ? 1.0f : (state.xrLaserDotRadiusMm > 50.0f ? 50.0f : state.xrLaserDotRadiusMm));
     fprintf(file, "xr_laser_dot_scale_with_distance=%d\n", state.xrLaserDotScaleWithDistance != 0 ? 1 : 0);
+    fprintf(file, "xr_hide_laser_dot_ads=%d\n", state.xrHideLaserDotAds != 0 ? 1 : 0);
     fprintf(file, "xr_physical_body_rotation=%d\n", state.xrPhysicalBodyRotation != 0 ? 1 : 0);
     fprintf(file, "xr_ads_right_eye_alignment=%d\n", state.xrAdsRightEyeAlignment != 0 ? 1 : 0);
     fprintf(file, "xr_cutscene_suspend_tier=%d\n",
@@ -1936,6 +1945,7 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
         state->xrLaserDotRadiusMm < 1.0f ? 1.0f
                                         : (state->xrLaserDotRadiusMm > 50.0f ? 50.0f : state->xrLaserDotRadiusMm);
     g_liveControls.xrLaserDotScaleWithDistance = state->xrLaserDotScaleWithDistance != 0 ? 1 : 0;
+    g_liveControls.xrHideLaserDotAds = state->xrHideLaserDotAds != 0 ? 1 : 0;
     g_liveControls.xrPhysicalBodyRotation = state->xrPhysicalBodyRotation != 0 ? 1 : 0;
     g_liveControls.xrAdsRightEyeAlignment = state->xrAdsRightEyeAlignment != 0 ? 1 : 0;
     g_liveControls.xrCutsceneSuspendTier =

@@ -65,6 +65,7 @@
 #include <string>
 #include "Anim/VrikHook.hpp"
 #include "Anim/WeaponAim.hpp"
+#include "Anim/AdsSightAim.hpp"
 #include "Natives/NativeState.hpp"
 #include "Natives/NativeHelpers.hpp"
 #include <MinHook.h>
@@ -391,9 +392,21 @@ static uintptr_t __fastcall PosProvStub33(uintptr_t rcx, uintptr_t rdx, uintptr_
         return ret;
     }
 
-    const float mx = g_provMuzzlePos[0], my = g_provMuzzlePos[1], mz = g_provMuzzlePos[2];
+    float mx = g_provMuzzlePos[0], my = g_provMuzzlePos[1], mz = g_provMuzzlePos[2];
     const float ml2 = mx*mx + my*my + mz*mz;
     if (!(std::isfinite(ml2) && ml2 > 1.0f)) return ret;
+
+    // ADS sight mode keeps the launch direction on the weapon's live +Y axis and moves only the
+    // projectile origin to the weapon-owned sight reference. If that sample is unavailable, retain
+    // the current muzzle origin; never fall back to the camera.
+    if (VrAdsSightAimActive()) {
+        float sight[3] = {};
+        if (VrReadSightOrigin(sight)) {
+            mx = sight[0];
+            my = sight[1];
+            mz = sight[2];
+        }
+    }
 
     const uintptr_t outp = rdx ? rdx : ret;
     if (!ProvPlausiblePtr(outp)) return ret;
@@ -915,6 +928,39 @@ void SetVRMuzzlePos(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, 
         g_pSharedHands[200] = x; g_pSharedHands[201] = y; g_pSharedHands[202] = z;
         g_pSharedHands[203] = 1.0f;   // valid
     }
+}
+
+// Publish a weapon-owned sight origin for the ADS firing policy. Direction is deliberately not part
+// of this packet: both firing paths already consume the live muzzle transform's +Y axis, which is the
+// weapon sight forward selected for this mode.
+void SetVRSightOrigin(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t) {
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    int32_t valid = 0;
+    RED4ext::GetParameter(aFrame, &x);
+    RED4ext::GetParameter(aFrame, &y);
+    RED4ext::GetParameter(aFrame, &z);
+    RED4ext::GetParameter(aFrame, &valid);
+    aFrame->code++;
+    EnsureSharedMemory();
+    if (!g_pSharedHands) return;
+
+    static uint32_t s_evenSeq = 0;
+    uint32_t nextEven = s_evenSeq + 2u;
+    if (nextEven >= 1000000u) nextEven = 2u;
+    g_pSharedHands[vrshared::kSightOriginSeq] = static_cast<float>(nextEven - 1u);
+    std::atomic_thread_fence(std::memory_order_release);
+
+    const float lengthSq = x*x + y*y + z*z;
+    const bool accepted = valid != 0 && std::isfinite(lengthSq) && lengthSq > 1.0f;
+    if (accepted) {
+        g_pSharedHands[vrshared::kSightOriginX + 0] = x;
+        g_pSharedHands[vrshared::kSightOriginX + 1] = y;
+        g_pSharedHands[vrshared::kSightOriginX + 2] = z;
+    }
+    g_pSharedHands[vrshared::kSightOriginValid] = accepted ? 1.0f : 0.0f;
+    std::atomic_thread_fence(std::memory_order_release);
+    g_pSharedHands[vrshared::kSightOriginSeq] = static_cast<float>(nextEven);
+    s_evenSeq = nextEven;
 }
 
 // THE CARRY FLAG. Raised on the frame the weapon moves into the left slot; it starts the wrist's
