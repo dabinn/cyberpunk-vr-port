@@ -91,6 +91,9 @@
 //  [178]      barrel eye-origin packet seqlock  overlay -> CET
 //  [179..180] barrel dot visible MAIN/second    plugin (CET push) -> overlay; bracketed by [171]
 //  [181]      mode-2 laser dot active           overlay -> CET
+//  [182..184] weapon sight origin XYZ           plugin (CET push) -> firing hooks
+//  [185]      weapon sight origin valid         plugin (CET push) -> firing hooks
+//  [186]      weapon sight origin packet seqlock plugin (CET push) -> firing hooks
 //             ONE-TICK VIEW HOLD protocol (v3, trace-proven mechanism): the entity/
 //             puppet world yaw applies one TICK after the camera turns; sprint locks
 //             puppet yaw to the heading, so the animated body+arms rendered one frame
@@ -236,4 +239,7 @@ constexpr int kBarrelEyeSeq         = 178;   // odd while writing, even when coh
 constexpr int kBarrelMainVisible    = 179;   // 1 = clear/fail-open, 0 = occluded
 constexpr int kBarrelSecondVisible  = 180;   // 1 = clear/fail-open, 0 = occluded
 constexpr int kBarrelRayActive      = 181;   // checkbox on + mode 2 + weapon equipped
+constexpr int kSightOriginX         = 182;   // ..184 world-space sight origin XYZ
+constexpr int kSightOriginValid     = 185;   // 1 = valid weapon-owned sight reference
+constexpr int kSightOriginSeq       = 186;   // odd while writing, even when coherent
 } // namespace vrshared

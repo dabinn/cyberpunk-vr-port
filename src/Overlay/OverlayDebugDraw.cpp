@@ -11,6 +11,7 @@
 #include "Overlay/ImGuiOverlay.hpp"
 #include "Overlay/LiveControlsUi.hpp"
 #include "Core/LiveControls.hpp"
+#include "Core/VrCoreShared.hpp"
 #include "Runtimes/OpenXRManager.hpp"
 #include <algorithm>
 #include <atomic>
@@ -446,14 +447,16 @@ void DrawBarrelCrosshair() {
 
     const float enableLaser = OpenXRManager::Get().GetSharedSlot(144);   // weapon flag (was [126]: HMD-Z collision)
     const bool surfaceMode = laserDotMode == 2;
-    const bool raycastActive = g_drawBarrelCross && surfaceMode && enableLaser >= 0.9f;
+    const bool hideForAds = g_drawBarrelCross && g_liveControls.xrHideLaserDotAds != 0 && g_isAiming;
+    const bool drawLaser = g_drawBarrelCross && !hideForAds;
+    const bool raycastActive = drawLaser && surfaceMode && enableLaser >= 0.9f;
     // CET owns every physics query. Publish the UI/mode gate before returning so disabling a dot
     // stops muzzle and visibility work rather than merely stopping the final draw.
     OpenXRManager::Get().SetSharedSlot(vrshared::kBarrelRayActive, raycastActive ? 1.0f : 0.0f);
     
     float rad = 3.0f;
     
-    if (!g_drawBarrelCross || enableLaser < 0.9f){
+    if (!drawLaser || enableLaser < 0.9f){
         // Clear the legacy mirror publication immediately when the common UI/weapon gate closes;
         // the HMD's dedicated second-eye ImGui list is reset independently every frame.
         CyberpunkVR_BarrelDotTick = 0;

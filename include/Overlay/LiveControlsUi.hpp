@@ -59,6 +59,7 @@ struct LiveControlsUiState {
     // World-space radius in millimetres. Distance scaling applies only to surface raycast mode.
     float xrLaserDotRadiusMm;
     int xrLaserDotScaleWithDistance;
+    int xrHideLaserDotAds;
     // Kill-switches for the new controller pipeline; default 0 (off) so a stuck
     // OpenXR binding or XInput entry-point patch can't keep CP2077 from booting.
     int xrXInputInstall;

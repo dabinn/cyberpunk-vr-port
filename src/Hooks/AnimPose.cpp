@@ -224,6 +224,7 @@ if (g_VRRecordFK) {
                 // and so does the eye re-anchoring below, for both aiming models.
                 const bool adsEyeAlignmentActive = headAimWork || nonVrikAdsWork;
                 if (adsEyeAlignmentActive) VRIK_LatchViewPacket();
+                cvr::anim::UpdateAdsBallisticCorrection();
                 cvr::anim::ApplyHeadAimWeaponOrientation(boneBuf);
 
                 // THE NON-VRIK ADS MUZZLE STABILIZER. Here because it must see the engine's own
@@ -1565,6 +1566,10 @@ if (g_VRRecordFK) {
                             cvr::anim::WheelStoreTarget(0, target);
                             cvr::anim::WheelBlendTarget(0, target, handRot);
                             if (!wheelOffR) {
+                                // Surface+Hide-ADS target continuity for full VRIK. This is the final
+                                // right-wrist position/orientation target, so the finite-distance
+                                // correction uses the same pivot that VRIK_SolveArm will realize.
+                                cvr::anim::ApplyWristTargetAdsBallisticCorrection(boneBuf, target, handRot);
                                 VRIK_SolveArm(boneBuf, g_VRRightUpperArmIdx, g_VRRightForeArmIdx,
                                               g_VRRightBoneIdx, target, handRot,
                                               bodyRight, bodyUp, bodyFwd,
@@ -2163,5 +2168,3 @@ bool InstallAnimPoseHook() {
         return false;
     return true;
 }
-
-

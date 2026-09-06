@@ -161,6 +161,7 @@ void SetVRDeviceScreen(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFr
 void SetVRBarrelRayHit(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t);
 void QueryVRNpcHitSurface(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, RED4ext::Vector4* aOut, int64_t);
 void SetVRMuzzlePos(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t);
+void SetVRSightOrigin(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t);
 // The aim line's hit point and surface normal, from the weapon module's own raycast.
 void SetVRAimHit(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t);
 // The equipped weapon's class, from its record: 0 unknown, 1 handgun/revolver, 2 rifle, 3 shotgun.
