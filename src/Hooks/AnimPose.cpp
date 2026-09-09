@@ -222,23 +222,26 @@ if (g_VRRecordFK) {
                 // HEAD AIM: the weapon takes the head's orientation. Needs the view packet latched
                 // even when VRIK is not solving, because the packet IS the orientation it applies --
                 // and so does the eye re-anchoring below, for both aiming models.
-                const bool adsEyeAlignmentActive = headAimWork || nonVrikAdsWork;
-                if (adsEyeAlignmentActive) VRIK_LatchViewPacket();
+                const bool aimArmViewWork = headAimWork || nonVrikAdsWork;
+                if (aimArmViewWork) VRIK_LatchViewPacket();
                 cvr::anim::UpdateAdsBallisticCorrection();
-                cvr::anim::ApplyHeadAimWeaponOrientation(boneBuf);
+
+                // Record the authored arm pose before either weapon writer below changes it. Head Aim
+                // re-anchors this same pose in hip and ADS, so entering ADS cannot change its base frame.
+                cvr::anim::PrepareAimArmTargets(boneBuf);
 
                 // THE NON-VRIK ADS MUZZLE STABILIZER. Here because it must see the engine's own
                 // animated pose: it measures the direction error the aim-in animation introduced and
                 // takes it back out, so it runs after the capture reads above and before any layer of
                 // ours writes. Internally a no-op while VRIK drives the arms.
                 cvr::anim::ApplyNonVrikAdsMuzzleStabilizer(boneBuf);
+                cvr::anim::ApplyHeadAimWeaponOrientation(boneBuf);
 
                 // AND THE ARMS FOLLOW THE WEAPON ONTO THE SIGHTING EYE (dabinn, TofuExpress
                 // 73bdf668). Prepare records the authored arm pose for this tick and computes
                 // eye-anchored targets from it; Solve moves the arms to them, rotation only. Solve
                 // runs AFTER the weapon writers above because it reads the right hand's finished
                 // rotation back out of the pose they left.
-                cvr::anim::PrepareAimArmTargets(boneBuf);
                 cvr::anim::SolvePreparedAimArms(boneBuf);
 
 
