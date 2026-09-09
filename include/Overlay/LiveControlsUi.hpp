@@ -152,4 +152,7 @@ extern "C" void GetAdsCameraTelemetryUiState(AdsCameraTelemetryUiState* outState
 
 extern "C" void GetLiveControlsUiState(LiveControlsUiState* outState);
 extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int persistToFile);
+extern "C" void PersistLiveControlsNow();
+extern "C" int GetLiveVerboseLogSetting();
+extern "C" void SetLiveVerboseLogSetting(int enabled);
 extern "C" void RequestLiveControlsRecenter();
