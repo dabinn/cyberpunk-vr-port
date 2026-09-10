@@ -24,6 +24,7 @@
 // Right eye source, from the stereo module. "Fresh" returns null once the VRCAM view stops
 // updating, which is what makes the fallback to mono automatic.
 extern "C" ID3D12Resource* CyberpunkVR_GetVrcamEyeTextureFresh();
+extern "C" __declspec(dllexport) extern uint64_t CyberpunkVR_DebugStableCopies;
 // The finished HUD surface, snapshotted by sync_stereo, plus the engine's own composite
 // constants read out of its b6 buffer.
 extern "C" ID3D12Resource* CyberpunkVR_GetHudTexture();
@@ -791,6 +792,7 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
     // Deriving these from the XR image instead is what killed the GPU twice: that resource is
     // typeless, and a typeless RTV is invalid.
     bool vrcamEyeCaptured = false;
+    uint64_t vrcamContentSerial = 0;
     const uint32_t eyeW = static_cast<uint32_t>(sourceDesc.Width);
     const uint32_t eyeH = sourceDesc.Height;
     // NOT IN A MENU. The right eye below is VRCAM's view of the WORLD; the menu is not in it,
@@ -803,6 +805,10 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
     const bool menuOpen = (GetMenuRectMode() != 0) || (GetMenuMode() != 0);
     if (CyberpunkVR_StereoSubmit && eyeW && eyeH && !(menuOpen && CyberpunkVR_MonoMenu)) {
         ID3D12Resource* vrcamSrc = CyberpunkVR_GetVrcamEyeTextureFresh();
+        if (vrcamSrc) {
+            vrcamContentSerial = static_cast<uint64_t>(InterlockedCompareExchange64(
+                reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugStableCopies), 0, 0));
+        }
         // THE AGE OF THE SECOND EYE'S CONTENT, which is a different quantity from everything else
         // measured so far and the only one that can be asymmetric between the eyes.
         //
@@ -1101,6 +1107,7 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
             m_vrcamEyeSerial = vrcamEyeCaptured ? serial : 0;
             if (vrcamEyeCaptured) {
                 m_vrcamEyePoolSerial[m_vrcamEyeSlot] = serial;
+                m_vrcamEyePoolContentSerial[m_vrcamEyeSlot] = vrcamContentSerial;
             }
         }
     }

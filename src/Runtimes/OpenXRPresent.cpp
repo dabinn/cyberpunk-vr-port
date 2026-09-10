@@ -641,6 +641,7 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
             } else if (GetRenderPoseSubmit() != 0 && hasRenderHeadPose) {
                 monoCenterPose = renderHeadPose;
             }
+            const uint64_t mainRenderEpoch = haveExactPose ? pending.frameAimEpoch : 0;
 
             // AND THE SECOND EYE'S OWN CENTRE, from its own queue, built by the same arithmetic as the
             // centre above -- undo the recenter base, then compose. Empty queue (the view not active, a
@@ -648,6 +649,7 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
             // the previous behaviour, so this can only add information.
             XrPosef vrcamCenterPose = monoCenterPose;
             bool haveVrcamCenter = false;
+            uint64_t vrcamRenderEpoch = 0;
             if (CyberpunkVR_BindPoseToImage && CyberpunkVR_PoseReadBack &&
                 CyberpunkVR_VrcamOwnLabel) {
                 OpenXRHeadPose vrPending{};
@@ -668,8 +670,30 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
                         vbase.position.y + rotatedV.y,
                         vbase.position.z + rotatedV.z };
                     haveVrcamCenter = true;
+                    vrcamRenderEpoch = vrPending.frameAimEpoch;
                     ++CyberpunkVR_DebugVrcamLabelUsed;
                 }
+            }
+            if ((s_presentCount % 6u) == 0u) {
+                const XrQuaternionf& qm = monoCenterPose.orientation;
+                const XrQuaternionf& qv = vrcamCenterPose.orientation;
+                float qdot = std::abs(qm.x*qv.x + qm.y*qv.y + qm.z*qv.z + qm.w*qv.w);
+                qdot = std::clamp(qdot, 0.0f, 1.0f);
+                const float centreOriDeltaDeg = 2.0f * std::acos(qdot) * 57.2957795f;
+                const long long epochDelta =
+                    (mainRenderEpoch != 0 && vrcamRenderEpoch != 0)
+                        ? static_cast<long long>(vrcamRenderEpoch) - static_cast<long long>(mainRenderEpoch)
+                        : 0;
+                Log("[stereo-capture-label] serial=%llu mainExact=%d vrcamOwn=%d "
+                    "mainEpoch=%llu vrcamEpoch=%llu epochDelta=%lld centreOriDeltaDeg=%.4f "
+                    "mainQDepth=%u vrcamQDepth=%u\n",
+                    static_cast<unsigned long long>(s_presentCount),
+                    haveExactPose ? 1 : 0, haveVrcamCenter ? 1 : 0,
+                    static_cast<unsigned long long>(mainRenderEpoch),
+                    static_cast<unsigned long long>(vrcamRenderEpoch), epochDelta,
+                    centreOriDeltaDeg,
+                    OpenXRManager::Get().RenderedFrameQueueDepth(),
+                    OpenXRManager::Get().VrcamRenderedFrameQueueDepth());
             }
             const uint32_t vrcamEyeIndex = CyberpunkVR_MainIsRightEye ? 0u : 1u;
             // The eye offset is STATIC GEOMETRY IN HEAD SPACE, so it has to be rotated by the
