@@ -239,6 +239,7 @@ void EnsureLiveControlFileExists() {
     fprintf(file, "xr_classic_disable_ls_sprint=0\n");
     fprintf(file, "xr_classic_disable_rs_dash_crouch=0\n");
     fprintf(file, "xr_classic_vehicle_controls=0\n");
+    fprintf(file, "xr_allow_non_fpp_views=0\n");
     fprintf(file, "xr_classic_swap_triggers_grips=0\n");
     fprintf(file, "xr_classic_scanner_controls=0\n");
     fprintf(file, "xr_debug_hand_overlay=0\n");

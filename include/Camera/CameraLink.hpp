@@ -82,6 +82,20 @@ void CamWriteRecordPush(const float q[4], const OpenXRHeadPose& p);
 // Identify the frame's pose from the quaternion the engine is about to render with. `outAge` is how
 // many writes back it was found, `outTies` how many records were within tolerance.
 bool CamWriteRecordFind(const float q[4], OpenXRHeadPose* out, uint32_t* outAge, uint32_t* outTies);
+// Strict provenance check for detached MAIN: only a bit-identical quaternion written by this
+// plugin is enough evidence to peel an HMD rotation back off the rendered camera.
+bool CamWriteRecordFindExact(const float q[4], OpenXRHeadPose* out);
+
+// ---- CameraDirector blend provenance ----------------------------------------------------------
+// All non-zero-weight entries in one blend must use the same HMD sample before the final blended
+// quaternion can be filed in the ordinary camera write ring.
+void CameraDirectorBlendScopeBegin(const uintptr_t* cameraObjects, uint32_t capturedCount,
+                                   uint32_t activeCount, const OpenXRHeadPose* preferredHead);
+void CameraDirectorBlendScopeEnd();
+bool CameraDirectorBlendScopeContains(uintptr_t cameraObject);
+bool CameraDirectorBlendScopeReadHead(uintptr_t cameraObject, OpenXRHeadPose* outHead);
+bool CameraDirectorBlendScopeMarkComposed(uintptr_t cameraObject, const OpenXRHeadPose& head);
+bool CameraDirectorBlendScopeAllComposed(OpenXRHeadPose* outHead);
 
 // ---- the located camera frame used by native VRIK pairing -------------------------------------
 //
@@ -100,21 +114,41 @@ void LocatedCameraFramePublish(const LocatedCameraFrame& f);
 bool LocatedCameraFrameRead(LocatedCameraFrame* out);
 
 // ---- the last authoritative MAIN render camera ------------------------------------------------
-//
-// Published from FinalCamera only when the dispatcher says this is MAIN (view key 0). Unlike
-// g_camObjMain, which is specifically the player's FPP camera component, this remains the actual
-// rendered MAIN when the game hands authority to a vehicle orbit camera, cutscene camera, terminal,
-// surveillance camera, or another director-owned view.
+// Published from FinalCamera only for dispatcher MAIN. Unlike g_camObjMain, this remains the
+// actual rendered camera when CameraDirector hands authority to vehicle TPP, rear view, or another
+// detached camera.
 struct FinalMainCameraFrame {
     float worldPos[3];
     float worldQuat[4];
+    OpenXRHeadPose hmdPose{};
     uint64_t timestampUs;
     uint64_t callbackHit;
     uint32_t locateSequence;
     uint32_t sequence;
+    uint32_t hmdComposed;
 };
 void FinalMainCameraFramePublish(const FinalMainCameraFrame& f);
 bool FinalMainCameraFrameRead(FinalMainCameraFrame* out);
+
+// FinalCamera publishes whether dispatcher MAIN is currently detached from the player FPP
+// component. This is a reader-side ownership signal only; it must never become a camera writer.
+void GenericNonFppActivePublish(bool active);
+bool GenericNonFppActiveRead();
+
+// The selected VRCAM is temporarily pointed at detached MAIN during its native transform-changed
+// callback. This thread-local scope carries the exact HMD sample through a synchronous LocateCamera
+// call and also tells it when the temporary entry is already composed.
+struct GenericVrcamLocateScope {
+    uintptr_t cameraObject = 0;
+    OpenXRHeadPose head{};
+    bool active = false;
+    bool entryAlreadyComposed = false;
+    bool locateConsumed = false;
+};
+GenericVrcamLocateScope GenericVrcamLocateScopeExchange(const GenericVrcamLocateScope& scope);
+bool GenericVrcamLocateScopeMatches(uintptr_t cameraObject);
+bool GenericVrcamLocateScopeEntryAlreadyComposed(uintptr_t cameraObject);
+bool GenericVrcamLocateScopeRead(uintptr_t cameraObject, OpenXRHeadPose* outHead);
 
 // ---- the view frame handed to the solve --------------------------------------------------------
 //
