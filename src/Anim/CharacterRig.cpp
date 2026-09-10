@@ -1895,35 +1895,16 @@ void VRIK_PlaceBodyUnderHMD(uint8_t* boneBuf,
         pub(10, g_VRRightFootIdx);
     }
 
-    // 5b. VIEW-ANCHOR PUBLISH -- HEAD BONE + USER-TUNED CONSTANTS ("bake на head").
-    // The eye-midpoint auto-measure is gone: view target = HEAD BONE + fixed offset,
-    // model axes (X right, Y fwd, Z up). Values tuned by the user with the live Tracking
-    // sliders AFTER the 131072 fixed-point fix (honest 1:1 meters): (-0.02, +0.10, +0.15).
-    // The Tracking sliders should sit at ZERO now -- these constants replace them.
-    // delta = (headFK + kViewOff) - (baked) camModelPos, published on the same [116..119]
-    // channel dxgi's LocateCamera already applies view-only (next to xrHeadOffset+camBake).
-    // No feedback: the view offset never feeds camModelPos or the body solve. EMA(0.1)
-    // kills FK jitter; sanity clamp +-0.9m.
-    if (g_pSharedHands && headIdx >= 0 && headIdx < VRIK_MAX_BONES) {
-        const float kViewOffRight = -0.02f, kViewOffFwd = 0.10f, kViewOffUp = 0.15f;
-        float tgt[3] = { g_fkPos[headIdx][0] + kViewOffRight,
-                         g_fkPos[headIdx][1] + kViewOffFwd,
-                         g_fkPos[headIdx][2] + kViewOffUp };
-        float d[3] = { tgt[0]-camModelPos[0], tgt[1]-camModelPos[1], tgt[2]-camModelPos[2] };
-        bool sane = true;
-        for (int k = 0; k < 3; ++k) { if (!(d[k] > -0.9f && d[k] < 0.9f)) sane = false; }
-        if (sane) {
-            static float s_eyeViewEMA[3] = {0,0,0}; static bool s_evInit = false;
-            if (!s_evInit) { s_eyeViewEMA[0]=d[0]; s_eyeViewEMA[1]=d[1]; s_eyeViewEMA[2]=d[2]; s_evInit = true; }
-            else { for (int k = 0; k < 3; ++k) s_eyeViewEMA[k] += (d[k]-s_eyeViewEMA[k]) * 0.1f; }
-            g_pSharedHands[116] = s_eyeViewEMA[0];
-            g_pSharedHands[117] = s_eyeViewEMA[1];
-            g_pSharedHands[118] = s_eyeViewEMA[2];
-            g_pSharedHands[119] = 1.0f;
-        }
-        // NOTE: cig->mouth distance is NOT computed here. g_fkPos at this stage is still the ENGINE
-        // IDLE pose (wrist ~hip); the hand only reaches the controller after the arm IK below. The
-        // mouth distance is computed post-solve from the controller target -- see g_VRSmokeMouthDist.
+    // The old view-anchor pass moved the rendered camera to a hard-coded point above the avatar
+    // head. On a fresh VRIK session that added roughly 26 cm of vertical view translation, while
+    // toggling tracking off invalidated it and permanently returned the view to the correct height.
+    // View placement now stays owned by the HMD, manual Tracking-Camera offsets and camera bake.
+    // Keep the legacy channel explicitly invalid so old diagnostics remain deterministic.
+    if (g_pSharedHands) {
+        g_pSharedHands[116] = 0.0f;
+        g_pSharedHands[117] = 0.0f;
+        g_pSharedHands[118] = 0.0f;
+        g_pSharedHands[119] = 0.0f;
     }
 
     g_VRIKDbgChest[0]=g_fkPos[headIdx][0]; g_VRIKDbgChest[1]=g_fkPos[headIdx][1]; g_VRIKDbgChest[2]=g_fkPos[headIdx][2];
@@ -2065,4 +2046,3 @@ int   g_solveCacheIdx[96];
 float g_solveCacheVal[96][7];
 float g_solveCacheYaw = 0.0f;   // heading the cached solve was built with
 float g_solveCacheSnapCtr = -1.0f; // snap event counter [147] the cached solve consumed
-

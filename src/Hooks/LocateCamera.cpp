@@ -953,16 +953,13 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
             vehOff[1] = g_liveControls.xrVehHeadOffsetY;
             vehOff[2] = g_liveControls.xrVehHeadOffsetZ;
         }
-        // EYE-VIEW offset ("bake to eyes"): view-only, no feedback into the body solve.
-        float eyeBake[3] = { 0.0f, 0.0f, 0.0f };
         if (float* shEye = GetShotShared()) {
             if (allowGameCameraTranslation) {
-                if (!g_isInVehicle && shEye[119] == 1.0f) { eyeBake[0] = shEye[116]; eyeBake[1] = shEye[117]; eyeBake[2] = shEye[118]; }
                 // Publish the TOTAL view offset actually applied ([120..123]) so hand
                 // targets stay consistent with whatever the user tunes the view to.
-                shEye[120] = g_liveControls.xrHeadOffsetX + camBake[0] + eyeBake[0] + vehOff[0];
-                shEye[121] = g_liveControls.xrHeadOffsetY + camBake[1] + eyeBake[1] + vehOff[1];
-                shEye[122] = g_liveControls.xrHeadOffsetZ + camBake[2] + eyeBake[2] + vehOff[2];
+                shEye[120] = g_liveControls.xrHeadOffsetX + camBake[0] + vehOff[0];
+                shEye[121] = g_liveControls.xrHeadOffsetY + camBake[1] + vehOff[1];
+                shEye[122] = g_liveControls.xrHeadOffsetZ + camBake[2] + vehOff[2];
                 shEye[123] = 1.0f;
             } else {
                 shEye[123] = 0.0f;
@@ -970,15 +967,15 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         }
         const float localRight = xrPose.posX * posScale +
             (allowGameCameraTranslation
-                 ? (g_liveControls.xrHeadOffsetX + camBake[0] + eyeBake[0] + vehOff[0])
+                 ? (g_liveControls.xrHeadOffsetX + camBake[0] + vehOff[0])
                  : 0.0f);
         const float localForward = -xrPose.posZ * posScale +
             (allowGameCameraTranslation
-                 ? (g_liveControls.xrHeadOffsetY + camBake[1] + eyeBake[1] + vehOff[1])
+                 ? (g_liveControls.xrHeadOffsetY + camBake[1] + vehOff[1])
                  : 0.0f);
         const float localUp = xrPose.posY * posScale +
             (allowGameCameraTranslation
-                 ? (g_liveControls.xrHeadOffsetZ + camBake[2] + eyeBake[2] + vehOff[2])
+                 ? (g_liveControls.xrHeadOffsetZ + camBake[2] + vehOff[2])
                  : 0.0f);
 
         // Perfectly level heading matrix for translation (no sliding into the floor when pitched).
