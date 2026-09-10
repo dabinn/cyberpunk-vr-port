@@ -38,6 +38,25 @@ struct AtomicFinalMainCameraFrame {
 
 AtomicFinalMainCameraFrame g_finalMain{};
 std::atomic<uint32_t> g_finalMainSeq{0};
+
+struct AtomicGenericNonFppCameraFrame {
+    std::atomic<float> worldPos[3]{};
+    std::atomic<float> worldQuat[4]{};
+    std::atomic<float> hmdPos[3]{};
+    std::atomic<float> hmdOri[4]{};
+    std::atomic<float> recenterPos[3]{};
+    std::atomic<float> recenterOri[4]{};
+    std::atomic<uint64_t> hmdFrameAimEpoch{0};
+    std::atomic<uint32_t> hmdValid{0};
+    std::atomic<uint32_t> hmdRecenterBaseValid{0};
+    std::atomic<uint64_t> timestampUs{0};
+    std::atomic<uint32_t> sequence{0};
+    std::atomic<uint32_t> active{0};
+    std::atomic<uint32_t> hmdComposed{0};
+};
+
+AtomicGenericNonFppCameraFrame g_genericNonFppFrame{};
+std::atomic<uint32_t> g_genericNonFppFrameSeq{0};
 std::atomic<bool> g_genericNonFppActive{false};
 thread_local cvr::camera::GenericVrcamLocateScope g_genericVrcamLocateScope{};
 
@@ -132,6 +151,83 @@ bool cvr::camera::FinalMainCameraFrameRead(FinalMainCameraFrame* out) {
         tmp.hmdComposed = g_finalMain.hmdComposed.load(std::memory_order_relaxed);
 
         if (g_finalMainSeq.load(std::memory_order_acquire) == s0) {
+            *out = tmp;
+            return true;
+        }
+    }
+    return false;
+}
+
+void cvr::camera::GenericNonFppCameraFramePublish(const GenericNonFppCameraFrame& f) {
+    g_genericNonFppFrameSeq.fetch_add(1u, std::memory_order_acq_rel);
+    for (int i = 0; i < 3; ++i) {
+        g_genericNonFppFrame.worldPos[i].store(f.worldPos[i], std::memory_order_relaxed);
+    }
+    for (int i = 0; i < 4; ++i) {
+        g_genericNonFppFrame.worldQuat[i].store(f.worldQuat[i], std::memory_order_relaxed);
+    }
+    g_genericNonFppFrame.hmdPos[0].store(f.hmdPose.posX, std::memory_order_relaxed);
+    g_genericNonFppFrame.hmdPos[1].store(f.hmdPose.posY, std::memory_order_relaxed);
+    g_genericNonFppFrame.hmdPos[2].store(f.hmdPose.posZ, std::memory_order_relaxed);
+    g_genericNonFppFrame.hmdOri[0].store(f.hmdPose.oriX, std::memory_order_relaxed);
+    g_genericNonFppFrame.hmdOri[1].store(f.hmdPose.oriY, std::memory_order_relaxed);
+    g_genericNonFppFrame.hmdOri[2].store(f.hmdPose.oriZ, std::memory_order_relaxed);
+    g_genericNonFppFrame.hmdOri[3].store(f.hmdPose.oriW, std::memory_order_relaxed);
+    g_genericNonFppFrame.recenterPos[0].store(f.hmdPose.recenterBase.position.x, std::memory_order_relaxed);
+    g_genericNonFppFrame.recenterPos[1].store(f.hmdPose.recenterBase.position.y, std::memory_order_relaxed);
+    g_genericNonFppFrame.recenterPos[2].store(f.hmdPose.recenterBase.position.z, std::memory_order_relaxed);
+    g_genericNonFppFrame.recenterOri[0].store(f.hmdPose.recenterBase.orientation.x, std::memory_order_relaxed);
+    g_genericNonFppFrame.recenterOri[1].store(f.hmdPose.recenterBase.orientation.y, std::memory_order_relaxed);
+    g_genericNonFppFrame.recenterOri[2].store(f.hmdPose.recenterBase.orientation.z, std::memory_order_relaxed);
+    g_genericNonFppFrame.recenterOri[3].store(f.hmdPose.recenterBase.orientation.w, std::memory_order_relaxed);
+    g_genericNonFppFrame.hmdFrameAimEpoch.store(f.hmdPose.frameAimEpoch, std::memory_order_relaxed);
+    g_genericNonFppFrame.hmdValid.store(f.hmdPose.valid ? 1u : 0u, std::memory_order_relaxed);
+    g_genericNonFppFrame.hmdRecenterBaseValid.store(f.hmdPose.recenterBaseValid ? 1u : 0u,
+                                                    std::memory_order_relaxed);
+    g_genericNonFppFrame.timestampUs.store(f.timestampUs, std::memory_order_relaxed);
+    g_genericNonFppFrame.sequence.store(f.sequence, std::memory_order_relaxed);
+    g_genericNonFppFrame.active.store(f.active, std::memory_order_relaxed);
+    g_genericNonFppFrame.hmdComposed.store(f.hmdComposed, std::memory_order_relaxed);
+    g_genericNonFppFrameSeq.fetch_add(1u, std::memory_order_release);
+}
+
+bool cvr::camera::GenericNonFppCameraFrameRead(GenericNonFppCameraFrame* out) {
+    if (!out) return false;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const uint32_t s0 = g_genericNonFppFrameSeq.load(std::memory_order_acquire);
+        if (s0 == 0u || (s0 & 1u)) continue;
+
+        GenericNonFppCameraFrame tmp{};
+        for (int i = 0; i < 3; ++i) {
+            tmp.worldPos[i] = g_genericNonFppFrame.worldPos[i].load(std::memory_order_relaxed);
+        }
+        for (int i = 0; i < 4; ++i) {
+            tmp.worldQuat[i] = g_genericNonFppFrame.worldQuat[i].load(std::memory_order_relaxed);
+        }
+        tmp.hmdPose.posX = g_genericNonFppFrame.hmdPos[0].load(std::memory_order_relaxed);
+        tmp.hmdPose.posY = g_genericNonFppFrame.hmdPos[1].load(std::memory_order_relaxed);
+        tmp.hmdPose.posZ = g_genericNonFppFrame.hmdPos[2].load(std::memory_order_relaxed);
+        tmp.hmdPose.oriX = g_genericNonFppFrame.hmdOri[0].load(std::memory_order_relaxed);
+        tmp.hmdPose.oriY = g_genericNonFppFrame.hmdOri[1].load(std::memory_order_relaxed);
+        tmp.hmdPose.oriZ = g_genericNonFppFrame.hmdOri[2].load(std::memory_order_relaxed);
+        tmp.hmdPose.oriW = g_genericNonFppFrame.hmdOri[3].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.position.x = g_genericNonFppFrame.recenterPos[0].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.position.y = g_genericNonFppFrame.recenterPos[1].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.position.z = g_genericNonFppFrame.recenterPos[2].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.orientation.x = g_genericNonFppFrame.recenterOri[0].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.orientation.y = g_genericNonFppFrame.recenterOri[1].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.orientation.z = g_genericNonFppFrame.recenterOri[2].load(std::memory_order_relaxed);
+        tmp.hmdPose.recenterBase.orientation.w = g_genericNonFppFrame.recenterOri[3].load(std::memory_order_relaxed);
+        tmp.hmdPose.frameAimEpoch = g_genericNonFppFrame.hmdFrameAimEpoch.load(std::memory_order_relaxed);
+        tmp.hmdPose.valid = g_genericNonFppFrame.hmdValid.load(std::memory_order_relaxed) != 0;
+        tmp.hmdPose.recenterBaseValid =
+            g_genericNonFppFrame.hmdRecenterBaseValid.load(std::memory_order_relaxed) != 0;
+        tmp.timestampUs = g_genericNonFppFrame.timestampUs.load(std::memory_order_relaxed);
+        tmp.sequence = g_genericNonFppFrame.sequence.load(std::memory_order_relaxed);
+        tmp.active = g_genericNonFppFrame.active.load(std::memory_order_relaxed);
+        tmp.hmdComposed = g_genericNonFppFrame.hmdComposed.load(std::memory_order_relaxed);
+
+        if (g_genericNonFppFrameSeq.load(std::memory_order_acquire) == s0) {
             *out = tmp;
             return true;
         }

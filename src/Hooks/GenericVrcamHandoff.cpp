@@ -12,7 +12,6 @@
 #include "Stereo/EngineRvas.hpp"
 #include "Stereo/StereoInternal.hpp"
 #include "Utils/MemorySafe.hpp"
-#include "Utils/StereoLog.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -37,19 +36,13 @@ struct MainSourceSelection {
     bool useTrueMain = false;
     bool hmdComposed = false;
     OpenXRHeadPose hmdPose{};
+    bool directorMainValid = false;
     bool finalMainValid = false;
-    int64_t finalAgeUs = -1;
     float positionGap = 0.0f;
     float orientationGapDeg = 0.0f;
 };
 
 RttCameraRefreshFn g_origRttCameraRefresh = nullptr;
-std::atomic<uint64_t> g_boundHits{0};
-std::atomic<uint64_t> g_publishes{0};
-std::atomic<uint64_t> g_publishFailures{0};
-std::atomic<uint64_t> g_restoreFailures{0};
-std::atomic<uint64_t> g_locateScopeMisses{0};
-std::atomic<uint64_t> g_sourceHandoffs{0};
 std::atomic<uintptr_t> g_sourceStateComponent{0};
 std::atomic<bool> g_useTrueMain{false};
 
@@ -138,23 +131,52 @@ MainSourceSelection SelectMainSource(uintptr_t vrcamComponent, const RawPlacedPo
     MainSourceSelection selected{};
     selected.pose = currentFpp;
 
-    cvr::camera::FinalMainCameraFrame finalMain{};
     const uint64_t nowUs = XrDiagNowUs();
+    float fppPos[3]{};
+    float fppQuat[4]{};
+    DecodePose(currentFpp, fppPos, fppQuat);
+
+    cvr::camera::GenericNonFppCameraFrame currentDirector{};
+    const cvr::camera::GenericNonFppCurrentBlendState currentBlendState =
+        cvr::camera::GenericNonFppCurrentBlendRead(&currentDirector);
+    const bool currentDirectorValid =
+        currentBlendState == cvr::camera::GenericNonFppCurrentBlendState::Ready &&
+        currentDirector.sequence != 0 && currentDirector.active != 0 &&
+        IsPlausibleUnitQuaternion(currentDirector.worldQuat);
+
+    cvr::camera::GenericNonFppCameraFrame directorMain{};
+    const bool completedDirectorValid =
+        currentBlendState != cvr::camera::GenericNonFppCurrentBlendState::NoGeneric &&
+        cvr::camera::GenericNonFppCameraFrameRead(&directorMain) &&
+        directorMain.sequence != 0 && directorMain.active != 0 &&
+        IsPlausibleUnitQuaternion(directorMain.worldQuat) &&
+        nowUs >= directorMain.timestampUs &&
+        (nowUs - directorMain.timestampUs) <= 50000u;
+    selected.directorMainValid = currentDirectorValid || completedDirectorValid;
+    if (selected.directorMainValid) {
+        const cvr::camera::GenericNonFppCameraFrame& source =
+            currentDirectorValid ? currentDirector : directorMain;
+        const float dx = source.worldPos[0] - fppPos[0];
+        const float dy = source.worldPos[1] - fppPos[1];
+        const float dz = source.worldPos[2] - fppPos[2];
+        selected.positionGap = std::sqrt(dx * dx + dy * dy + dz * dz);
+        selected.orientationGapDeg = QuaternionGapDegrees(source.worldQuat, fppQuat);
+    }
+
+    cvr::camera::FinalMainCameraFrame finalMain{};
     selected.finalMainValid = cvr::camera::FinalMainCameraFrameRead(&finalMain) &&
                               finalMain.sequence != 0 &&
                               IsPlausibleUnitQuaternion(finalMain.worldQuat) &&
                               nowUs >= finalMain.timestampUs &&
                               (nowUs - finalMain.timestampUs) <= 100000u;
     if (selected.finalMainValid) {
-        selected.finalAgeUs = static_cast<int64_t>(nowUs - finalMain.timestampUs);
-        float fppPos[3]{};
-        float fppQuat[4]{};
-        DecodePose(currentFpp, fppPos, fppQuat);
-        const float dx = finalMain.worldPos[0] - fppPos[0];
-        const float dy = finalMain.worldPos[1] - fppPos[1];
-        const float dz = finalMain.worldPos[2] - fppPos[2];
-        selected.positionGap = std::sqrt(dx * dx + dy * dy + dz * dz);
-        selected.orientationGapDeg = QuaternionGapDegrees(finalMain.worldQuat, fppQuat);
+        if (!selected.directorMainValid) {
+            const float dx = finalMain.worldPos[0] - fppPos[0];
+            const float dy = finalMain.worldPos[1] - fppPos[1];
+            const float dz = finalMain.worldPos[2] - fppPos[2];
+            selected.positionGap = std::sqrt(dx * dx + dy * dy + dz * dz);
+            selected.orientationGapDeg = QuaternionGapDegrees(finalMain.worldQuat, fppQuat);
+        }
     }
 
     if (g_sourceStateComponent.exchange(vrcamComponent, std::memory_order_acq_rel) != vrcamComponent) {
@@ -163,9 +185,11 @@ MainSourceSelection SelectMainSource(uintptr_t vrcamComponent, const RawPlacedPo
 
     const bool wasTrueMain = g_useTrueMain.load(std::memory_order_acquire);
     bool useTrueMain = wasTrueMain;
-    const bool finalMainHasCleanBase = selected.finalMainValid &&
-                                       finalMain.hmdComposed != 0 && finalMain.hmdPose.valid;
-    if (!finalMainHasCleanBase) {
+    if (currentBlendState == cvr::camera::GenericNonFppCurrentBlendState::NoGeneric) {
+        useTrueMain = false;
+    } else if (selected.directorMainValid) {
+        useTrueMain = true;
+    } else if (!selected.finalMainValid) {
         useTrueMain = false;
     } else if (!useTrueMain) {
         useTrueMain = selected.positionGap >= 0.75f || selected.orientationGapDeg >= 20.0f;
@@ -173,15 +197,24 @@ MainSourceSelection SelectMainSource(uintptr_t vrcamComponent, const RawPlacedPo
         useTrueMain = selected.positionGap >= 0.20f || selected.orientationGapDeg >= 6.0f;
     }
     g_useTrueMain.store(useTrueMain, std::memory_order_release);
-    if (wasTrueMain != useTrueMain) g_sourceHandoffs.fetch_add(1u, std::memory_order_relaxed);
 
     if (useTrueMain) {
         RawPlacedPose trueMain{};
-        if (EncodePose(finalMain.worldPos, finalMain.worldQuat, &trueMain)) {
+        const cvr::camera::GenericNonFppCameraFrame* directorSource = currentDirectorValid
+            ? &currentDirector
+            : (completedDirectorValid ? &directorMain : nullptr);
+        const float* sourcePos = directorSource ? directorSource->worldPos : finalMain.worldPos;
+        const float* sourceQuat = directorSource ? directorSource->worldQuat : finalMain.worldQuat;
+        if (EncodePose(sourcePos, sourceQuat, &trueMain)) {
             selected.pose = trueMain;
             selected.useTrueMain = true;
-            selected.hmdComposed = true;
-            selected.hmdPose = finalMain.hmdPose;
+            if (directorSource) {
+                selected.hmdComposed = directorSource->hmdComposed != 0 && directorSource->hmdPose.valid;
+                if (selected.hmdComposed) selected.hmdPose = directorSource->hmdPose;
+            } else {
+                selected.hmdComposed = finalMain.hmdComposed != 0 && finalMain.hmdPose.valid;
+                if (selected.hmdComposed) selected.hmdPose = finalMain.hmdPose;
+            }
         } else {
             g_useTrueMain.store(false, std::memory_order_release);
         }
@@ -190,7 +223,7 @@ MainSourceSelection SelectMainSource(uintptr_t vrcamComponent, const RawPlacedPo
 }
 
 bool BuildOppositeEyePose(const RawPlacedPose& mainPose, const float* eyeOrientation,
-                          RawPlacedPose* out, float* outSignedOffset) {
+                          RawPlacedPose* out) {
     if (!out) return false;
     float q[4]{};
     if (eyeOrientation) std::memcpy(q, eyeOrientation, sizeof(q));
@@ -217,7 +250,6 @@ bool BuildOppositeEyePose(const RawPlacedPose& mainPose, const float* eyeOrienta
         result.position[i] = static_cast<uint32_t>(static_cast<int32_t>(shifted));
     }
     *out = result;
-    if (outSignedOffset) *outSignedOffset = signedOffset;
     return true;
 }
 
@@ -237,9 +269,8 @@ void PublishActiveMainToVrcam(uintptr_t vrcamComponent) {
     const MainSourceSelection selection = SelectMainSource(vrcamComponent, currentFpp);
     if (!selection.useTrueMain) return;
 
-    // FinalCamera publishes detached MAIN with the exact HMD rotation peeled off. Recompose that
-    // clean gameplay-camera base with the HMD sample proven to have produced the rendered MAIN;
-    // this avoids forwarding an already-composed previous quaternion as the next VRCAM base.
+    // Proven HMD-composed sources carry a clean gameplay-camera quaternion plus the exact HMD
+    // sample. Recompose it here so the opposite-eye axis and the temporary VRCAM share that sample.
     float eyeOrientation[4]{};
     const float* eyeOrientationPtr = nullptr;
     OpenXRHeadPose genericHead{};
@@ -247,37 +278,24 @@ void PublishActiveMainToVrcam(uintptr_t vrcamComponent) {
         float baseQuat[4]{};
         std::memcpy(baseQuat, selection.pose.quaternion, sizeof(baseQuat));
         genericHead = selection.hmdPose;
-        if (!IsPlausibleUnitQuaternion(baseQuat) || !genericHead.valid) {
-            g_publishFailures.fetch_add(1u, std::memory_order_relaxed);
-            return;
-        }
+        if (!IsPlausibleUnitQuaternion(baseQuat) || !genericHead.valid) return;
         MulQuat(baseQuat[0], baseQuat[1], baseQuat[2], baseQuat[3],
                 genericHead.oriX, -genericHead.oriZ, genericHead.oriY, genericHead.oriW,
                 eyeOrientation[0], eyeOrientation[1], eyeOrientation[2], eyeOrientation[3]);
         NormalizeQuat(eyeOrientation[0], eyeOrientation[1], eyeOrientation[2], eyeOrientation[3]);
-        if (!IsPlausibleUnitQuaternion(eyeOrientation)) {
-            g_publishFailures.fetch_add(1u, std::memory_order_relaxed);
-            return;
-        }
+        if (!IsPlausibleUnitQuaternion(eyeOrientation)) return;
         eyeOrientationPtr = eyeOrientation;
     }
 
     RawPlacedPose vrcamPose{};
-    float signedOffset = 0.0f;
-    if (!BuildOppositeEyePose(selection.pose, eyeOrientationPtr, &vrcamPose, &signedOffset)) {
-        g_publishFailures.fetch_add(1u, std::memory_order_relaxed);
-        return;
-    }
+    if (!BuildOppositeEyePose(selection.pose, eyeOrientationPtr, &vrcamPose)) return;
     if (selection.hmdComposed) {
         std::memcpy(vrcamPose.quaternion, eyeOrientation, sizeof(vrcamPose.quaternion));
     }
 
     RawPlacedPose original{};
     const auto transformChanged = GetTransformChangedCallback(vrcamComponent);
-    if (!ReadRawPose(vrcamComponent, &original) || !transformChanged) {
-        g_publishFailures.fetch_add(1u, std::memory_order_relaxed);
-        return;
-    }
+    if (!ReadRawPose(vrcamComponent, &original) || !transformChanged) return;
 
     bool writeAttempted = false;
     bool callbackCompleted = false;
@@ -298,7 +316,6 @@ void PublishActiveMainToVrcam(uintptr_t vrcamComponent) {
         if (WriteRawPose(vrcamComponent, vrcamPose)) {
             transformChanged(vrcamComponent, vrcamComponent + 0x100u);
             callbackCompleted = true;
-            g_publishes.fetch_add(1u, std::memory_order_relaxed);
         }
     }
     __finally {
@@ -308,40 +325,17 @@ void PublishActiveMainToVrcam(uintptr_t vrcamComponent) {
         if (writeAttempted) WriteRawPose(vrcamComponent, original);
     }
 
-    RawPlacedPose restored{};
-    const bool restoredExactly = ReadRawPose(vrcamComponent, &restored) && RawPoseEqual(original, restored);
-    if (!restoredExactly) g_restoreFailures.fetch_add(1u, std::memory_order_relaxed);
-    if (!callbackCompleted) {
-        g_publishFailures.fetch_add(1u, std::memory_order_relaxed);
-        return;
-    }
+    if (!callbackCompleted) return;
     if (selection.hmdComposed && !completedScope.locateConsumed) {
-        g_locateScopeMisses.fetch_add(1u, std::memory_order_relaxed);
         cvr::camera::CamWriteRecordPush(eyeOrientation, genericHead);
         cvr::camera::CamWriteQuatPublish(
             eyeOrientation[0], eyeOrientation[1], eyeOrientation[2], eyeOrientation[3]);
-    }
-
-    const uint64_t published = g_publishes.load(std::memory_order_relaxed);
-    if ((published % 240u) == 1u || !restoredExactly) {
-        Log("[vrcam-handoff] hits=%llu publishes=%llu failures=%llu restores=%llu scopeMisses=%llu "
-            "source=true-main hmd=%d handoffs=%llu finalAgeUs=%lld gapM=%.4f gapDeg=%.3f eyeOffset=%.5f\n",
-            static_cast<unsigned long long>(g_boundHits.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(published),
-            static_cast<unsigned long long>(g_publishFailures.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(g_restoreFailures.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(g_locateScopeMisses.load(std::memory_order_relaxed)),
-            selection.hmdComposed ? 1 : 0,
-            static_cast<unsigned long long>(g_sourceHandoffs.load(std::memory_order_relaxed)),
-            static_cast<long long>(selection.finalAgeUs), selection.positionGap,
-            selection.orientationGapDeg, signedOffset);
     }
 }
 
 void __fastcall Detour_RttCameraRefresh(uintptr_t component) {
     const uintptr_t selectedVrcam = g_vrcam_comp.load(std::memory_order_acquire);
     if (component && component == selectedVrcam) {
-        g_boundHits.fetch_add(1u, std::memory_order_relaxed);
         if (g_liveControls.xrAllowNonFppViews != 0) {
             PublishActiveMainToVrcam(component);
         } else {

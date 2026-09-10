@@ -226,7 +226,6 @@ extern "C" __declspec(dllexport) std::atomic<unsigned long long> CyberpunkVR_Deb
 // Both defined in the stereo module (src/Stereo/Capture.cpp and SyncStereo.cpp): the second
 // eye content age it already computes for its own staleness gate, and the gate itself.
 extern "C" __declspec(dllexport) extern uint32_t CyberpunkVR_DebugVrcamEyeAgeMs;
-extern "C" __declspec(dllexport) extern uint32_t CyberpunkVR_DebugVrcamEyeAgeUs;
 extern "C" __declspec(dllexport) extern uint32_t CyberpunkVR_StereoEyeMaxAgeMs;
 // How many times the second view's final was actually copied. Its RATE against presents is the direct
 // answer to "does the second view produce a new image every frame" -- the question behind a stale eye.
@@ -2064,9 +2063,6 @@ DWORD OpenXRManager::FrameThreadMain() {
                 // mirror-window request, so turning stereo off does not break the mirror.
                 CyberpunkVR_StereoEyeCapture = CyberpunkVR_StereoSubmit ? 1 : 0;
                 ID3D12Resource* vrcamEye = nullptr;
-                uint64_t vrcamEyeSourceSerial = 0;
-                uint64_t vrcamContentSerialUsed = 0;
-                bool vrcamEyeReused = false;
                 if (CyberpunkVR_StereoSubmit && viewCountOutput >= 2) {
                     std::lock_guard<std::mutex> lock(m_presentMutex);
                     // TAKE THE SLOT THAT HOLDS THIS FRAME, not the newest image.
@@ -2080,8 +2076,6 @@ DWORD OpenXRManager::FrameThreadMain() {
                     for (int i = 0; i < kVrcamEyeSlots; ++i) {
                         if (m_vrcamEyePool[i] && m_vrcamEyePoolSerial[i] == presentSerial) {
                             vrcamEye = m_vrcamEyePool[i];
-                            vrcamEyeSourceSerial = m_vrcamEyePoolSerial[i];
-                            vrcamContentSerialUsed = m_vrcamEyePoolContentSerial[i];
                             vrcamEye->AddRef();   // the capture may recreate the pool on a resize
                             break;
                         }
@@ -2112,9 +2106,6 @@ DWORD OpenXRManager::FrameThreadMain() {
                         if (best >= 0 &&
                             (presentSerial - bestSerial) <= CyberpunkVR_VrcamEyeReuseMax) {
                             vrcamEye = m_vrcamEyePool[best];
-                            vrcamEyeSourceSerial = m_vrcamEyePoolSerial[best];
-                            vrcamContentSerialUsed = m_vrcamEyePoolContentSerial[best];
-                            vrcamEyeReused = true;
                             vrcamEye->AddRef();
                             CyberpunkVR_DebugVrcamEyeReused.fetch_add(1, std::memory_order_relaxed);
                         }
@@ -2706,36 +2697,6 @@ DWORD OpenXRManager::FrameThreadMain() {
                                               frameState.predictedDisplayPeriod);
                             if (XR_SUCCEEDED(endRes)) {
                                 XrMark('E');
-                                {
-                                    static uint64_t s_lastStereoSubmitLogUs = 0;
-                                    const uint64_t nowUs = XrDiagNowUs();
-                                    if (s_lastStereoSubmitLogUs == 0 || nowUs <= s_lastStereoSubmitLogUs ||
-                                        nowUs - s_lastStereoSubmitLogUs >= 100000u) {
-                                        s_lastStereoSubmitLogUs = nowUs;
-                                        const XrVector3f& p0 = projectionViews[0].pose.position;
-                                        const XrVector3f& p1 = projectionViews[1].pose.position;
-                                        const float pdx = p1.x - p0.x;
-                                        const float pdy = p1.y - p0.y;
-                                        const float pdz = p1.z - p0.z;
-                                        const float pairDist = std::sqrt(pdx * pdx + pdy * pdy + pdz * pdz);
-                                        const XrQuaternionf& q0 = projectionViews[0].pose.orientation;
-                                        const XrQuaternionf& q1 = projectionViews[1].pose.orientation;
-                                        float qdot = std::abs(q0.x*q1.x + q0.y*q1.y + q0.z*q1.z + q0.w*q1.w);
-                                        qdot = std::clamp(qdot, 0.0f, 1.0f);
-                                        const float oriDeltaDeg = 2.0f * std::acos(qdot) * 57.2957795f;
-                                        Log("[stereo-submit] submitSerial=%llu vrcamCaptureSerial=%llu "
-                                            "vrcamContentSerial=%llu source=%s reused=%d mainEye=%c vrcamEye=%c "
-                                            "pairDist=%.6f oriDeltaDeg=%.4f vrcamAgeUs=%u fresh=%d\n",
-                                            static_cast<unsigned long long>(presentSerial),
-                                            static_cast<unsigned long long>(vrcamEyeSourceSerial),
-                                            static_cast<unsigned long long>(vrcamContentSerialUsed),
-                                            vrcamEye ? "VRCAM" : "MAIN", vrcamEyeReused ? 1 : 0,
-                                            CyberpunkVR_MainIsRightEye ? 'R' : 'L',
-                                            CyberpunkVR_MainIsRightEye ? 'L' : 'R',
-                                            pairDist, oriDeltaDeg, CyberpunkVR_DebugVrcamEyeAgeUs,
-                                            presentSerial != m_lastSubmittedSerial ? 1 : 0);
-                                    }
-                                }
                                 XrBucketCadence(frameState.predictedDisplayPeriod);
                                 // DIAG: the angular gap between the SUBMITTED render pose
                                 // (the head pose the captured frame was rendered with) and

@@ -1102,7 +1102,6 @@ private:
     static constexpr int kVrcamEyeSlots = 3;
     ID3D12Resource* m_vrcamEyePool[kVrcamEyeSlots] = {};
     uint64_t        m_vrcamEyePoolSerial[kVrcamEyeSlots] = {};
-    uint64_t        m_vrcamEyePoolContentSerial[kVrcamEyeSlots] = {};
     int             m_vrcamEyeSlot = 0;
     uint32_t        m_vrcamEyeW = 0;
     uint32_t        m_vrcamEyeH = 0;

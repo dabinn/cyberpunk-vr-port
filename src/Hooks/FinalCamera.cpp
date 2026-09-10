@@ -34,32 +34,30 @@
 #include <cmath>
 #include <cstdint>
 #include <cstddef>
+#include <limits>
 #include <mutex>
 
 namespace {
 
-struct StereoRenderEyeDiag {
+struct StereoRenderEyeSample {
     float pos[3]{};
     float quat[4]{};
     uint64_t timestampUs = 0;
-    uint64_t sequence = 0;
     uint64_t frameAimEpoch = 0;
     bool valid = false;
 };
 
-std::mutex g_stereoRenderDiagMutex;
-constexpr size_t kStereoRenderDiagHistory = 16;
-std::array<StereoRenderEyeDiag, kStereoRenderDiagHistory> g_stereoRenderMain{};
-std::array<StereoRenderEyeDiag, kStereoRenderDiagHistory> g_stereoRenderVrcam{};
+std::mutex g_stereoRenderHistoryMutex;
+constexpr size_t kStereoRenderHistory = 16;
+std::array<StereoRenderEyeSample, kStereoRenderHistory> g_stereoRenderMainHistory{};
+std::array<StereoRenderEyeSample, kStereoRenderHistory> g_stereoRenderVrcamHistory{};
 size_t g_stereoRenderMainSlot = 0;
 size_t g_stereoRenderVrcamSlot = 0;
-uint64_t g_stereoRenderMainSequence = 0;
-uint64_t g_stereoRenderVrcamSequence = 0;
 
-void PublishStereoRenderEyeDiag(bool isVrcam, const int32_t posFP[3], const float quat[4]) {
+void PublishStereoRenderEyeSample(bool isVrcam, const int32_t posFP[3], const float quat[4]) {
     if (!posFP || !quat) return;
 
-    StereoRenderEyeDiag sample{};
+    StereoRenderEyeSample sample{};
     for (int i = 0; i < 3; ++i) {
         sample.pos[i] = static_cast<float>(posFP[i]) / 131072.0f;
     }
@@ -73,81 +71,12 @@ void PublishStereoRenderEyeDiag(bool isVrcam, const int32_t posFP[3], const floa
         sample.frameAimEpoch = matched.frameAimEpoch;
     }
 
-    std::lock_guard<std::mutex> lock(g_stereoRenderDiagMutex);
+    std::lock_guard<std::mutex> lock(g_stereoRenderHistoryMutex);
     if (isVrcam) {
-        sample.sequence = ++g_stereoRenderVrcamSequence;
-        g_stereoRenderVrcam[g_stereoRenderVrcamSlot++ % kStereoRenderDiagHistory] = sample;
+        g_stereoRenderVrcamHistory[g_stereoRenderVrcamSlot++ % kStereoRenderHistory] = sample;
     } else {
-        sample.sequence = ++g_stereoRenderMainSequence;
-        g_stereoRenderMain[g_stereoRenderMainSlot++ % kStereoRenderDiagHistory] = sample;
+        g_stereoRenderMainHistory[g_stereoRenderMainSlot++ % kStereoRenderHistory] = sample;
     }
-
-    // During motion, "latest MAIN + latest VRCAM" can span adjacent render epochs and create a
-    // fake stereo error. Only compare cameras that were traced back to the same frameAimEpoch.
-    if (sample.frameAimEpoch == 0) return;
-    StereoRenderEyeDiag mainSample{};
-    StereoRenderEyeDiag vrcamSample{};
-    bool foundPair = false;
-    const auto& otherHistory = isVrcam ? g_stereoRenderMain : g_stereoRenderVrcam;
-    for (const auto& candidate : otherHistory) {
-        if (!candidate.valid || candidate.frameAimEpoch != sample.frameAimEpoch) continue;
-        if (isVrcam) {
-            mainSample = candidate;
-            vrcamSample = sample;
-        } else {
-            mainSample = sample;
-            vrcamSample = candidate;
-        }
-        foundPair = true;
-        break;
-    }
-    if (!foundPair) return;
-
-    static uint64_t s_lastLogUs = 0;
-    static uint64_t s_lastLoggedEpoch = 0;
-    if (s_lastLoggedEpoch == sample.frameAimEpoch) return;
-    const uint64_t nowUs = sample.timestampUs;
-    if (s_lastLogUs != 0 && nowUs > s_lastLogUs && nowUs - s_lastLogUs < 100000u) return;
-    s_lastLogUs = nowUs;
-    s_lastLoggedEpoch = sample.frameAimEpoch;
-
-    const float dx = vrcamSample.pos[0] - mainSample.pos[0];
-    const float dy = vrcamSample.pos[1] - mainSample.pos[1];
-    const float dz = vrcamSample.pos[2] - mainSample.pos[2];
-    const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-
-    float right[3]{};
-    ComputeRightVectorFromQuaternion(mainSample.quat, right);
-    const float rightProj = dx * right[0] + dy * right[1] + dz * right[2];
-    const float orthSq = std::max(0.0f, dist * dist - rightProj * rightProj);
-    const float orth = std::sqrt(orthSq);
-
-    double qdot = 0.0;
-    for (int i = 0; i < 4; ++i) {
-        qdot += static_cast<double>(mainSample.quat[i]) * vrcamSample.quat[i];
-    }
-    qdot = std::clamp(std::abs(qdot), 0.0, 1.0);
-    const float oriDeltaDeg = static_cast<float>(2.0 * std::acos(qdot) *
-                                                  (180.0 / 3.14159265358979323846));
-    const uint64_t pairAgeUs = mainSample.timestampUs > vrcamSample.timestampUs
-        ? mainSample.timestampUs - vrcamSample.timestampUs
-        : vrcamSample.timestampUs - mainSample.timestampUs;
-    const float expectedDist = 2.0f * GetDesiredHalfIpd();
-    const float expectedRight = CyberpunkVR_MainIsRightEye ? -expectedDist : expectedDist;
-
-    Log("[stereo-render-pair] mainSeq=%llu vrcamSeq=%llu mainEye=%c vrcamEye=%c "
-        "expected=%.6f expectedRight=%.6f dist=%.6f right=%.6f orth=%.6f oriDeltaDeg=%.4f "
-        "pairAgeUs=%llu mainEpoch=%llu vrcamEpoch=%llu "
-        "mainPos=(%.6f,%.6f,%.6f) vrcamPos=(%.6f,%.6f,%.6f)\n",
-        static_cast<unsigned long long>(mainSample.sequence),
-        static_cast<unsigned long long>(vrcamSample.sequence),
-        CyberpunkVR_MainIsRightEye ? 'R' : 'L', CyberpunkVR_MainIsRightEye ? 'L' : 'R',
-        expectedDist, expectedRight, dist, rightProj, orth, oriDeltaDeg,
-        static_cast<unsigned long long>(pairAgeUs),
-        static_cast<unsigned long long>(mainSample.frameAimEpoch),
-        static_cast<unsigned long long>(vrcamSample.frameAimEpoch),
-        mainSample.pos[0], mainSample.pos[1], mainSample.pos[2],
-        vrcamSample.pos[0], vrcamSample.pos[1], vrcamSample.pos[2]);
 }
 
 bool ReadStableFppPose(float outPos[3], float outQuat[4]) {
@@ -204,6 +133,159 @@ bool IsDetachedFromFpp(const int32_t mainPosFP[3], const float mainQuat[4]) {
     return detached;
 }
 
+bool FindSameEpochVrcamSample(const float mainQuat[4], StereoRenderEyeSample* out) {
+    if (!mainQuat || !out) return false;
+
+    OpenXRHeadPose mainHead{};
+    uint32_t age = 0;
+    uint32_t ties = 0;
+    if (!cvr::camera::CamWriteRecordFind(mainQuat, &mainHead, &age, &ties) ||
+        !mainHead.valid || mainHead.frameAimEpoch == 0) {
+        return false;
+    }
+
+    const uint64_t nowUs = XrDiagNowUs();
+    bool found = false;
+    uint64_t bestAgeUs = UINT64_MAX;
+    std::lock_guard<std::mutex> lock(g_stereoRenderHistoryMutex);
+    for (const auto& sample : g_stereoRenderVrcamHistory) {
+        if (!sample.valid || sample.frameAimEpoch != mainHead.frameAimEpoch) continue;
+        const uint64_t sampleAgeUs = nowUs >= sample.timestampUs
+            ? nowUs - sample.timestampUs
+            : sample.timestampUs - nowUs;
+        if (sampleAgeUs >= bestAgeUs) continue;
+        bestAgeUs = sampleAgeUs;
+        *out = sample;
+        found = true;
+    }
+    return found;
+}
+
+bool FindSameEpochMainSample(const float vrcamQuat[4], StereoRenderEyeSample* out) {
+    if (!vrcamQuat || !out) return false;
+
+    OpenXRHeadPose vrcamHead{};
+    uint32_t age = 0;
+    uint32_t ties = 0;
+    if (!cvr::camera::CamWriteRecordFind(vrcamQuat, &vrcamHead, &age, &ties) ||
+        !vrcamHead.valid || vrcamHead.frameAimEpoch == 0) {
+        return false;
+    }
+
+    const uint64_t nowUs = XrDiagNowUs();
+    bool found = false;
+    uint64_t bestAgeUs = UINT64_MAX;
+    std::lock_guard<std::mutex> lock(g_stereoRenderHistoryMutex);
+    for (const auto& sample : g_stereoRenderMainHistory) {
+        if (!sample.valid || sample.frameAimEpoch != vrcamHead.frameAimEpoch) continue;
+        const uint64_t sampleAgeUs = nowUs >= sample.timestampUs
+            ? nowUs - sample.timestampUs
+            : sample.timestampUs - nowUs;
+        if (sampleAgeUs >= bestAgeUs) continue;
+        bestAgeUs = sampleAgeUs;
+        *out = sample;
+        found = true;
+    }
+    return found;
+}
+
+bool AlignMainToRenderedVrcamOnSourceSwitch(float* rsiPtr, float renderedQuat[4]) {
+    if (!rsiPtr || !renderedQuat || g_liveControls.xrAllowNonFppViews == 0) return false;
+
+    int32_t* const mainPosFP = reinterpret_cast<int32_t*>(rsiPtr);
+    StereoRenderEyeSample vrcam{};
+    if (!FindSameEpochVrcamSample(renderedQuat, &vrcam)) return false;
+
+    float right[3]{};
+    ComputeRightVectorFromQuaternion(vrcam.quat, right);
+    if (!IsPlausibleUnitVector3(right)) return false;
+
+    const float expectedDist = 2.0f * GetDesiredHalfIpd();
+    if (!(expectedDist > 0.0001f) || !std::isfinite(expectedDist)) return false;
+    const float expectedRight = CyberpunkVR_MainIsRightEye ? -expectedDist : expectedDist;
+
+    float expectedMainPos[3]{};
+    float positionErrorSq = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        expectedMainPos[i] = vrcam.pos[i] - right[i] * expectedRight;
+        const float current = static_cast<float>(mainPosFP[i]) / 131072.0f;
+        const float delta = current - expectedMainPos[i];
+        positionErrorSq += delta * delta;
+    }
+    const float positionError = std::sqrt(positionErrorSq);
+
+    double dot = 0.0;
+    for (int i = 0; i < 4; ++i) dot += static_cast<double>(renderedQuat[i]) * vrcam.quat[i];
+    dot = std::clamp(std::abs(dot), 0.0, 1.0);
+    const float orientationError = static_cast<float>(2.0 * std::acos(dot) *
+                                                      (180.0 / 3.14159265358979323846));
+
+    // VRCAM is rendered before MAIN. When CameraDirector changes owner between those two graph
+    // passes, both eyes can legitimately reference the same XR epoch but different gameplay
+    // cameras. Keep the pair binocularly coherent for that one boundary frame; on the next frame
+    // VRCAM observes the new owner and both eyes advance together.
+    if (positionError < 0.02f && orientationError < 0.5f) return false;
+
+    for (int i = 0; i < 3; ++i) {
+        const int64_t fixed = static_cast<int64_t>(std::llround(expectedMainPos[i] * 131072.0f));
+        if (fixed < std::numeric_limits<int32_t>::min() ||
+            fixed > std::numeric_limits<int32_t>::max()) {
+            return false;
+        }
+        mainPosFP[i] = static_cast<int32_t>(fixed);
+    }
+    for (int i = 0; i < 4; ++i) renderedQuat[i] = vrcam.quat[i];
+    WriteRenderCameraBasis(rsiPtr, renderedQuat);
+
+    return true;
+}
+
+bool AlignVrcamToRenderedMain(float* rsiPtr, float renderedQuat[4]) {
+    if (!rsiPtr || !renderedQuat || g_liveControls.xrAllowNonFppViews == 0) return false;
+
+    StereoRenderEyeSample main{};
+    if (!FindSameEpochMainSample(renderedQuat, &main)) return false;
+
+    float right[3]{};
+    ComputeRightVectorFromQuaternion(main.quat, right);
+    if (!IsPlausibleUnitVector3(right)) return false;
+
+    const float expectedDist = 2.0f * GetDesiredHalfIpd();
+    if (!(expectedDist > 0.0001f) || !std::isfinite(expectedDist)) return false;
+    const float expectedRight = CyberpunkVR_MainIsRightEye ? -expectedDist : expectedDist;
+
+    int32_t* const vrcamPosFP = reinterpret_cast<int32_t*>(rsiPtr);
+    float expectedVrcamPos[3]{};
+    float positionErrorSq = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        expectedVrcamPos[i] = main.pos[i] + right[i] * expectedRight;
+        const float current = static_cast<float>(vrcamPosFP[i]) / 131072.0f;
+        const float delta = current - expectedVrcamPos[i];
+        positionErrorSq += delta * delta;
+    }
+    const float positionError = std::sqrt(positionErrorSq);
+
+    double dot = 0.0;
+    for (int i = 0; i < 4; ++i) dot += static_cast<double>(renderedQuat[i]) * main.quat[i];
+    dot = std::clamp(std::abs(dot), 0.0, 1.0);
+    const float orientationError = static_cast<float>(2.0 * std::acos(dot) *
+                                                      (180.0 / 3.14159265358979323846));
+    if (positionError < 0.02f && orientationError < 0.5f) return false;
+
+    for (int i = 0; i < 3; ++i) {
+        const int64_t fixed = static_cast<int64_t>(std::llround(expectedVrcamPos[i] * 131072.0f));
+        if (fixed < std::numeric_limits<int32_t>::min() ||
+            fixed > std::numeric_limits<int32_t>::max()) {
+            return false;
+        }
+        vrcamPosFP[i] = static_cast<int32_t>(fixed);
+    }
+    for (int i = 0; i < 4; ++i) renderedQuat[i] = main.quat[i];
+    WriteRenderCameraBasis(rsiPtr, renderedQuat);
+
+    return true;
+}
+
 }  // namespace
 
 extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
@@ -245,9 +327,15 @@ extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
         float renderedQuat[4]{};
         const bool haveRenderedQuat = ReadFloatArraySafe(rsiPtr + 4, renderedQuat, 4) &&
                                       IsPlausibleUnitQuaternion(renderedQuat);
+        if (isMain && haveRenderedQuat) {
+            AlignMainToRenderedVrcamOnSourceSwitch(rsiPtr, renderedQuat);
+        }
+        if (isVrcam && haveRenderedQuat) {
+            AlignVrcamToRenderedMain(rsiPtr, renderedQuat);
+        }
         if ((isMain || isVrcam) && haveRenderedQuat) {
-            PublishStereoRenderEyeDiag(isVrcam,
-                                       reinterpret_cast<const int32_t*>(rsiPtr), renderedQuat);
+            PublishStereoRenderEyeSample(isVrcam,
+                                         reinterpret_cast<const int32_t*>(rsiPtr), renderedQuat);
         }
         if (isMain && haveRenderedQuat) {
             const int32_t* posFP = reinterpret_cast<const int32_t*>(rsiPtr);

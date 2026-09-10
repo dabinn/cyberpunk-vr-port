@@ -97,6 +97,32 @@ bool CameraDirectorBlendScopeReadHead(uintptr_t cameraObject, OpenXRHeadPose* ou
 bool CameraDirectorBlendScopeMarkComposed(uintptr_t cameraObject, const OpenXRHeadPose& head);
 bool CameraDirectorBlendScopeAllComposed(OpenXRHeadPose* outHead);
 
+// CameraDirector's current blended setup is available before the VRCAM render graph. Keep a
+// coherent snapshot so generic non-FPP handoff does not have to chase the previous completed MAIN.
+struct GenericNonFppCameraFrame {
+    float worldPos[3]{};
+    float worldQuat[4]{};
+    OpenXRHeadPose hmdPose{};
+    uint64_t timestampUs = 0;
+    uint32_t sequence = 0;
+    uint32_t active = 0;
+    uint32_t hmdComposed = 0;
+};
+void GenericNonFppCameraFramePublish(const GenericNonFppCameraFrame& f);
+bool GenericNonFppCameraFrameRead(GenericNonFppCameraFrame* out);
+
+enum class GenericNonFppCurrentBlendState : uint32_t {
+    Unavailable = 0,
+    NoGeneric = 1,
+    Ready = 2,
+    Unsupported = 3,
+};
+
+// Rebuild CameraDirector's current MAIN pose directly from its active table at the selected VRCAM
+// refresh boundary. This intentionally supports only the two serializer layouts proven by runtime:
+// player FPP and generic detached non-FPP. Unknown active camera types fail closed.
+GenericNonFppCurrentBlendState GenericNonFppCurrentBlendRead(GenericNonFppCameraFrame* out);
+
 // ---- the located camera frame used by native VRIK pairing -------------------------------------
 //
 // Animation for frame N runs before LocateCamera publishes frame N. BodyYawFollow can therefore
