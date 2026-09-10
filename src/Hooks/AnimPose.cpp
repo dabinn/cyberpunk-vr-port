@@ -737,8 +737,8 @@ if (g_VRRecordFK) {
                         // (baseModelRot yaw-removal, pitchRollOnly(hmdRel)) broke yaw one way or the
                         // other; the gizmo itself is the user-validated ground truth in all head poses.
                         // Anchor = the EXACT render-view point: body camera (baked camModelPos) plus
-                        // the view-only offsets dxgi adds on top of the bake (manual Tracking-Camera +
-                        // auto eye-view) = [120..122] total minus [91..93] bake. Keeps hand-vs-view ==
+                        // the view-only offsets dxgi adds on top of the bake (manual Tracking-Camera)
+                        // = [120..122] total minus [91..93] bake. Keeps hand-vs-view ==
                         // gizmo-vs-view (including the user's manual view tuning) with reachable
                         // arm geometry (no 0.37m camera-mount gap).
                         float handAnchor[3] = { camModelPos[0], camModelPos[1], camModelPos[2] };
