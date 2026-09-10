@@ -338,7 +338,7 @@ volatile uint64_t  g_AnimPoseTotalCalls = 0;
 volatile uint64_t  g_AnimPoseMatchCalls = 0;
 volatile uintptr_t g_AnimPoseLastBoneBuf = 0;
 
-volatile int       g_VRBind = 4;   // 4 = full-arm model-space IK, the only mode there is
+volatile int       g_VRBind = 0;   // full-arm IK follows the overlay/shared hand-tracking request
 volatile float     g_VRBindScale = 1.0f;
 volatile float     g_VRBindOffX = 0.0f;
 volatile float     g_VRBindOffY = 0.0f;

@@ -64,11 +64,15 @@
 #include <iomanip>
 #include <string>
 #include "Anim/VrikHook.hpp"
+#include "Anim/HeadAimWeapon.hpp"
+#include "Anim/AdsMuzzleStabilizer.hpp"
 #include "Anim/WeaponAim.hpp"
 #include "Natives/NativeState.hpp"
 #include "Natives/AnimInternal.hpp"
 #include "Natives/NativeHelpers.hpp"
 #include <MinHook.h>
+
+extern "C" __declspec(dllexport) extern int CyberpunkVR_TwoHandCaptureReq;
 #include "Natives/NativeFunctions.hpp"
 #include "Natives/NativeHelpers.hpp"
 #include "Natives/NativeState.hpp"
@@ -297,10 +301,9 @@ void UpdateVRIKAnimInputs(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* 
 
     // --- In-VR overlay activation -------------------------------------------
     // The in-headset menu (imgui_overlay) writes a tracking-request code into
-    // shared-memory slot [32] (0 = off, 2 = position+rotation). CET calls us
-    // every frame on the game thread, so installing the hooks / arming the
-    // player here is exactly as safe as the manual "Start VR Tracking" button.
-    // Edge-triggered on g_VRBind so the CET button still works independently.
+    // shared-memory slot [32] (0 = off, 4 = full-arm IK). CET calls us
+    // every frame on the game thread. Pose-hook/player-rig bootstrap is common
+    // infrastructure; slot [32] only selects controller-driven full-arm IK.
     EnsureSharedMemory();
 
     if (g_pSharedHands) {
@@ -328,30 +331,16 @@ void UpdateVRIKAnimInputs(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* 
         // fast enough that a weapon swap / area load recovers quickly, but ignores normal
         // single-frame hitches so a healthy VRIK never pays the re-arm cost at all.
         constexpr int kStaleFrameThreshold = 10;
-        int req = static_cast<int>(g_pSharedHands[32]);
+        const int req = static_cast<int>(g_pSharedHands[32]);
+
+        // The pose hook and player-rig resolve are shared infrastructure. The F10 hand-tracking
+        // checkbox only owns the controller-driven full-arm bind mode.
+        if (!s_vrHooksInstalled) {
+            s_vrHooksInstalled = InstallAnimPoseHook();
+        }
+
         if (req > 0) {
-            if (!s_vrHooksInstalled) {
-                // Only the pose-apply hook is needed (the old ComponentFunc21 hook was
-                // removed: it trampolined a super-hot per-component Update and tanked FPS).
-                InstallAnimPoseHook();
-                s_vrHooksInstalled = true;
-            }
-            const uint64_t matchCalls = g_AnimPoseMatchCalls;
-            bool needRearm = !s_vrArmed;
-            if (s_vrArmed) {
-                if (matchCalls != s_lastMatchCalls) {
-                    s_staleFrames = 0;             // still getting matched poses -> healthy
-                } else if (++s_staleFrames >= kStaleFrameThreshold) {
-                    needRearm = true;               // stalled -> VRIK desynced, re-resolve
-                    s_staleFrames = 0;
-                }
-            }
-            if (needRearm) {
-                if (VRIK_DoArmPlayer() > 0) s_vrArmed = true;
-                s_staleFrames = 0;
-            }
-            s_lastMatchCalls = matchCalls;
-            if (s_lastReq <= 0) g_VRBind = req;   // off -> on edge
+            g_VRBind = req;
             if (g_VRNeutralizeAnimGraph != 0) {
                 ForceVRNeutralAnimGraphInputs();
             }
@@ -359,18 +348,47 @@ void UpdateVRIKAnimInputs(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* 
             // "Log VR Diag" works without the CET window's capture toggle.
             g_VRDiagCapture = 1;
         } else {
+            g_VRBind = 0;
             if (s_lastReq > 0) {
-                g_VRBind = 0; g_VRDiagCapture = 0;                    // on -> off edge
-                g_pSharedHands[119] = 0.0f;  // eye-view offset invalid while VRIK is off
+                g_VRDiagCapture = 0;
+                g_pSharedHands[119] = 0.0f;
                 // The wheel grab lives inside the mode-4 solve; with tracking off nothing would ever
                 // lower its armed mask again, and a grip would stay out of its gameplay meaning for
                 // the rest of the session.
                 cvr::anim::WheelReset();
             }
-            s_vrArmed = false;                     // re-arm on next activation
-            s_staleFrames = 0;
-            s_lastMatchCalls = g_AnimPoseMatchCalls;
         }
+
+        const bool headAimWork = cvr::anim::IsHeadAimWeaponActive();
+        const bool nonVrikAdsWork = g_VRBind <= 0 && CyberpunkVR_NonVrikAdsStabilizer &&
+            g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
+        // Keep this in sync with Hooked_AnimPoseApply's hot-path work gate. This does not control
+        // bootstrap; it only tells us when a stopped match counter is evidence of a stale player rig.
+        const bool poseWorkActive = g_VRBind > 0 || headAimWork || nonVrikAdsWork ||
+            g_VRDiagCapture != 0 || g_WeaponRigActive != 0 || g_PoseCensusOn != 0 ||
+            g_VRRecordFK != 0 || CyberpunkVR_TwoHandCaptureReq != 0 ||
+            g_VRSmokeFingerActive != 0 || g_VRSmokeFingerCapture != 0 ||
+            g_VRSmokeFingerActiveL != 0 || g_VRSmokeFingerCaptureL != 0;
+
+        // Preserve Dari's original lazy startup behavior: keep retrying until the player rig is
+        // ready, but do it independently of the hand-tracking checkbox.
+        if (!s_vrArmed) {
+            s_vrArmed = VRIK_DoArmPlayer() > 0;
+            s_staleFrames = 0;
+        }
+
+        const uint64_t matchCalls = g_AnimPoseMatchCalls;
+        if (poseWorkActive && s_vrArmed) {
+            if (matchCalls != s_lastMatchCalls) {
+                s_staleFrames = 0;                 // still getting matched poses -> healthy
+            } else if (++s_staleFrames >= kStaleFrameThreshold) {
+                s_vrArmed = VRIK_DoArmPlayer() > 0; // stalled -> player buffers changed; re-resolve
+                s_staleFrames = 0;
+            }
+        } else {
+            s_staleFrames = 0;
+        }
+        s_lastMatchCalls = matchCalls;
         s_lastReq = req;
 
         // Pull IK calibration the overlay published + service one-shot diag requests.
