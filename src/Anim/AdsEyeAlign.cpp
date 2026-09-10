@@ -157,8 +157,8 @@ bool CurrentFixedAimFrame(float* outHeadCentreModel, float* outRightEyeModel,
     VRIK_QuatMul(invEnt, centreWorld, outCentreModelRot);
     VRIK_QuatNorm(outCentreModelRot);
 
-    // [120..122] is the fixed Tracking-Camera + camera-bake + eye-bake offset in centred
-    // game-camera axes. It belongs to the recenter origin; unlike [108..110], it contains no live
+    // [120..122] is the fixed Tracking-Camera + camera-bake/vehicle offset in centred game-camera
+    // axes. It belongs to the recenter origin; unlike [108..110], it contains no live
     // HMD position. Rotate it only by the centred camera frame, never by the live HMD orientation.
     float fixedViewLocal[3] = {0.0f, 0.0f, 0.0f};
     if (SharedPose(123) == 1.0f) {
