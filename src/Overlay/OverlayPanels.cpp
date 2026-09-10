@@ -136,10 +136,10 @@ bool DrawFovControl(LiveControlsUiState& state) {
 // shared memory (OpenXRManager::SetVRHandCalib). Defaults mirror the plugin's
 // baked calibration so the rig behaves identically before anything is touched.
 void DrawVRHandsControls() {
-    // Tracking toggle (writes shared-mem slot [32]; plugin installs hooks + arms
-    // and sets g_VRBind = this value). Must be 4 = full-arm IK (the mode the CET
-    // "Start VR Tracking" button uses). Mode 2 is the legacy direct bone-write
-    // fallback -> stretched forearm / wrong placement, which is what this was.
+    // Tracking toggle (writes shared-mem slot [32]). Pose-hook/player-rig bootstrap is
+    // independent; this setting only selects whether controller-driven full-arm IK writes.
+    // Must be 4 = full-arm IK. Mode 2 is the legacy direct bone-write fallback -> stretched
+    // forearm / wrong placement, which is what this was.
     bool vrHandTracking = OpenXRManager::Get().GetVRHandTrackingMode() != 0;
     if (ImGui::Checkbox("Start VR hand tracking", &vrHandTracking)) {
         OpenXRManager::Get().SetVRHandTrackingMode(vrHandTracking ? 4 : 0);
