@@ -328,7 +328,6 @@ registerForEvent('onInit', function()
     isReady = true
 end)
 
-local vrTrackingEnabled = false
 local mouseDisableEnabled = true  -- Mouse/look pitch (Y) disabled by default for VR
 
 -- Bridge with the dxgi F10 overlay. CET sandboxes these relative paths to this mod's
@@ -368,17 +367,6 @@ local function ensureObservers()
         end)
     end)
 end
-
-registerHotkey('ToggleVRHands', 'Toggle VR Hands', function()
-    vrTrackingEnabled = not vrTrackingEnabled
-    if vrTrackingEnabled then
-        pcall(function() Game.InstallVRAnimPoseHook() end)
-        pcall(function() Game.ArmVRAnimPosePlayer() end)
-        pcall(function() Game.SetVRBindMode(4) end)  -- 4 = full-arm model-space IK
-    else
-        pcall(function() Game.SetVRBindMode(0) end)
-    end
-end)
 
 -- Mouse-Y disable is now owned by the F10 overlay (Tracking/Camera) via vrik_settings.ini;
 -- the old CET hotkey was removed so the file poll doesn't fight a manual toggle.
@@ -516,13 +504,9 @@ registerForEvent('onUpdate', function(dt)
     local camPos, camQuat = getCameraWorldPose(player)
     if not camPos or not camQuat then return end
 
-    -- Remember the camera pose for the diagnostic logger hotkey, and keep the
-    -- pre-write bone snapshot fresh while tracking is active.
+    -- Remember the camera pose for the diagnostic logger hotkey.
     lastCamPos = camPos
     lastCamQuat = camQuat
-    if vrTrackingEnabled and type(SetVRDiagCapture) == 'function' then
-        pcall(function() SetVRDiagCapture(1) end)
-    end
 
     if type(SetVRPlayerYaw) == 'function' then
         -- Entity world ORIENTATION as a quaternion. The plugin needs the EXACT world->model
