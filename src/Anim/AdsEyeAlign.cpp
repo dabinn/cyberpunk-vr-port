@@ -54,6 +54,7 @@
 #include "Anim/HeadAimWeapon.hpp"
 #include "Anim/VrikHook.hpp"
 #include "Anim/VrikState.hpp"
+#include "Camera/CameraState.hpp"
 #include "Core/VrCoreShared.hpp"   // g_isAiming
 #include "Utils/SharedSlots.hpp"
 
@@ -83,13 +84,51 @@ AimArmPose g_aimArmPose[4];
 
 // Build the Head Aim gameplay frame. The render camera remains fully 6DoF, but weapon/arm aim
 // deliberately ignores base-relative HMD translation: the centred camera plus its fixed view
-// offsets is the head origin, and the recenter-time right-eye offset stays fixed in that body frame.
-// Only the final HMD orientation is live.
+// offsets is the head origin. The final HMD orientation stays live; Head Aim ADS uses that live
+// orientation again below when placing the dominant-eye offset around this fixed head centre.
 bool CurrentFixedAimFrame(float* outHeadCentreModel, float* outRightEyeModel,
                           float* outViewModel, float* outCentreModelRot) {
     float camModelPos[3];
     float unusedCamRot[4];
-    if (!g_viewPktValid || !VRIK_ComputeCamModel(camModelPos, unusedCamRot)) return false;
+    float camModelEntityQuat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    float pairedCamModelRot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    if (!g_viewPktValid) return false;
+    if (!VRIK_ComputeCamModel(
+            camModelPos, unusedCamRot, camModelEntityQuat, pairedCamModelRot)) return false;
+
+    // With HeadTranslationInPatch the camera component already contains the room-scale head
+    // displacement, so VRIK_ComputeCamModel() necessarily carries it into camModelPos. Head Aim's
+    // gameplay pivot must stay on the body/recenter frame: remove the same displacement here using
+    // the exact entity basis paired with camModelPos, matching the body-anchor correction in
+    // Hooked_AnimPoseApply().
+    if (CyberpunkVR_HeadTranslationInPatch &&
+        g_headDeltaValid.load(std::memory_order_acquire)) {
+        VRIK_QuatNorm(camModelEntityQuat);
+        float invCamEntity[4];
+        VRIK_QuatConj(camModelEntityQuat, invCamEntity);
+        const float k = 1.0f / 131072.0f;
+        const float headDeltaWorld[3] = {
+            g_headDeltaFP[0].load(std::memory_order_relaxed) * k,
+            g_headDeltaFP[1].load(std::memory_order_relaxed) * k,
+            g_headDeltaFP[2].load(std::memory_order_relaxed) * k };
+        float headDeltaModel[3];
+        VRIK_QuatRotateVec(invCamEntity, headDeltaWorld, headDeltaModel);
+        for (int i = 0; i < 3; ++i) camModelPos[i] -= headDeltaModel[i];
+    }
+
+    // In ordinary gameplay PatchCamera applies MAIN's +/-half-IPD directly to the camera component
+    // before SerializeSetup fills the located-camera buffer. VRIK's coherent camera/entity pair is
+    // therefore an EYE position even though LocateCamera later labels that same buffer as the head
+    // centre. Undo the exact paired-eye lever here so Head Aim rotates about the cyclopean gameplay
+    // centre. Use the paired camera rotation, not the fresh HMD rotation: it is the orientation that
+    // produced the camera position consumed above.
+    if (CyberpunkVR_IpdInWorldPos) {
+        const float mainEyeLocal[3] = {
+            (CyberpunkVR_MainIsRightEye ? 1.0f : -1.0f) * GetDesiredHalfIpd(), 0.0f, 0.0f };
+        float mainEyeModel[3];
+        VRIK_QuatRotateVec(pairedCamModelRot, mainEyeLocal, mainEyeModel);
+        for (int i = 0; i < 3; ++i) camModelPos[i] -= mainEyeModel[i];
+    }
 
     float viewQ[4] = { g_viewPkt[0], g_viewPkt[1], g_viewPkt[2], g_viewPkt[3] };
     VRIK_QuatNorm(viewQ);
@@ -308,7 +347,15 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
     float postRotationTranslation[3] = {0.0f, 0.0f, 0.0f};
     float delta[4];
     for (int k = 0; k < 3; ++k) rotationPivot[k] = fixedHeadCentre[k];
-    if (headEyeAlignment || nonVrikEyeAlignment) {
+    if (headEyeAlignment) {
+        // The gameplay head centre stays fixed so physical leaning remains an eye-box adjustment,
+        // but the eye is not fixed relative to the body when the head rotates. Rotate only the
+        // half-IPD lever by the live view orientation: this keeps the ADS sight in front of the
+        // right eye both when entering ADS at an arbitrary head angle and while turning in ADS,
+        // without restoring the much larger synthetic neck-pivot orbit.
+        const float rightEyeLocal[3] = {SharedPose(95), 0.0f, 0.0f};
+        VRIK_QuatRotateVec(viewModel, rightEyeLocal, postRotationTranslation);
+    } else if (nonVrikEyeAlignment) {
         for (int k = 0; k < 3; ++k) {
             postRotationTranslation[k] = fixedRightEye[k] - fixedHeadCentre[k];
         }
