@@ -790,10 +790,9 @@ local function publishBraindance()
   S.bdFov = fov
 end
 
--- The F10 non-FPP switch is also the A/B ownership boundary for external-camera work.
--- When the Tofu side is selected, Dari's newer scene/braindance camera bridge must stand down or
--- both paths can claim the same VRCAM. Surveillance/device takeover is deliberately NOT released
--- here: it is the established exception and continues to be published independently below.
+-- The F10 non-FPP switch is also the ownership boundary for generic external-camera work.
+-- The scene/braindance bridge stands down on that side so it cannot claim the same VRCAM.
+-- Device takeover remains independent and keeps publishing through publishRemoteCamera().
 local function releaseSceneCameraForNonFpp()
   if type(VRBraindance) == "function" then
     pcall(function() VRBraindance(0, 0.0) end)
@@ -822,9 +821,6 @@ registerForEvent("onUpdate", function(dt)
   -- BEFORE the press, and the phone half of it is a single blackboard read.
   publishUiPopup(dt)
 
-  -- A/B OWNERSHIP, not merely a vehicle-FPP preference. OFF is the complete Dari/upstream side,
-  -- including its scene/braindance camera bridge. ON reserves non-FPP camera ownership for the Tofu
-  -- generic path; the existing surveillance/device takeover bridge remains the intentional exception.
   local allowNonFpp = false
   if type(VRAllowNonFPP) == "function" then
     pcall(function() allowNonFpp = VRAllowNonFPP() ~= 0 end)
@@ -852,7 +848,6 @@ registerForEvent("onUpdate", function(dt)
   S.acc = S.acc + (dt or 0.016)
   if S.acc < 0.25 then return end
   S.acc = 0.0
-
   if allowNonFpp or not S.on then
     dropRestriction()
     S.note = allowNonFpp

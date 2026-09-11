@@ -28,10 +28,69 @@
 #include "Utils/MemorySafe.hpp"
 
 #include <windows.h>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstddef>
+
+namespace {
+
+bool ReadStableFppPose(float outPos[3], float outQuat[4]) {
+    const uintptr_t component = g_camObjMain.load(std::memory_order_acquire);
+    if (component < 0x10000 || !outPos || !outQuat) return false;
+
+    uint32_t firstPos[3]{};
+    uint32_t secondPos[3]{};
+    float firstQuat[4]{};
+    float secondQuat[4]{};
+    for (int i = 0; i < 3; ++i) {
+        if (!ReadU32Safe(component + 0xE0u + static_cast<uintptr_t>(i) * 4u, &firstPos[i])) return false;
+    }
+    if (!ReadFloatArraySafe(reinterpret_cast<const float*>(component + 0xF0u), firstQuat, 4)) return false;
+    for (int i = 0; i < 3; ++i) {
+        if (!ReadU32Safe(component + 0xE0u + static_cast<uintptr_t>(i) * 4u, &secondPos[i])) return false;
+    }
+    if (!ReadFloatArraySafe(reinterpret_cast<const float*>(component + 0xF0u), secondQuat, 4)) return false;
+
+    for (int i = 0; i < 3; ++i) {
+        if (firstPos[i] != secondPos[i]) return false;
+        outPos[i] = static_cast<float>(static_cast<int32_t>(secondPos[i])) / 131072.0f;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (firstQuat[i] != secondQuat[i]) return false;
+        outQuat[i] = secondQuat[i];
+    }
+    return IsPlausibleUnitQuaternion(outQuat);
+}
+
+bool IsDetachedFromFpp(const int32_t mainPosFP[3], const float mainQuat[4]) {
+    if (g_liveControls.xrAllowNonFppViews == 0) return false;
+
+    float fppPos[3]{};
+    float fppQuat[4]{};
+    if (!ReadStableFppPose(fppPos, fppQuat)) return false;
+
+    const float dx = static_cast<float>(mainPosFP[0]) / 131072.0f - fppPos[0];
+    const float dy = static_cast<float>(mainPosFP[1]) / 131072.0f - fppPos[1];
+    const float dz = static_cast<float>(mainPosFP[2]) / 131072.0f - fppPos[2];
+    const float positionGap = std::sqrt(dx * dx + dy * dy + dz * dz);
+    double dot = 0.0;
+    for (int i = 0; i < 4; ++i) dot += static_cast<double>(mainQuat[i]) * fppQuat[i];
+    dot = std::clamp(std::abs(dot), 0.0, 1.0);
+    const float orientationGap = static_cast<float>(2.0 * std::acos(dot) *
+                                                    (180.0 / 3.14159265358979323846));
+
+    static std::atomic<bool> s_detached{false};
+    const bool wasDetached = s_detached.load(std::memory_order_acquire);
+    const bool detached = wasDetached
+        ? (positionGap >= 0.20f || orientationGap >= 6.0f)
+        : (positionGap >= 0.75f || orientationGap >= 20.0f);
+    s_detached.store(detached, std::memory_order_release);
+    return detached;
+}
+
+}  // namespace
 
 extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
     g_finalCameraHits++;
@@ -68,6 +127,49 @@ extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
     if (CyberpunkVR_StereoModuleLoaded) {
         const bool isVrcam = CyberpunkVR_IsVrcamViewActive() != 0;
         const bool isMain  = !isVrcam && CyberpunkVR_IsMainViewActive() != 0;
+
+        float renderedQuat[4]{};
+        const bool haveRenderedQuat = ReadFloatArraySafe(rsiPtr + 4, renderedQuat, 4) &&
+                                      IsPlausibleUnitQuaternion(renderedQuat);
+        if (isMain && haveRenderedQuat) {
+            const int32_t* posFP = reinterpret_cast<const int32_t*>(rsiPtr);
+            const bool detached = IsDetachedFromFpp(posFP, renderedQuat);
+            cvr::camera::GenericNonFppActivePublish(detached);
+
+            float baseQuat[4] = { renderedQuat[0], renderedQuat[1],
+                                  renderedQuat[2], renderedQuat[3] };
+            bool haveBase = true;
+            OpenXRHeadPose head{};
+            const bool hmdComposed = detached &&
+                cvr::camera::CamWriteRecordFindExact(renderedQuat, &head) && head.valid;
+            if (hmdComposed) {
+                // rendered = cleanBase * mappedHmd, so multiply by mappedHmd^-1 to recover the
+                // gameplay-owned orbit/rear-view base without feeding an old HMD turn forward.
+                MulQuat(renderedQuat[0], renderedQuat[1], renderedQuat[2], renderedQuat[3],
+                        -head.oriX, head.oriZ, -head.oriY, head.oriW,
+                        baseQuat[0], baseQuat[1], baseQuat[2], baseQuat[3]);
+                NormalizeQuat(baseQuat[0], baseQuat[1], baseQuat[2], baseQuat[3]);
+                haveBase = IsPlausibleUnitQuaternion(baseQuat);
+            }
+
+            if (haveBase) {
+                static std::atomic<uint32_t> s_finalMainSequence{0};
+                cvr::camera::FinalMainCameraFrame finalMain{};
+                finalMain.worldPos[0] = static_cast<float>(posFP[0]) / 131072.0f;
+                finalMain.worldPos[1] = static_cast<float>(posFP[1]) / 131072.0f;
+                finalMain.worldPos[2] = static_cast<float>(posFP[2]) / 131072.0f;
+                finalMain.worldQuat[0] = baseQuat[0]; finalMain.worldQuat[1] = baseQuat[1];
+                finalMain.worldQuat[2] = baseQuat[2]; finalMain.worldQuat[3] = baseQuat[3];
+                if (hmdComposed) finalMain.hmdPose = head;
+                finalMain.hmdComposed = hmdComposed ? 1u : 0u;
+                finalMain.timestampUs = XrDiagNowUs();
+                finalMain.callbackHit = g_finalCameraHits;
+                finalMain.locateSequence = locateSeq;
+                finalMain.sequence = s_finalMainSequence.fetch_add(1u, std::memory_order_relaxed) + 1u;
+                cvr::camera::FinalMainCameraFramePublish(finalMain);
+            }
+        }
+
         if (isMain) {
             float camq[4] = {};
             if (ReadFloatArraySafe(rsiPtr + 4, camq, 4) && IsPlausibleUnitQuaternion(camq)) {
@@ -161,6 +263,7 @@ extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
     // DEFAULT OFF. The pose-binding work in this same build has to be measurable on its own
     // first -- two changes at once and a regression tells you nothing. Flip live to compare.
     {
+        if (g_liveControls.xrAllowNonFppViews != 0 && cvr::camera::GenericNonFppActiveRead()) return;
         if (!CyberpunkVR_CamWriteInFinal) return;
 
         // ASK THE DISPATCHER, DO NOT HASH A NAME.
