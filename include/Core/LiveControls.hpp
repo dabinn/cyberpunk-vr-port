@@ -63,7 +63,7 @@ struct LiveControls {
     volatile int xrClassicDisableLsSprint; // effective only with classic on-foot controls: disable full-forward LS sprint
     volatile int xrClassicDisableRsDashCrouch; // effective only with classic on-foot controls: disable RS-Y dash/crouch
     volatile int xrClassicVehicleControls; // 1 = bypass the port's physical wheel and vehicle gun/throttle routing
-    volatile int xrAllowNonFppViews; // 1 = Tofu non-FPP A/B side (Dari scene/braindance bridge stands down; device takeover remains); 0 = upstream behavior
+    volatile int xrAllowNonFppViews; // 1 = Tofu generic non-FPP camera path; 0 = upstream/Dari camera ownership
     volatile int xrClassicSwapTriggersGrips; // effective only with classic vehicle controls: triggers become shoulders, grips become analog triggers
     volatile int xrClassicScannerControls; // 1 = keep the scanner gesture/LB latch but bypass its custom button/axis remapping
     volatile int xrMonoXQueueWait;  // 1 = mono path inserts cross-queue Wait before depth capture (legacy). 0 = skip it -- avoids CP2077 async-compute Wait cycle that froze present thread.

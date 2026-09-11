@@ -106,6 +106,14 @@ extern "C" void __fastcall OnPatchCameraCallback(float* cameraState, void* owner
 
     const uintptr_t owner = reinterpret_cast<uintptr_t>(ownerState);
 
+    // Detached MAIN is temporarily copied into the selected VRCAM before the engine's own
+    // transform-changed callback. During that thread-local handoff the temporary pose already owns
+    // orientation and eye position, so the normal VRCAM writer must leave it untouched.
+    if (g_liveControls.xrAllowNonFppViews != 0 && camKind == 2 &&
+        cvr::camera::GenericVrcamLocateScopeMatches(owner)) {
+        return;
+    }
+
     // ---- HEAD TRANSLATION into the SECOND view ---------------------------------------------
     //
     // MAIN gets it through the located camera buffer (`posFP += delta` in LocateCamera). VRCAM
