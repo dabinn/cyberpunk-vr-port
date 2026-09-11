@@ -205,7 +205,8 @@ void BdPushTransformOnce(uintptr_t comp, float qx, float qy, float qz, float qw,
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val) {
+extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val,
+                                                    uintptr_t cameraObject) {
     (void)xmm0_val;
     g_locateCameraHits++;
     if (g_telemetry) {
@@ -252,6 +253,17 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
                 s_scMs = scNow;
             }
             return;
+        }
+    }
+
+    // A CameraDirector transition can blend this FPP serializer entry with a detached entry. If
+    // the untouched quaternion is bit-identical to one of our writes, attach that write's exact
+    // HMD sample to the shared blend scope. No camera state is modified here.
+    if (g_liveControls.xrAllowNonFppViews != 0 &&
+        cvr::camera::CameraDirectorBlendScopeContains(cameraObject)) {
+        OpenXRHeadPose entryHead{};
+        if (cvr::camera::CamWriteRecordFindExact(bdEntryQuat, &entryHead) && entryHead.valid) {
+            cvr::camera::CameraDirectorBlendScopeMarkComposed(cameraObject, entryHead);
         }
     }
 
@@ -539,6 +551,12 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
     const bool hasXR = CyberpunkVR_OneSamplePerFrame
         ? OpenXRManager::Get().AcquireFrameHeadSample(&xrPose)
         : OpenXRManager::Get().GetHeadPose(&xrPose);
+    OpenXRHeadPose scopedVrcamHead{};
+    const bool scopedVrcamLocate = g_liveControls.xrAllowNonFppViews != 0 &&
+        cvr::camera::GenericVrcamLocateScopeRead(cameraObject, &scopedVrcamHead) &&
+        scopedVrcamHead.valid;
+    const bool scopedVrcamEntryAlreadyComposed = scopedVrcamLocate &&
+        cvr::camera::GenericVrcamLocateScopeEntryAlreadyComposed(cameraObject);
     // Take the bridge value belonging to the same base/aim epoch as this head pose. A late camera
     // consumer can still finish an older epoch after the XR thread has folded the new one.
     const float bodyYawBridge = hasXR
@@ -831,6 +849,33 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
             const float qr[4] = { camera_qx, camera_qy, camera_qz, camera_qw };
             cvr::camera::CamWriteQuatPublish(camera_qx, camera_qy, camera_qz, camera_qw);
             cvr::camera::CamWriteRecordPush(qr, xrPose);
+        }
+
+        // The detached-MAIN VRCAM handoff temporarily places an already-composed pose into the
+        // selected RTT component before issuing the engine's transform-changed callback. If that
+        // callback synchronously serializes the VRCAM, preserve the same exact HMD sample and do
+        // not multiply it a second time.
+        if (!skipHmdOrientation && scopedVrcamLocate) {
+            float composed[4]{};
+            if (scopedVrcamEntryAlreadyComposed) {
+                composed[0] = bdEntryQuat[0]; composed[1] = bdEntryQuat[1];
+                composed[2] = bdEntryQuat[2]; composed[3] = bdEntryQuat[3];
+            } else {
+                MulQuat(bdEntryQuat[0], bdEntryQuat[1], bdEntryQuat[2], bdEntryQuat[3],
+                        scopedVrcamHead.oriX, -scopedVrcamHead.oriZ,
+                        scopedVrcamHead.oriY, scopedVrcamHead.oriW,
+                        composed[0], composed[1], composed[2], composed[3]);
+            }
+            NormalizeQuat(composed[0], composed[1], composed[2], composed[3]);
+            if (IsPlausibleUnitQuaternion(composed)) {
+                quat[0] = composed[0]; quat[1] = composed[1];
+                quat[2] = composed[2]; quat[3] = composed[3];
+                camera_qx = composed[0]; camera_qy = composed[1];
+                camera_qz = composed[2]; camera_qw = composed[3];
+                cvr::camera::CamWriteRecordPush(composed, scopedVrcamHead);
+                cvr::camera::CamWriteQuatPublish(
+                    composed[0], composed[1], composed[2], composed[3]);
+            }
         }
         // Skip the HMD orientation write on the shot frame (or always, mode 1) so the game's
         // native aim/snap drives the camera -> the bullet follows the controller/stick aim.
@@ -1521,6 +1566,8 @@ bool InstallLocateCameraHook() {
     code[pos++] = 0x48; code[pos++] = 0x89; code[pos++] = 0xD9; // mov rcx, rbx
     // Set arg2 (xmm1) = xmm0 (since float args go in xmm registers, xmm1 is 2nd arg)
     code[pos++] = 0x0F; code[pos++] = 0x28; code[pos++] = 0xC8; // movaps xmm1, xmm0
+    // Set arg3 (r8) = rsi, the LocateCamera object that owns this serialized entry.
+    code[pos++] = 0x49; code[pos++] = 0x89; code[pos++] = 0xF0; // mov r8, rsi
 
     WriteMovRaxImm64(code, pos, reinterpret_cast<uintptr_t>(OnLocateCameraCallback));
     code[pos++] = 0xFF; code[pos++] = 0xD0; // call rax

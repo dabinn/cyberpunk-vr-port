@@ -82,6 +82,46 @@ void CamWriteRecordPush(const float q[4], const OpenXRHeadPose& p);
 // Identify the frame's pose from the quaternion the engine is about to render with. `outAge` is how
 // many writes back it was found, `outTies` how many records were within tolerance.
 bool CamWriteRecordFind(const float q[4], OpenXRHeadPose* out, uint32_t* outAge, uint32_t* outTies);
+// Strict provenance check for detached MAIN: only a bit-identical quaternion written by this
+// plugin is enough evidence to peel an HMD rotation back off the rendered camera.
+bool CamWriteRecordFindExact(const float q[4], OpenXRHeadPose* out);
+
+// ---- CameraDirector blend provenance ----------------------------------------------------------
+// All non-zero-weight entries in one blend must use the same HMD sample before the final blended
+// quaternion can be filed in the ordinary camera write ring.
+void CameraDirectorBlendScopeBegin(const uintptr_t* cameraObjects, uint32_t capturedCount,
+                                   uint32_t activeCount, const OpenXRHeadPose* preferredHead);
+void CameraDirectorBlendScopeEnd();
+bool CameraDirectorBlendScopeContains(uintptr_t cameraObject);
+bool CameraDirectorBlendScopeReadHead(uintptr_t cameraObject, OpenXRHeadPose* outHead);
+bool CameraDirectorBlendScopeMarkComposed(uintptr_t cameraObject, const OpenXRHeadPose& head);
+bool CameraDirectorBlendScopeAllComposed(OpenXRHeadPose* outHead);
+
+// CameraDirector's current blended setup is available before the VRCAM render graph. Keep a
+// coherent snapshot so generic non-FPP handoff does not have to chase the previous completed MAIN.
+struct GenericNonFppCameraFrame {
+    float worldPos[3]{};
+    float worldQuat[4]{};
+    OpenXRHeadPose hmdPose{};
+    uint64_t timestampUs = 0;
+    uint32_t sequence = 0;
+    uint32_t active = 0;
+    uint32_t hmdComposed = 0;
+};
+void GenericNonFppCameraFramePublish(const GenericNonFppCameraFrame& f);
+bool GenericNonFppCameraFrameRead(GenericNonFppCameraFrame* out);
+
+enum class GenericNonFppCurrentBlendState : uint32_t {
+    Unavailable = 0,
+    NoGeneric = 1,
+    Ready = 2,
+    Unsupported = 3,
+};
+
+// Rebuild CameraDirector's current MAIN pose directly from its active table at the selected VRCAM
+// refresh boundary. This intentionally supports only the two serializer layouts proven by runtime:
+// player FPP and generic detached non-FPP. Unknown active camera types fail closed.
+GenericNonFppCurrentBlendState GenericNonFppCurrentBlendRead(GenericNonFppCameraFrame* out);
 
 // ---- the located camera frame used by native VRIK pairing -------------------------------------
 //
@@ -98,6 +138,43 @@ struct LocatedCameraFrame {
 void LocatedCameraFramePublish(const LocatedCameraFrame& f);
 // false when no frame has been published yet or a consistent read could not be taken.
 bool LocatedCameraFrameRead(LocatedCameraFrame* out);
+
+// ---- the last authoritative MAIN render camera ------------------------------------------------
+// Published from FinalCamera only for dispatcher MAIN. Unlike g_camObjMain, this remains the
+// actual rendered camera when CameraDirector hands authority to vehicle TPP, rear view, or another
+// detached camera.
+struct FinalMainCameraFrame {
+    float worldPos[3];
+    float worldQuat[4];
+    OpenXRHeadPose hmdPose{};
+    uint64_t timestampUs;
+    uint64_t callbackHit;
+    uint32_t locateSequence;
+    uint32_t sequence;
+    uint32_t hmdComposed;
+};
+void FinalMainCameraFramePublish(const FinalMainCameraFrame& f);
+bool FinalMainCameraFrameRead(FinalMainCameraFrame* out);
+
+// FinalCamera publishes whether dispatcher MAIN is currently detached from the player FPP
+// component. This is a reader-side ownership signal only; it must never become a camera writer.
+void GenericNonFppActivePublish(bool active);
+bool GenericNonFppActiveRead();
+
+// The selected VRCAM is temporarily pointed at detached MAIN during its native transform-changed
+// callback. This thread-local scope carries the exact HMD sample through a synchronous LocateCamera
+// call and also tells it when the temporary entry is already composed.
+struct GenericVrcamLocateScope {
+    uintptr_t cameraObject = 0;
+    OpenXRHeadPose head{};
+    bool active = false;
+    bool entryAlreadyComposed = false;
+    bool locateConsumed = false;
+};
+GenericVrcamLocateScope GenericVrcamLocateScopeExchange(const GenericVrcamLocateScope& scope);
+bool GenericVrcamLocateScopeMatches(uintptr_t cameraObject);
+bool GenericVrcamLocateScopeEntryAlreadyComposed(uintptr_t cameraObject);
+bool GenericVrcamLocateScopeRead(uintptr_t cameraObject, OpenXRHeadPose* outHead);
 
 // ---- the view frame handed to the solve --------------------------------------------------------
 //
