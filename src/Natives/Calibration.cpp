@@ -62,7 +62,9 @@
 #include <iomanip>
 #include <string>
 #include "Anim/VrikHook.hpp"
+#include "Anim/AdsEyeAlign.hpp"
 #include "Anim/WeaponAim.hpp"
+#include "Core/LiveControls.hpp"
 #include "Natives/NativeState.hpp"
 #include "Natives/NativeHelpers.hpp"
 #include <MinHook.h>
@@ -210,6 +212,58 @@ void SetVRDiagCapture(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFra
 }
 
 // Diagnostic: logs the gizmo-computed world target (camPos + camQuat*mapLocalPos)
+// Read-only telemetry for the experimental non-VRIK weapon-shoulder A/B.
+// 0 = any side valid. Per-side blocks are right=1..21, left=22..42:
+// +0 valid, +1 position error, +2 rotation error, +3/+4 raw/constrained total delta,
+// +5/+6 protraction, +7/+8 elevation, +9/+10 twist, +11..14 T-pose local quaternion,
+// +15..17 target hand, +18..20 final hand. 43 = live shoulder-test toggle.
+// 44..49 = right raw/constrained clavicle model position (XYZ each),
+// 50..55 = left raw/constrained clavicle model position (XYZ each).
+void VRShoulderTestDiag(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, float* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext); RED4EXT_UNUSED_PARAMETER(a4);
+    int32_t index = -1;
+    RED4ext::GetParameter(aFrame, &index);
+    aFrame->code++;
+
+    cvr::anim::WeaponShoulderConstraintDiag d{};
+    const bool valid = cvr::anim::GetWeaponShoulderConstraintDiag(d);
+    float value = 0.0f;
+    if (index == 43) {
+        value = g_liveControls.xrWeaponShoulderConstraintTest != 0 ? 1.0f : 0.0f;
+    } else if (index >= 44 && index <= 55) {
+        const bool left = index >= 50;
+        const int off = index - (left ? 50 : 44);
+        const auto& s = left ? d.left : d.right;
+        value = off < 3 ? s.rawClavicle[off]
+                        : s.constrainedClavicle[off - 3];
+    } else if (index == 0) {
+        value = valid ? 1.0f : 0.0f;
+    } else {
+        const int side = index >= 22 ? 1 : 0;
+        const int base = side ? 22 : 1;
+        const int off = index - base;
+        const auto& s = side ? d.left : d.right;
+        switch (off) {
+            case 0: value = s.valid ? 1.0f : 0.0f; break;
+            case 1: value = s.handPositionError; break;
+            case 2: value = s.handRotationErrorDeg; break;
+            case 3: value = s.rawClavicleDeltaDeg; break;
+            case 4: value = s.constrainedClavicleDeltaDeg; break;
+            case 5: value = s.rawProtractionDeg; break;
+            case 6: value = s.constrainedProtractionDeg; break;
+            case 7: value = s.rawElevationDeg; break;
+            case 8: value = s.constrainedElevationDeg; break;
+            case 9: value = s.rawTwistDeg; break;
+            case 10: value = s.constrainedTwistDeg; break;
+            case 11: case 12: case 13: case 14: value = s.referenceLocalRot[off - 11]; break;
+            case 15: case 16: case 17: value = s.targetHand[off - 15]; break;
+            case 18: case 19: case 20: value = s.finalHand[off - 18]; break;
+            default: value = 0.0f; break;
+        }
+    }
+    if (aOut) *aOut = value;
+}
+
 // next to the actual character arm-bone poses captured from the live pose buffer
 // (g_VRDiagBones, snapshotted pre-write by the hook when SetVRDiagCapture(1)).
 // The decisive lines compare (bufHand - bufHead) against (gizmoWorld - camPos):
@@ -292,6 +346,32 @@ void WriteVRDiagCore(float camX, float camY, float camZ,
     out << "IK hand body(lx,ly,lz,cross) = (" << g_VRIKDbgLocal[0] << ", " << g_VRIKDbgLocal[1] << ", " << g_VRIKDbgLocal[2] << ", " << g_VRIKDbgLocal[3] << ")\n";
     out << "IK lens upper=" << g_VRIKDbgLens[0] << " fore=" << g_VRIKDbgLens[1]
         << " scale=" << g_VRBindScale << " yaw=" << g_VRPlayerYaw << "\n";
+
+    cvr::anim::WeaponShoulderConstraintDiag shoulderDiag{};
+    if (cvr::anim::GetWeaponShoulderConstraintDiag(shoulderDiag)) {
+        const cvr::anim::WeaponShoulderSideDiag* sides[2] = {&shoulderDiag.right, &shoulderDiag.left};
+        const char* labels[2] = {"R", "L"};
+        for (int side = 0; side < 2; ++side) {
+            const auto& s = *sides[side];
+            if (!s.valid) continue;
+            out << "shoulderTest " << labels[side]
+                << " refLocal=(" << s.referenceLocalRot[0] << ", " << s.referenceLocalRot[1] << ", "
+                << s.referenceLocalRot[2] << ", " << s.referenceLocalRot[3] << ")"
+                << " totalDeg=" << s.rawClavicleDeltaDeg << "->" << s.constrainedClavicleDeltaDeg
+                << " pro=" << s.rawProtractionDeg << "->" << s.constrainedProtractionDeg
+                << " elev=" << s.rawElevationDeg << "->" << s.constrainedElevationDeg
+                << " twist=" << s.rawTwistDeg << "->" << s.constrainedTwistDeg << "\n";
+            out << "shoulderTest " << labels[side]
+                << " targetHand=(" << s.targetHand[0] << ", " << s.targetHand[1] << ", " << s.targetHand[2] << ")"
+                << " finalHand=(" << s.finalHand[0] << ", " << s.finalHand[1] << ", " << s.finalHand[2] << ")"
+                << " posErr=" << s.handPositionError << " rotErrDeg=" << s.handRotationErrorDeg << "\n";
+            out << "shoulderTest " << labels[side]
+                << " clavicle raw=(" << s.rawClavicle[0] << ", " << s.rawClavicle[1] << ", " << s.rawClavicle[2] << ")"
+                << " constrained=(" << s.constrainedClavicle[0] << ", " << s.constrainedClavicle[1] << ", " << s.constrainedClavicle[2] << ")"
+                << " upperArm raw=(" << s.rawUpperArm[0] << ", " << s.rawUpperArm[1] << ", " << s.rawUpperArm[2] << ")"
+                << " constrained=(" << s.constrainedUpperArm[0] << ", " << s.constrainedUpperArm[1] << ", " << s.constrainedUpperArm[2] << ")\n";
+        }
+    }
 
     // ---- Phase-1 gate: gizmo-exact 1:1 validation -------------------------------
     // Reconstruct the camera (HMD) + the right gizmo hand in MODEL space from the world

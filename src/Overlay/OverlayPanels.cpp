@@ -157,6 +157,24 @@ void DrawVRHandsControls() {
     {
         LiveControlsUiState st{};
         GetLiveControlsUiState(&st);
+        bool shoulderTest = st.xrWeaponShoulderConstraintTest != 0;
+        if (ImGui::Checkbox("Constrain weapon shoulder (test)", &shoulderTest)) {
+            st.xrWeaponShoulderConstraintTest = shoulderTest ? 1 : 0;
+            SetLiveControlsUiState(&st, 1);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Experimental A/B for hand tracking OFF + weapon/melee poses.\n"
+                "Pins shoulder position to the authored T-pose and limits clavicle rotation, with separate\n"
+                "protraction/elevation/twist ranges, then re-solves both fixed-length arms.\n"
+                "If the authored hand target becomes unreachable, shoulder position/rotation relax only\n"
+                "as far as needed to restore reach; bone lengths and hand targets stay fixed.");
+        }
+    }
+
+    {
+        LiveControlsUiState st{};
+        GetLiveControlsUiState(&st);
         // Cutscene VRIK suspend (PR #40). Picks the minimum scene tier at which the plugin fully
         // suspends the body+arm solve so the engine authored cinematic pose plays clean. Persisted
         // through the LiveControls bridge (vrport.ini xr_cutscene_suspend_tier) and republished to
