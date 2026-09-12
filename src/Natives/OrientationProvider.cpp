@@ -1162,6 +1162,13 @@ void SetVRMeleeFire(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, 
     int32_t v = 0; RED4ext::GetParameter(aFrame, &v); aFrame->code++;
     if (g_pSharedHands) g_pSharedHands[29] = (float)v;
 }
+// WeaponObject.IsMelee is already authoritative on the CET side. Publish that classification so
+// native animation code does not mistake a katana's valid muzzle-slot transform for a firearm.
+void SetVRMeleeWeaponState(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t) {
+    int32_t v = 0; RED4ext::GetParameter(aFrame, &v); aFrame->code++;
+    EnsureSharedMemory();
+    if (g_pSharedHands) g_pSharedHands[vrshared::kMeleeWeaponFlag] = v ? 1.0f : 0.0f;
+}
 // THE PORT'S SAY OVER THE RIGHT TRIGGER -> shared[161], read by the XInput merge in the stereo module.
 // 0 = pass it through, 1 = swallow it, 2 = press it fully. The physical reload uses both ends: a revolver with its
 // cylinder swung out swallows the trigger (it has nothing under the hammer), and a cocked one presses it fully as

@@ -1275,6 +1275,13 @@ registerForEvent('onUpdate', function(dt)
         -- immediately. Isolation belongs in the OTHER direction: the muzzle keeps its place and the
         -- newcomer gets its own pcall.
         if wpn then updateMuzzle(wpn) end
+        local isMeleeWeapon = false
+        pcall(function()
+            if wpn then isMeleeWeapon = WeaponObject.IsMelee(wpn:GetItemID()) end
+            if type(SetVRMeleeWeaponState) == 'function' then
+                SetVRMeleeWeaponState(isMeleeWeapon and 1 or 0)
+            end
+        end)
         local okSight = pcall(function() publishSightOrigin(wpn) end)
         if not okSight and type(SetVRSightOrigin) == 'function' then
             SetVRSightOrigin(0.0, 0.0, 0.0, 0)
@@ -1338,9 +1345,7 @@ registerForEvent('onUpdate', function(dt)
             guardWasOn = false
             return
         end
-        local isMelee = false
-        pcall(function() isMelee = WeaponObject.IsMelee(wpn:GetItemID()) end)
-        if not isMelee then
+        if not isMeleeWeapon then
             guardStats(pl, false, false)
             guardWasOn = false
             return

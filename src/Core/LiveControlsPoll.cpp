@@ -504,6 +504,7 @@ void PollLiveControls() {
     int xrSnapTurnYawIndex = g_liveControls.xrSnapTurnYawIndex >= 0 && g_liveControls.xrSnapTurnYawIndex <= 3 ? g_liveControls.xrSnapTurnYawIndex : 1;
     int xrImmersiveHolsters = g_liveControls.xrImmersiveHolsters;
     int xrPhysicalBodyRotation = g_liveControls.xrPhysicalBodyRotation;
+    int xrWeaponShoulderConstraintTest = g_liveControls.xrWeaponShoulderConstraintTest;
     int xrAdsRightEyeAlignment = g_liveControls.xrAdsRightEyeAlignment;
     int xrCutsceneSuspendTier = g_liveControls.xrCutsceneSuspendTier;
     float xrVehHeadOffsetX = g_liveControls.xrVehHeadOffsetX;
@@ -1214,6 +1215,11 @@ void PollLiveControls() {
             xrPhysicalBodyRotation = intValue;
             continue;
         }
+        if (sscanf_s(line, "xr_weapon_shoulder_constraint_test=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_weapon_shoulder_constraint_test = %d", &intValue) == 1) {
+            xrWeaponShoulderConstraintTest = intValue;
+            continue;
+        }
         if (sscanf_s(line, "xr_ads_right_eye_alignment=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_ads_right_eye_alignment = %d", &intValue) == 1) {
             xrAdsRightEyeAlignment = intValue;
@@ -1465,6 +1471,7 @@ void PollLiveControls() {
     g_liveControls.xrHideLaserDotAds = xrHideLaserDotAds != 0 ? 1 : 0;
     g_liveControls.xrMovementControl = xrMovementSource != 0 ? 1 : 0;
     g_liveControls.xrPhysicalBodyRotation = xrPhysicalBodyRotation != 0 ? 1 : 0;
+    g_liveControls.xrWeaponShoulderConstraintTest = xrWeaponShoulderConstraintTest != 0 ? 1 : 0;
     g_liveControls.xrAdsRightEyeAlignment = xrAdsRightEyeAlignment != 0 ? 1 : 0;
     g_liveControls.xrCutsceneSuspendTier =
         (xrCutsceneSuspendTier < -1) ? -1 : (xrCutsceneSuspendTier > 4 ? 4 : xrCutsceneSuspendTier);
@@ -1702,6 +1709,7 @@ LiveControlsUiState MakeLiveControlsUiState() {
     state.xrLaserDotScaleWithDistance = g_liveControls.xrLaserDotScaleWithDistance;
     state.xrHideLaserDotAds = g_liveControls.xrHideLaserDotAds;
     state.xrPhysicalBodyRotation = g_liveControls.xrPhysicalBodyRotation;
+    state.xrWeaponShoulderConstraintTest = g_liveControls.xrWeaponShoulderConstraintTest;
     state.xrAdsRightEyeAlignment = g_liveControls.xrAdsRightEyeAlignment;
     state.xrCutsceneSuspendTier = g_liveControls.xrCutsceneSuspendTier;
     state.xrXInputInstall = g_liveControls.xrXInputInstall;
@@ -1959,6 +1967,7 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_laser_dot_scale_with_distance=%d\n", state.xrLaserDotScaleWithDistance != 0 ? 1 : 0);
     fprintf(file, "xr_hide_laser_dot_ads=%d\n", state.xrHideLaserDotAds != 0 ? 1 : 0);
     fprintf(file, "xr_physical_body_rotation=%d\n", state.xrPhysicalBodyRotation != 0 ? 1 : 0);
+    fprintf(file, "xr_weapon_shoulder_constraint_test=%d\n", state.xrWeaponShoulderConstraintTest != 0 ? 1 : 0);
     fprintf(file, "xr_ads_right_eye_alignment=%d\n", state.xrAdsRightEyeAlignment != 0 ? 1 : 0);
     fprintf(file, "xr_cutscene_suspend_tier=%d\n",
             state.xrCutsceneSuspendTier < -1 ? -1 : (state.xrCutsceneSuspendTier > 4 ? 4 : state.xrCutsceneSuspendTier));
@@ -2090,6 +2099,7 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
     g_liveControls.xrLaserDotScaleWithDistance = state->xrLaserDotScaleWithDistance != 0 ? 1 : 0;
     g_liveControls.xrHideLaserDotAds = state->xrHideLaserDotAds != 0 ? 1 : 0;
     g_liveControls.xrPhysicalBodyRotation = state->xrPhysicalBodyRotation != 0 ? 1 : 0;
+    g_liveControls.xrWeaponShoulderConstraintTest = state->xrWeaponShoulderConstraintTest != 0 ? 1 : 0;
     g_liveControls.xrAdsRightEyeAlignment = state->xrAdsRightEyeAlignment != 0 ? 1 : 0;
     g_liveControls.xrCutsceneSuspendTier =
         (state->xrCutsceneSuspendTier < -1) ? -1

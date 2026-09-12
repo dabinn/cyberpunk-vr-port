@@ -55,6 +55,7 @@
 #include "Anim/VrikHook.hpp"
 #include "Anim/VrikState.hpp"
 #include "Camera/CameraState.hpp"
+#include "Core/LiveControls.hpp"
 #include "Core/VrCoreShared.hpp"   // g_isAiming
 #include "Utils/SharedSlots.hpp"
 
@@ -72,15 +73,22 @@ struct AimArmPose {
     uint8_t* boneBuf = nullptr;
     float tick = -1.0f;
     int bone[6] = {-1, -1, -1, -1, -1, -1};   // right upper/fore/hand, left upper/fore/hand
+    int shoulderBone[2] = {-1, -1};             // right/left clavicle-like shoulder bones
     float localRot[6][4] = {};
+    float shoulderLocalPos[2][3] = {};
+    float shoulderLocalRot[2][4] = {};
     float rawPos[6][3] = {};
     float rawRot[6][4] = {};
     float targetHand[2][3] = {};
     float targetElbow[2][3] = {};
     float targetLeftRot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    bool solveRight = false;
+    bool solveLeft = false;
+    bool shoulderConstraint = false;
     bool valid = false;
 };
 AimArmPose g_aimArmPose[4];
+WeaponShoulderConstraintDiag g_weaponShoulderConstraintDiag{};
 
 // Build the Head Aim gameplay frame. The render camera remains fully 6DoF, but weapon/arm aim
 // deliberately ignores base-relative HMD translation: the centred camera plus its fixed view
@@ -247,6 +255,238 @@ void SolveAimArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
     VRIK_WriteLocalRot(boneBuf, handIdx, newFore, targetHandRot);
 }
 
+struct ShoulderAngles {
+    float protraction = 0.0f;
+    float elevation = 0.0f;
+    float twist = 0.0f;
+    float total = 0.0f;
+};
+
+float ClampShoulderAngle(float value, float lo, float hi) {
+    return value < lo ? lo : (value > hi ? hi : value);
+}
+
+void AxisAngleQuat(const float* axis, float angle, float* out) {
+    const float s = std::sin(angle * 0.5f);
+    out[0] = axis[0] * s;
+    out[1] = axis[1] * s;
+    out[2] = axis[2] * s;
+    out[3] = std::cos(angle * 0.5f);
+}
+
+void NlerpQuatShortest(const float* a, const float* b, float t, float* out) {
+    const float dot = a[0]*b[0] + a[1]*b[1] + a[2]*b[2] + a[3]*b[3];
+    const float sign = dot < 0.0f ? -1.0f : 1.0f;
+    for (int k = 0; k < 4; ++k) out[k] = a[k] * (1.0f - t) + b[k] * sign * t;
+    VRIK_QuatNorm(out);
+}
+
+bool MeasureShoulderLocal(bool isLeft, const float* localRot, ShoulderAngles& out,
+                          float* outRestAxisModel = nullptr,
+                          float* outParentRestModelRot = nullptr) {
+    const volatile int valid = isLeft ? g_VRLeftShoulderRestValid : g_VRRightShoulderRestValid;
+    if (!valid) return false;
+    const float* restSrc = isLeft ? g_VRLeftClavicleRestRot : g_VRRightClavicleRestRot;
+    const float* upperRest = isLeft ? g_VRLeftUpperArmRestPos : g_VRRightUpperArmRestPos;
+    const float* parentSrc = isLeft ? g_VRLeftShoulderParentRestModelRot
+                                    : g_VRRightShoulderParentRestModelRot;
+
+    float rest[4] = {restSrc[0], restSrc[1], restSrc[2], restSrc[3]};
+    float cur[4] = {localRot[0], localRot[1], localRot[2], localRot[3]};
+    float parentRest[4] = {parentSrc[0], parentSrc[1], parentSrc[2], parentSrc[3]};
+    VRIK_QuatNorm(rest);
+    VRIK_QuatNorm(cur);
+    VRIK_QuatNorm(parentRest);
+
+    float invRest[4];
+    VRIK_QuatConj(rest, invRest);
+    float deltaParent[4];
+    VRIK_QuatMul(cur, invRest, deltaParent);
+    VRIK_QuatNorm(deltaParent);
+
+    float invParentRest[4];
+    VRIK_QuatConj(parentRest, invParentRest);
+    float tmp[4], deltaModel[4];
+    VRIK_QuatMul(parentRest, deltaParent, tmp);
+    VRIK_QuatMul(tmp, invParentRest, deltaModel);
+    VRIK_QuatNorm(deltaModel);
+    if (deltaModel[3] < 0.0f) {
+        for (float& v : deltaModel) v = -v;
+    }
+
+    float axisLocal[3] = {upperRest[0], upperRest[1], upperRest[2]};
+    if (VRIK_Norm3(axisLocal) < 1e-5f) return false;
+    float axisParent[3];
+    VRIK_QuatRotateVec(rest, axisLocal, axisParent);
+    float restAxisModel[3];
+    VRIK_QuatRotateVec(parentRest, axisParent, restAxisModel);
+    if (VRIK_Norm3(restAxisModel) < 1e-5f) return false;
+    float currentAxisModel[3];
+    VRIK_QuatRotateVec(deltaModel, restAxisModel, currentAxisModel);
+    if (VRIK_Norm3(currentAxisModel) < 1e-5f) return false;
+
+    const float restZ = ClampShoulderAngle(restAxisModel[2], -1.0f, 1.0f);
+    const float curZ = ClampShoulderAngle(currentAxisModel[2], -1.0f, 1.0f);
+    out.elevation = std::asin(curZ) - std::asin(restZ);
+
+    float restH[3] = {restAxisModel[0], restAxisModel[1], 0.0f};
+    float curH[3] = {currentAxisModel[0], currentAxisModel[1], 0.0f};
+    if (VRIK_Norm3(restH) < 1e-5f || VRIK_Norm3(curH) < 1e-5f) return false;
+    float crossH[3];
+    VRIK_Cross3(restH, curH, crossH);
+    float dotH = ClampShoulderAngle(VRIK_Dot3(restH, curH), -1.0f, 1.0f);
+    const float azimuth = std::atan2(crossH[2], dotH);
+    const float sideSign = restAxisModel[0] >= 0.0f ? 1.0f : -1.0f;
+    out.protraction = azimuth * sideSign;
+
+    float swing[4];
+    VRIK_QuatFromTo(restAxisModel, currentAxisModel, swing);
+    float invSwing[4];
+    VRIK_QuatConj(swing, invSwing);
+    float twist[4];
+    VRIK_QuatMul(invSwing, deltaModel, twist);
+    VRIK_QuatNorm(twist);
+    if (twist[3] < 0.0f) {
+        for (float& v : twist) v = -v;
+    }
+    const float twistProj = twist[0]*restAxisModel[0] + twist[1]*restAxisModel[1]
+                          + twist[2]*restAxisModel[2];
+    out.twist = 2.0f * std::atan2(twistProj, twist[3]);
+
+    const float xyz = std::sqrt(deltaModel[0]*deltaModel[0] + deltaModel[1]*deltaModel[1]
+                              + deltaModel[2]*deltaModel[2]);
+    out.total = 2.0f * std::atan2(xyz, deltaModel[3]);
+
+    if (outRestAxisModel) {
+        for (int k = 0; k < 3; ++k) outRestAxisModel[k] = restAxisModel[k];
+    }
+    if (outParentRestModelRot) {
+        for (int k = 0; k < 4; ++k) outParentRestModelRot[k] = parentRest[k];
+    }
+    return true;
+}
+
+bool ApplyShoulderConstraint(uint8_t* boneBuf, bool isLeft,
+                             const float* targetHand, float minArmReach, float maxArmReach,
+                             ShoulderAngles& rawAngles, ShoulderAngles& constrainedAngles) {
+    if (!boneBuf) return false;
+    const int clavicle = isLeft ? g_VRLeftClavicleIdx : g_VRRightClavicleIdx;
+    const int upper = isLeft ? g_VRLeftUpperArmIdx : g_VRRightUpperArmIdx;
+    if (clavicle < 0 || upper < 0 ||
+        clavicle >= VRIK_FKCount() || upper >= VRIK_FKCount()) return false;
+
+    float* localRot = reinterpret_cast<float*>(boneBuf + clavicle * 48 + VRIK_ROT_OFF);
+    float* localPos = reinterpret_cast<float*>(boneBuf + clavicle * 48 + VRIK_TRANS_OFF);
+    float rawLocal[4] = {localRot[0], localRot[1], localRot[2], localRot[3]};
+    const float rawPos[3] = {localPos[0], localPos[1], localPos[2]};
+    VRIK_QuatNorm(rawLocal);
+    float restAxisModel[3], parentRest[4];
+    if (!MeasureShoulderLocal(isLeft, localRot, rawAngles, restAxisModel, parentRest)) return false;
+
+    constexpr float kDeg = 0.01745329251994329577f;
+    const float protraction = ClampShoulderAngle(rawAngles.protraction, -20.0f*kDeg, 20.0f*kDeg);
+    const float elevation = ClampShoulderAngle(rawAngles.elevation, -8.0f*kDeg, 30.0f*kDeg);
+    // The rig-specific sign of posterior clavicle roll has not been established yet, so keep this
+    // axis symmetric until telemetry from real weapon poses tells us which sign deserves more range.
+    const float twist = ClampShoulderAngle(rawAngles.twist, -25.0f*kDeg, 25.0f*kDeg);
+
+    const float sideSign = restAxisModel[0] >= 0.0f ? 1.0f : -1.0f;
+    const float up[3] = {0.0f, 0.0f, 1.0f};
+    float qPro[4];
+    AxisAngleQuat(up, protraction * sideSign, qPro);
+    float proDir[3];
+    VRIK_QuatRotateVec(qPro, restAxisModel, proDir);
+    float horizontal[3] = {proDir[0], proDir[1], 0.0f};
+    if (VRIK_Norm3(horizontal) < 1e-5f) return false;
+    const float restElev = std::asin(ClampShoulderAngle(restAxisModel[2], -1.0f, 1.0f));
+    const float targetElev = restElev + elevation;
+    const float ce = std::cos(targetElev), se = std::sin(targetElev);
+    float targetAxis[3] = {horizontal[0]*ce, horizontal[1]*ce, se};
+    VRIK_Norm3(targetAxis);
+
+    float swing[4];
+    VRIK_QuatFromTo(restAxisModel, targetAxis, swing);
+    float twistQ[4];
+    AxisAngleQuat(restAxisModel, twist, twistQ);
+    float constrainedDeltaModel[4];
+    VRIK_QuatMul(swing, twistQ, constrainedDeltaModel);
+    VRIK_QuatNorm(constrainedDeltaModel);
+
+    float invParentRest[4];
+    VRIK_QuatConj(parentRest, invParentRest);
+    float tmp[4], constrainedDeltaParent[4];
+    VRIK_QuatMul(invParentRest, constrainedDeltaModel, tmp);
+    VRIK_QuatMul(tmp, parentRest, constrainedDeltaParent);
+    VRIK_QuatNorm(constrainedDeltaParent);
+
+    const float* restSrc = isLeft ? g_VRLeftClavicleRestRot : g_VRRightClavicleRestRot;
+    const float* restPos = isLeft ? g_VRLeftClavicleRestPos : g_VRRightClavicleRestPos;
+    float rest[4] = {restSrc[0], restSrc[1], restSrc[2], restSrc[3]};
+    VRIK_QuatNorm(rest);
+    VRIK_QuatMul(constrainedDeltaParent, rest, localRot);
+    VRIK_QuatNorm(localRot);
+
+    // FPP weapon/melee animations are allowed to translate the clavicle socket by many centimetres.
+    // That is useful for a flat-screen composition but impossible for a human shoulder girdle. Keep
+    // the socket on its authored reference position; the reach fallback below may release only the
+    // amount required for the fixed-length arm to reach the original hand target.
+    localPos[0] = restPos[0];
+    localPos[1] = restPos[1];
+    localPos[2] = restPos[2];
+
+    // A strict clavicle limit can move the upper-arm root far enough that a fixed-length arm can no
+    // longer reach the authored support grip. In that case relax only as much as required for the
+    // original hand target to become reachable again. The authored pose at t=1 is the guaranteed
+    // fallback, so this never needs to stretch the arm or move the weapon target.
+    if (targetHand && minArmReach >= 0.0f && maxArmReach > minArmReach) {
+        float hardLocal[4] = {localRot[0], localRot[1], localRot[2], localRot[3]};
+        auto setBlendAndMeasureReach = [&](float t) {
+            float blended[4];
+            NlerpQuatShortest(hardLocal, rawLocal, t, blended);
+            localRot[0] = blended[0]; localRot[1] = blended[1];
+            localRot[2] = blended[2]; localRot[3] = blended[3];
+            localPos[0] = restPos[0] + (rawPos[0] - restPos[0]) * t;
+            localPos[1] = restPos[1] + (rawPos[1] - restPos[1]) * t;
+            localPos[2] = restPos[2] + (rawPos[2] - restPos[2]) * t;
+            VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+            float toTarget[3] = {targetHand[0] - g_fkPos[upper][0],
+                                 targetHand[1] - g_fkPos[upper][1],
+                                 targetHand[2] - g_fkPos[upper][2]};
+            return VRIK_Norm3(toTarget);
+        };
+        auto reachable = [&](float distance) {
+            return distance >= minArmReach && distance <= maxArmReach;
+        };
+
+        const float hardDistance = setBlendAndMeasureReach(0.0f);
+        if (!reachable(hardDistance)) {
+            constexpr int kScanSteps = 32;
+            float low = 0.0f, high = 1.0f;
+            bool found = false;
+            for (int i = 1; i <= kScanSteps; ++i) {
+                const float t = static_cast<float>(i) / static_cast<float>(kScanSteps);
+                if (reachable(setBlendAndMeasureReach(t))) {
+                    low = static_cast<float>(i - 1) / static_cast<float>(kScanSteps);
+                    high = t;
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
+                for (int i = 0; i < 10; ++i) {
+                    const float mid = (low + high) * 0.5f;
+                    if (reachable(setBlendAndMeasureReach(mid))) high = mid;
+                    else low = mid;
+                }
+                setBlendAndMeasureReach(high);
+            } else {
+                setBlendAndMeasureReach(1.0f);
+            }
+        }
+    }
+    return MeasureShoulderLocal(isLeft, localRot, constrainedAngles);
+}
+
 }  // namespace
 
 bool WriteWeaponModelRotViaRightHand(uint8_t* boneBuf, int weaponIdx,
@@ -284,18 +524,25 @@ bool WriteWeaponModelRotViaRightHand(uint8_t* boneBuf, int weaponIdx,
 
 void PrepareAimArmTargets(uint8_t* boneBuf) {
     const bool headAim = IsHeadAimWeaponActive();
-    const bool nonVrik = g_pSharedHands && g_VRBind <= 0 && CyberpunkVR_NonVrikAdsStabilizer &&
-                         g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
+    const bool nonVrikWeapon = g_pSharedHands && g_VRBind <= 0 &&
+                               g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
+    const bool nonVrik = nonVrikWeapon && CyberpunkVR_NonVrikAdsStabilizer;
+    const bool shoulderTest = nonVrikWeapon && !headAim &&
+                              g_liveControls.xrWeaponShoulderConstraintTest != 0;
+    if (!shoulderTest) g_weaponShoulderConstraintDiag.valid = false;
     const bool aiming = g_isAiming;
     const bool alignmentEnabled = g_pSharedHands &&
                                   g_pSharedHands[vrshared::kAdsRightEyeAlignment] > 0.5f;
     const bool headEyeAlignment = headAim && aiming && alignmentEnabled;
     const bool nonVrikEyeAlignment = nonVrik && aiming && alignmentEnabled;
-    const bool active = headAim || nonVrikEyeAlignment;
+    const bool active = headAim || nonVrikEyeAlignment || shoulderTest;
 
     AimArmPose* pose = nullptr;
     for (auto& entry : g_aimArmPose) {
         entry.valid = false;
+        entry.solveRight = false;
+        entry.solveLeft = false;
+        entry.shoulderConstraint = false;
         if (entry.boneBuf == boneBuf) { pose = &entry; break; }
         if (!pose && entry.boneBuf == nullptr) pose = &entry;
     }
@@ -304,6 +551,7 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
 
     const int bone[6] = { g_VRRightUpperArmIdx, g_VRRightForeArmIdx, g_VRRightBoneIdx,
                           g_VRLeftUpperArmIdx,  g_VRLeftForeArmIdx,  g_VRLeftBoneIdx };
+    const int shoulderBone[2] = { g_VRRightClavicleIdx, g_VRLeftClavicleIdx };
     for (int i = 0; i < 6; ++i) if (bone[i] < 0 || bone[i] >= VRIK_FKCount()) return;
 
     // THE TICK, not a controller quaternion component. The hook visits this buffer several times per
@@ -312,11 +560,27 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
     const float tick = g_pSharedHands[vrshared::kEntitySeq];
     bool samePose = (pose->tick == tick);
     for (int i = 0; i < 6; ++i) samePose = samePose && pose->bone[i] == bone[i];
+    for (int side = 0; side < 2; ++side) {
+        samePose = samePose && pose->shoulderBone[side] == shoulderBone[side];
+    }
     if (samePose) {
         for (int i = 0; i < 6; ++i) {
             float* q = reinterpret_cast<float*>(boneBuf + bone[i] * 48 + VRIK_ROT_OFF);
             q[0] = pose->localRot[i][0]; q[1] = pose->localRot[i][1];
             q[2] = pose->localRot[i][2]; q[3] = pose->localRot[i][3];
+        }
+        for (int side = 0; side < 2; ++side) {
+            const int idx = shoulderBone[side];
+            if (idx < 0 || idx >= VRIK_FKCount()) continue;
+            float* p = reinterpret_cast<float*>(boneBuf + idx * 48 + VRIK_TRANS_OFF);
+            p[0] = pose->shoulderLocalPos[side][0];
+            p[1] = pose->shoulderLocalPos[side][1];
+            p[2] = pose->shoulderLocalPos[side][2];
+            float* q = reinterpret_cast<float*>(boneBuf + idx * 48 + VRIK_ROT_OFF);
+            q[0] = pose->shoulderLocalRot[side][0];
+            q[1] = pose->shoulderLocalRot[side][1];
+            q[2] = pose->shoulderLocalRot[side][2];
+            q[3] = pose->shoulderLocalRot[side][3];
         }
     } else {
         for (int i = 0; i < 6; ++i) {
@@ -326,6 +590,21 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
             pose->localRot[i][0] = q[0]; pose->localRot[i][1] = q[1];
             pose->localRot[i][2] = q[2]; pose->localRot[i][3] = q[3];
         }
+        for (int side = 0; side < 2; ++side) {
+            const int idx = shoulderBone[side];
+            pose->shoulderBone[side] = idx;
+            if (idx < 0 || idx >= VRIK_FKCount()) continue;
+            const float* p = reinterpret_cast<const float*>(boneBuf + idx * 48 + VRIK_TRANS_OFF);
+            pose->shoulderLocalPos[side][0] = p[0];
+            pose->shoulderLocalPos[side][1] = p[1];
+            pose->shoulderLocalPos[side][2] = p[2];
+            const float* q =
+                reinterpret_cast<const float*>(boneBuf + idx * 48 + VRIK_ROT_OFF);
+            pose->shoulderLocalRot[side][0] = q[0];
+            pose->shoulderLocalRot[side][1] = q[1];
+            pose->shoulderLocalRot[side][2] = q[2];
+            pose->shoulderLocalRot[side][3] = q[3];
+        }
         pose->tick = tick;
     }
 
@@ -333,6 +612,22 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
     for (int i = 0; i < 6; ++i) {
         for (int k = 0; k < 3; ++k) pose->rawPos[i][k] = g_fkPos[bone[i]][k];
         for (int k = 0; k < 4; ++k) pose->rawRot[i][k] = g_fkRot[bone[i]][k];
+    }
+
+    pose->shoulderConstraint = shoulderTest;
+    if (shoulderTest && !headAim && !nonVrikEyeAlignment) {
+        for (int side = 0; side < 2; ++side) {
+            const int base = side * 3;
+            for (int k = 0; k < 3; ++k) {
+                pose->targetHand[side][k] = pose->rawPos[base + 2][k];
+                pose->targetElbow[side][k] = pose->rawPos[base + 1][k];
+            }
+        }
+        for (int k = 0; k < 4; ++k) pose->targetLeftRot[k] = pose->rawRot[5][k];
+        pose->solveRight = true;
+        pose->solveLeft = true;
+        pose->valid = true;
+        return;
     }
 
     float fixedHeadCentre[3], fixedRightEye[3], viewModel[4], centreRot[4];
@@ -388,6 +683,8 @@ void PrepareAimArmTargets(uint8_t* boneBuf) {
     }
     VRIK_QuatMul(delta, pose->rawRot[5], pose->targetLeftRot);
     VRIK_QuatNorm(pose->targetLeftRot);
+    pose->solveRight = true;
+    pose->solveLeft = true;
     pose->valid = true;
 }
 
@@ -410,13 +707,108 @@ void SolvePreparedAimArms(uint8_t* boneBuf) {
     if (IsHeadAimWeaponActive()) {
         ApplyWristTargetAdsBallisticCorrection(boneBuf, pose->targetHand[0], rightHandRot);
     }
-    SolveAimArm(boneBuf, pose->bone[0], pose->bone[1], pose->bone[2],
-                &pose->rawPos[0], &pose->rawRot[0],
-                pose->targetHand[0], pose->targetElbow[0], rightHandRot);
-    VRIK_ComputeFK(boneBuf, VRIK_FKCount());
-    SolveAimArm(boneBuf, pose->bone[3], pose->bone[4], pose->bone[5],
-                &pose->rawPos[3], &pose->rawRot[3],
-                pose->targetHand[1], pose->targetElbow[1], pose->targetLeftRot);
+    if (pose->shoulderConstraint) {
+        g_weaponShoulderConstraintDiag.valid = false;
+        g_weaponShoulderConstraintDiag.right.valid = false;
+        g_weaponShoulderConstraintDiag.left.valid = false;
+    }
+
+    auto solveSide = [&](int side, const float* targetHandRot) {
+        const bool isLeft = side != 0;
+        const int base = side * 3;
+        const int clavicle = isLeft ? g_VRLeftClavicleIdx : g_VRRightClavicleIdx;
+        const float (*solvePos)[3] = &pose->rawPos[base];
+        const float (*solveRot)[4] = &pose->rawRot[base];
+        float constrainedPos[3][3] = {};
+        float constrainedRot[3][4] = {};
+        ShoulderAngles rawAngles{}, constrainedAngles{};
+        bool constraintApplied = false;
+        WeaponShoulderSideDiag* diag =
+            isLeft ? &g_weaponShoulderConstraintDiag.left : &g_weaponShoulderConstraintDiag.right;
+
+        if (pose->shoulderConstraint && clavicle >= 0 && clavicle < VRIK_FKCount()) {
+            VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+            for (int k = 0; k < 3; ++k) {
+                diag->targetHand[k] = pose->targetHand[side][k];
+                diag->rawUpperArm[k] = pose->rawPos[base][k];
+                diag->rawClavicle[k] = g_fkPos[clavicle][k];
+            }
+            const float* rest = isLeft ? g_VRLeftClavicleRestRot : g_VRRightClavicleRestRot;
+            for (int k = 0; k < 4; ++k) diag->referenceLocalRot[k] = rest[k];
+            float upperVec[3] = {pose->rawPos[base + 1][0] - pose->rawPos[base][0],
+                                 pose->rawPos[base + 1][1] - pose->rawPos[base][1],
+                                 pose->rawPos[base + 1][2] - pose->rawPos[base][2]};
+            float foreVec[3] = {pose->rawPos[base + 2][0] - pose->rawPos[base + 1][0],
+                                pose->rawPos[base + 2][1] - pose->rawPos[base + 1][1],
+                                pose->rawPos[base + 2][2] - pose->rawPos[base + 1][2]};
+            const float upperLen = VRIK_Norm3(upperVec);
+            const float foreLen = VRIK_Norm3(foreVec);
+            const float minReach = std::fabs(upperLen - foreLen) + 1e-4f;
+            const float maxReach = upperLen + foreLen - 1e-4f;
+            constraintApplied = ApplyShoulderConstraint(
+                boneBuf, isLeft, pose->targetHand[side], minReach, maxReach,
+                rawAngles, constrainedAngles);
+        }
+
+        if (constraintApplied) {
+            constexpr float kRadToDeg = 57.29577951308232f;
+            diag->rawClavicleDeltaDeg = rawAngles.total * kRadToDeg;
+            diag->constrainedClavicleDeltaDeg = constrainedAngles.total * kRadToDeg;
+            diag->rawProtractionDeg = rawAngles.protraction * kRadToDeg;
+            diag->constrainedProtractionDeg = constrainedAngles.protraction * kRadToDeg;
+            diag->rawElevationDeg = rawAngles.elevation * kRadToDeg;
+            diag->constrainedElevationDeg = constrainedAngles.elevation * kRadToDeg;
+            diag->rawTwistDeg = rawAngles.twist * kRadToDeg;
+            diag->constrainedTwistDeg = constrainedAngles.twist * kRadToDeg;
+
+            VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+            for (int i = 0; i < 3; ++i) {
+                for (int k = 0; k < 3; ++k) constrainedPos[i][k] = g_fkPos[pose->bone[base + i]][k];
+                for (int k = 0; k < 4; ++k) constrainedRot[i][k] = g_fkRot[pose->bone[base + i]][k];
+            }
+            for (int k = 0; k < 3; ++k) {
+                diag->constrainedUpperArm[k] = constrainedPos[0][k];
+                diag->constrainedClavicle[k] = g_fkPos[clavicle][k];
+            }
+            solvePos = constrainedPos;
+            solveRot = constrainedRot;
+        }
+
+        SolveAimArm(boneBuf, pose->bone[base], pose->bone[base + 1], pose->bone[base + 2],
+                    solvePos, solveRot, pose->targetHand[side], pose->targetElbow[side], targetHandRot);
+
+        if (constraintApplied) {
+            VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+            const float* finalHand = g_fkPos[pose->bone[base + 2]];
+            float errSq = 0.0f;
+            for (int k = 0; k < 3; ++k) {
+                diag->finalHand[k] = finalHand[k];
+                const float d = finalHand[k] - diag->targetHand[k];
+                errSq += d * d;
+            }
+            diag->handPositionError = std::sqrt(errSq);
+
+            float finalRot[4] = { g_fkRot[pose->bone[base + 2]][0], g_fkRot[pose->bone[base + 2]][1],
+                                  g_fkRot[pose->bone[base + 2]][2], g_fkRot[pose->bone[base + 2]][3] };
+            float targetRot[4] = {targetHandRot[0], targetHandRot[1], targetHandRot[2], targetHandRot[3]};
+            VRIK_QuatNorm(finalRot);
+            VRIK_QuatNorm(targetRot);
+            float dot = std::fabs(finalRot[0]*targetRot[0] + finalRot[1]*targetRot[1]
+                                + finalRot[2]*targetRot[2] + finalRot[3]*targetRot[3]);
+            if (dot > 1.0f) dot = 1.0f;
+            diag->handRotationErrorDeg = 2.0f * std::acos(dot) * 57.295779513f;
+            diag->valid = true;
+            g_weaponShoulderConstraintDiag.valid = true;
+        }
+    };
+
+    if (pose->solveRight) solveSide(0, rightHandRot);
+    if (pose->solveLeft) solveSide(1, pose->targetLeftRot);
+}
+
+bool GetWeaponShoulderConstraintDiag(WeaponShoulderConstraintDiag& out) {
+    out = g_weaponShoulderConstraintDiag;
+    return out.valid;
 }
 
 }  // namespace cvr::anim
