@@ -576,6 +576,18 @@ volatile int       g_VRRightUpperArmIdx = -1; // RightArm  (upper-arm start / sh
 volatile int       g_VRRightForeArmIdx  = -1; // RightForeArm (elbow)
 volatile int       g_VRLeftUpperArmIdx  = -1; // LeftArm
 volatile int       g_VRLeftForeArmIdx   = -1; // LeftForeArm
+volatile int       g_VRRightClavicleIdx = -1;
+volatile int       g_VRLeftClavicleIdx  = -1;
+volatile int       g_VRRightShoulderRestValid = 0;
+volatile int       g_VRLeftShoulderRestValid = 0;
+float              g_VRRightClavicleRestPos[3] = {0,0,0};
+float              g_VRRightClavicleRestRot[4] = {0,0,0,1};
+float              g_VRRightUpperArmRestPos[3] = {0,0,0};
+float              g_VRRightShoulderParentRestModelRot[4] = {0,0,0,1};
+float              g_VRLeftClavicleRestPos[3] = {0,0,0};
+float              g_VRLeftClavicleRestRot[4] = {0,0,0,1};
+float              g_VRLeftUpperArmRestPos[3] = {0,0,0};
+float              g_VRLeftShoulderParentRestModelRot[4] = {0,0,0,1};
 // Forearm twist chains (r/l_forearmTwist01..03_JNT): wrist pronation is distributed along
 // these (fractions elbow->wrist) instead of twisting only the hand bone / moving the elbow.
 int                g_VRForeTwistR[3]    = {-1,-1,-1};

@@ -45,7 +45,8 @@
 //  [58]       weapon-aim enable          openxr -> dxgi
 //  [59]       weapon-aim mode            openxr -> dxgi
 //  [60..66]   weapon/shot bridge         dxgi
-//  [67..69]   -- free (graveyard)
+//  [67..68]   reserved live timestamps (see graveyard note below)
+//  [69]       active weapon is melee     Weapon CET -> plugin anim/head-aim gates
 //  [70..76]   shoulder calibration       openxr -> plugin
 //  [77..80]   arm length / eye height    openxr -> plugin
 //  [81]       menu / world-map flag      plugin (redscript bridge) -> dxgi
@@ -105,11 +106,7 @@
 // ---------------------------------------------------------------------------
 // GRAVEYARD (dead -- reclaim before growing past [150])
 // ---------------------------------------------------------------------------
-//  [69]        never used (it was [67..69] once: a brief LT-inject melee-guard experiment, removed
-//              the same session — the VR guard went STAT-driven, IsBlocking/IsDeflecting set
-//              directly by the CET weapon mod, no PSM Block state, no debuffs — so the input
-//              channel died unused).
-//              [67] AND [68] ARE NOT FREE and this line used to say they were. [67] is the
+//  [67] AND [68] ARE NOT FREE and this line used to say they were. [67] is the
 //              hand-sample stamp written inside the hands seqlock, [68] a QPC millisecond
 //              timestamp in the view packet. Both are large numbers. The smoking mod's CET bridge
 //              read them as "left trigger" and "left grip" and got a lighter that ignited by
@@ -149,6 +146,7 @@ constexpr int kCleanPairSeq = 131;
 constexpr int kHeading      = 141;
 constexpr int kHeadingValid = 142;
 constexpr int kWeaponFlag   = 144;
+constexpr int kMeleeWeaponFlag = 69;
 constexpr int kSnapDelta    = 146;
 constexpr int kSnapCounter  = 147;
 constexpr int kSnapPreHeading = 148;

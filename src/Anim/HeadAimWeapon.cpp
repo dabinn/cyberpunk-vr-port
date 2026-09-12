@@ -49,7 +49,8 @@ bool IsHeadAimWeaponActive() {
     return g_pSharedHands &&
            g_pSharedHands[58] <= 0.5f &&                       // weapon-aim toggle OFF = head aim
            g_pSharedHands[vrshared::kWeaponFlag] > 0.5f &&     // a weapon is out
-           g_pSharedHands[27] > 0.5f;                          // and its muzzle is published
+           g_pSharedHands[27] > 0.5f &&                        // and its muzzle is published
+           g_pSharedHands[vrshared::kMeleeWeaponFlag] <= 0.5f; // melee also has a muzzle slot
 }
 
 void ApplyHeadAimWeaponOrientation(uint8_t* boneBuf) {

@@ -327,6 +327,18 @@ extern volatile int       g_VRRightUpperArmIdx;    // RightArm  (shoulder joint 
 extern volatile int       g_VRRightForeArmIdx;     // RightForeArm (elbow)
 extern volatile int       g_VRLeftUpperArmIdx;     // LeftArm
 extern volatile int       g_VRLeftForeArmIdx;      // LeftForeArm
+extern volatile int       g_VRRightClavicleIdx;    // parent of RightArm
+extern volatile int       g_VRLeftClavicleIdx;     // parent of LeftArm
+extern volatile int       g_VRRightShoulderRestValid;
+extern volatile int       g_VRLeftShoulderRestValid;
+extern float              g_VRRightClavicleRestPos[3];
+extern float              g_VRRightClavicleRestRot[4];
+extern float              g_VRRightUpperArmRestPos[3];
+extern float              g_VRRightShoulderParentRestModelRot[4];
+extern float              g_VRLeftClavicleRestPos[3];
+extern float              g_VRLeftClavicleRestRot[4];
+extern float              g_VRLeftUpperArmRestPos[3];
+extern float              g_VRLeftShoulderParentRestModelRot[4];
 extern int                g_VRForeTwistR[3];       // r_forearmTwist01..03_JNT
 extern int                g_VRForeTwistL[3];       // l_forearmTwist01..03_JNT
 extern int                g_VRSpineIdx[8];         // Spine* torso chain

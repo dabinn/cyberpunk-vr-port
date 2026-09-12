@@ -125,7 +125,10 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
     }
     const bool nonVrikAdsWork = g_pSharedHands && CyberpunkVR_NonVrikAdsStabilizer &&
         g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
-    if (g_VRBind <= 0 && !headAimWork && !nonVrikAdsWork &&
+    const bool shoulderTestWork = g_pSharedHands && g_VRBind <= 0 &&
+        g_liveControls.xrWeaponShoulderConstraintTest != 0 &&
+        g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
+    if (g_VRBind <= 0 && !headAimWork && !nonVrikAdsWork && !shoulderTestWork &&
         g_VRDiagCapture == 0 && g_WeaponRigActive == 0 &&
         g_PoseCensusOn == 0 && g_VRRecordFK == 0 && CyberpunkVR_TwoHandCaptureReq == 0 &&
         g_VRSmokeFingerActive == 0 && g_VRSmokeFingerCapture == 0 &&

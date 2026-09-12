@@ -399,6 +399,72 @@ int VRIK_DoArmPlayer() {
             for (uint32_t i = 0; i < copyN && i < 800; ++i) { g_VRBoneParent[i] = metaRig->parentIndeces[i]; ++written; }
             g_VRBoneCount = written;
 
+            // Stable T-pose/reference anatomy for the non-VRIK shoulder A/B. The constraint must be
+            // measured relative to the authored shoulder rotation, never relative to local identity:
+            // a rig is free to encode its neutral clavicle with a non-identity local quaternion.
+            // Capture the parent reference model rotation as well so the live-vs-reference delta can
+            // be expressed in the T-pose model frame (+Y forward, +Z up) without depending on the
+            // current Spine3 animation.
+            g_VRRightShoulderRestValid = 0;
+            g_VRLeftShoulderRestValid = 0;
+            g_VRRightClavicleIdx = -1;
+            g_VRLeftClavicleIdx = -1;
+            if (metaRig->boneTransforms.Size() == boneCount) {
+                auto referenceModelRot = [&](int idx, float out[4]) -> bool {
+                    if (idx < 0 || idx >= written) return false;
+                    int chain[128];
+                    int n = 0;
+                    for (int b = idx; b >= 0 && b < written && n < 128; b = g_VRBoneParent[b]) {
+                        chain[n++] = b;
+                        const int p = g_VRBoneParent[b];
+                        if (p < 0 || p == b) break;
+                    }
+                    float rot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+                    for (int ci = n - 1; ci >= 0; --ci) {
+                        const auto& t = metaRig->boneTransforms[chain[ci]];
+                        const float local[4] = {t.Rotation.i, t.Rotation.j, t.Rotation.k, t.Rotation.r};
+                        float next[4];
+                        VRIK_QuatMul(rot, local, next);
+                        for (int k = 0; k < 4; ++k) rot[k] = next[k];
+                        VRIK_QuatNorm(rot);
+                    }
+                    for (int k = 0; k < 4; ++k) out[k] = rot[k];
+                    return true;
+                };
+                auto captureShoulder = [&](int upperIdx, volatile int& clavicleIdx,
+                                           volatile int& valid, float* restPos, float* restRot,
+                                           float* upperRestPos, float* parentRestModelRot) {
+                    if (upperIdx < 0 || upperIdx >= written) return;
+                    const int clavicle = g_VRBoneParent[upperIdx];
+                    if (clavicle < 0 || clavicle >= written) return;
+                    const int parent = g_VRBoneParent[clavicle];
+                    if (parent < 0 || parent >= written ||
+                        !referenceModelRot(parent, parentRestModelRot)) return;
+                    clavicleIdx = clavicle;
+                    const auto& c = metaRig->boneTransforms[clavicle];
+                    const auto& u = metaRig->boneTransforms[upperIdx];
+                    restPos[0] = c.Translation.X;
+                    restPos[1] = c.Translation.Y;
+                    restPos[2] = c.Translation.Z;
+                    restRot[0] = c.Rotation.i;
+                    restRot[1] = c.Rotation.j;
+                    restRot[2] = c.Rotation.k;
+                    restRot[3] = c.Rotation.r;
+                    upperRestPos[0] = u.Translation.X;
+                    upperRestPos[1] = u.Translation.Y;
+                    upperRestPos[2] = u.Translation.Z;
+                    valid = 1;
+                };
+                captureShoulder(g_VRRightUpperArmIdx, g_VRRightClavicleIdx,
+                                g_VRRightShoulderRestValid, g_VRRightClavicleRestPos,
+                                g_VRRightClavicleRestRot,
+                                g_VRRightUpperArmRestPos, g_VRRightShoulderParentRestModelRot);
+                captureShoulder(g_VRLeftUpperArmIdx, g_VRLeftClavicleIdx,
+                                g_VRLeftShoulderRestValid, g_VRLeftClavicleRestPos,
+                                g_VRLeftClavicleRestRot,
+                                g_VRLeftUpperArmRestPos, g_VRLeftShoulderParentRestModelRot);
+            }
+
             // PERF (audit, session 3): per-solve FK used to walk the FULL rig (up to
             // 256 bones) 3+ times per fresh solve, while the solver only ever reads
             // model-space transforms up to the highest resolved bone index (parents
