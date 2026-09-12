@@ -128,9 +128,15 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
     const bool shoulderTestWork = g_pSharedHands && g_VRBind <= 0 &&
         g_liveControls.xrWeaponShoulderConstraintTest != 0 &&
         g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
+    auto& xrManager = OpenXRManager::Get();
+    const bool postureWork = xrManager.HasVrikPostureCalibrationRequest() ||
+        xrManager.HasVrikSeatedDebugCalibrationRequest() ||
+        xrManager.GetVrikCalibratedEyeHeight() > 0.0f;
     if (g_VRBind <= 0 && !headAimWork && !nonVrikAdsWork && !shoulderTestWork &&
         g_VRDiagCapture == 0 && g_WeaponRigActive == 0 &&
-        g_PoseCensusOn == 0 && g_VRRecordFK == 0 && CyberpunkVR_TwoHandCaptureReq == 0 &&
+        g_PoseCensusOn == 0 && g_VRRecordFK == 0 && g_VRBodyScaleRestoreMask == 0 &&
+        !postureWork &&
+        CyberpunkVR_TwoHandCaptureReq == 0 &&
         g_VRSmokeFingerActive == 0 && g_VRSmokeFingerCapture == 0 &&
         g_VRSmokeFingerActiveL == 0 && g_VRSmokeFingerCaptureL == 0) return result;
 
@@ -172,6 +178,15 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
                 ++g_AnimPoseMatchCalls;
                 g_AnimPoseLastBoneBuf = reinterpret_cast<uintptr_t>(boneBuf);
 
+                if (g_VRBind <= 0 && g_VRBodyScaleRestoreMask != 0) {
+                    const int restoreBit = (trackBuf == g_PlayerTrackBufA) ? 1 : 2;
+                    if ((g_VRBodyScaleRestoreMask & restoreBit) != 0) {
+                        VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+                        VRIK_ApplyUniformBodyScale(boneBuf, trackBuf, 1.0f, -1);
+                        g_VRBodyScaleRestoreMask &= ~restoreBit;
+                    }
+                }
+
 // The recorder publishes the engine's ANIMATED bones (VRIK off) so reload poses can be
 // authored. A tool, in its own file -- see src/Anim/FkRecorder.cpp.
 if (g_VRRecordFK) {
@@ -184,6 +199,47 @@ if (g_VRRecordFK) {
                 // player apply (this runs on the animation thread; dxgi writes on the
                 // present thread).
                 RefreshHandsSnapshot();
+
+                // Posture calibration belongs to the avatar, not to controller hand tracking.
+                // Standing consumes the raw runtime HMD height captured by the XR thread and maps it
+                // directly onto the authored rig eye height. Seated records only the current game
+                // camera height for diagnostics and never changes the saved standing scale.
+                if (xrManager.HasVrikPostureCalibrationRequest()) {
+                    const float authoredEyeHeight = xrManager.GetVrikAuthoredEyeHeight();
+                    const float physicalEyeHeight = xrManager.GetVrikPosturePendingEyeHeight();
+                    if (authoredEyeHeight > 0.8f && physicalEyeHeight > 0.25f) {
+                        xrManager.SetVrikCalibratedEyeHeight(physicalEyeHeight);
+                        xrManager.SetVrikBodyScale(physicalEyeHeight / authoredEyeHeight);
+                        xrManager.ConsumeVrikPostureCalibrationRequest();
+                        xrManager.SaveCalibrationToFile();
+                    }
+                }
+                if (xrManager.HasVrikSeatedDebugCalibrationRequest()) {
+                    VRIK_LatchViewPacket();
+                    float postureCamPos[3] = {};
+                    float postureCamRot[4] = {};
+                    if (VRIK_ComputeCamModel(postureCamPos, postureCamRot)) {
+                        VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+                        const float cameraHeight = postureCamPos[2] - g_fkPos[0][2];
+                        if (cameraHeight > 0.0f && cameraHeight < 3.0f) {
+                            xrManager.SetVrikSeatedDebugEyeHeight(cameraHeight);
+                            xrManager.ConsumeVrikSeatedDebugCalibrationRequest();
+                        }
+                    }
+                }
+
+                // Once Standing has a calibration, the uniform body scale remains active even with
+                // hand tracking off. Tracking ON/OFF may reapply the saved result, but never samples
+                // the HMD or recomputes height.
+                if (g_VRBind <= 0 && xrManager.GetVrikCalibratedEyeHeight() > 0.0f) {
+                    const bool postureVehicle = SharedPose(31) > 0.5f;
+                    const float postureScale =
+                        (!postureVehicle && g_liveControls.xrVrikPlayStyle == 0)
+                            ? xrManager.GetVrikBodyScale() : 1.0f;
+                    VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+                    VRIK_ApplyUniformBodyScale(boneBuf, trackBuf, postureScale, -1);
+                    VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+                }
 
                 // CUTSCENE FULL-SUSPEND (PR #40, fr05t1k). During scripted scenes the engine plays
                 // a fully authored body+arm animation; letting VRIK keep solving fights it and the
@@ -541,8 +597,10 @@ if (g_VRRecordFK) {
                             const int bi = g_solveCacheIdx[ci];
                             float* t = reinterpret_cast<float*>(boneBuf + bi * 48 + VRIK_TRANS_OFF);
                             float* q = reinterpret_cast<float*>(boneBuf + bi * 48 + VRIK_ROT_OFF);
+                            float* s = reinterpret_cast<float*>(boneBuf + bi * 48 + 32);
                             t[0]=g_solveCacheVal[ci][0]; t[1]=g_solveCacheVal[ci][1]; t[2]=g_solveCacheVal[ci][2];
                             q[0]=g_solveCacheVal[ci][3]; q[1]=g_solveCacheVal[ci][4]; q[2]=g_solveCacheVal[ci][5]; q[3]=g_solveCacheVal[ci][6];
+                            s[0]=g_solveCacheVal[ci][7]; s[1]=g_solveCacheVal[ci][8]; s[2]=g_solveCacheVal[ci][9];
                         }
                         ++g_VRIKReplayTotal;
                     } else {
@@ -565,6 +623,7 @@ if (g_VRRecordFK) {
                     // PlaceBodyUnderHMD with hips/spine/legs) fights that and breaks the
                     // character/camera position. dxgi publishes the flag in [31].
                     const bool vrikInVehicle = (SharedPose(31) > 0.5f);
+                    const bool vrikSeated = g_liveControls.xrVrikPlayStyle != 0;
                     VRIK_ComputeFK(boneBuf, VRIK_FKCount());
                     // WHEEL GRAB. This FK is the pure ANIMATED pose -- nothing of ours has been
                     // written into the buffer yet this solve -- so g_fkPos[hand] is literally the hand
@@ -591,35 +650,27 @@ if (g_VRRecordFK) {
                     }
                     const bool wheelOffR = cvr::anim::WheelHandsOff(0);
                     const bool wheelOffL = cvr::anim::WheelHandsOff(1);
-                    if (!vrikInVehicle) {
+                    // Posture owns body scale. Seated and vehicles always restore the authored
+                    // scale; Standing applies one uniform XYZ scale to the whole hierarchy.
+                    VRIK_ApplyUniformBodyScale(
+                        boneBuf, trackBuf,
+                        (!vrikInVehicle && !vrikSeated) ? OpenXRManager::Get().GetVrikBodyScale() : 1.0f,
+                        -1);
+                    VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+                    if (!vrikInVehicle && !vrikSeated) {
                         VRIK_DampenTorsoWeaponPose(boneBuf);
                         VRIK_PinGirdleTranslations(boneBuf);
                         VRIK_ComputeFK(boneBuf, VRIK_FKCount());
                     }
-                    // IK-style arm-length calibration: reset upper-arm/forearm segment lengths
-                    // from cached rest local translations, then scale them to the T-pose measured
-                    // user arm. Do not derive length from the current weapon/stance FK pose.
+                    // Posture IK keeps authored limb proportions. Restore any persistent translation
+                    // writes from the legacy arm-length/protraction path before solving rotations.
                     {
-                        // AN ARM HANDED TO THE ANIMATION KEEPS THE RIG'S OWN LENGTHS: scaled to
-                        // the player's arm instead, the animation's rotations put the hand BESIDE the
-                        // wheel rather than on it. Put the rest translations back -- neither this
-                        // scale nor the shoulder protraction is undone by the engine.
-                        if (wheelOffR) {
-                            VRIK_RestoreArmRestTrans(boneBuf, trackBuf, g_VRBoneCount,
-                                                     g_VRRightUpperArmIdx, g_VRRightForeArmIdx,
-                                                     g_VRRightBoneIdx, /*isLeft*/false);
-                        } else {
-                            VRIK_ScaleArmBonesFromRest(boneBuf, trackBuf, g_VRBoneCount,
-                                                       g_VRRightForeArmIdx, g_VRRightBoneIdx, g_VRUserArmLenR);
-                        }
-                        if (wheelOffL) {
-                            VRIK_RestoreArmRestTrans(boneBuf, trackBuf, g_VRBoneCount,
-                                                     g_VRLeftUpperArmIdx, g_VRLeftForeArmIdx,
-                                                     g_VRLeftBoneIdx, /*isLeft*/true);
-                        } else {
-                            VRIK_ScaleArmBonesFromRest(boneBuf, trackBuf, g_VRBoneCount,
-                                                       g_VRLeftForeArmIdx, g_VRLeftBoneIdx, g_VRUserArmLenL);
-                        }
+                        VRIK_RestoreArmRestTrans(boneBuf, trackBuf, g_VRBoneCount,
+                                                 g_VRRightUpperArmIdx, g_VRRightForeArmIdx,
+                                                 g_VRRightBoneIdx, /*isLeft*/false);
+                        VRIK_RestoreArmRestTrans(boneBuf, trackBuf, g_VRBoneCount,
+                                                 g_VRLeftUpperArmIdx, g_VRLeftForeArmIdx,
+                                                 g_VRLeftBoneIdx, /*isLeft*/true);
                         VRIK_ComputeFK(boneBuf, VRIK_FKCount());
                     }
                     // Right-hand CONTROLLER position in model space, captured from the arm-IK
@@ -811,7 +862,7 @@ if (g_VRRecordFK) {
                         // it is clean per tick and can be consumed raw: body and view move in the
                         // SAME frame, and even a real teleport is invisible because the view cuts
                         // simultaneously.
-                        if (camModelValid && g_VRBodyUnderHMD && !vrikInVehicle) {
+                        if (camModelValid && g_VRBodyUnderHMD && !vrikInVehicle && !vrikSeated) {
                             // CAMERA-MOUNT REMOVAL (user's idea): the HMD sits ~0.2 m FORWARD of the
                             // head bone because CP2077 mounts the FPP camera ahead of the head -- that
                             // is NOT the player leaning. So VRIK_PlaceBodyUnderHMD stands the body
@@ -1580,7 +1631,8 @@ if (g_VRRecordFK) {
                                               g_VRRightBoneIdx, target, handRot,
                                               bodyRight, bodyUp, bodyFwd,
                                               g_VRElbowPoleR * 0.01745329252f, g_VRElbowSwingR,
-                                              /*isLeft*/false, /*storeDbg*/true);
+                                              /*isLeft*/false, /*storeDbg*/true,
+                                              /*preserveBoneLengths*/true);
                             }
                             // Solved RIGHT wrist for the VR basketball (see the left-hand twin).
                             g_VRPalmModelR[0] = target[0];
@@ -1952,7 +2004,8 @@ if (g_VRRecordFK) {
                                               g_VRLeftBoneIdx, target, handRot,
                                               bodyRight, bodyUp, bodyFwd,
                                               g_VRElbowPoleL * 0.01745329252f, g_VRElbowSwingL,
-                                              /*isLeft*/true, /*storeDbg*/true);
+                                              /*isLeft*/true, /*storeDbg*/true,
+                                              /*preserveBoneLengths*/true);
                             }
                             // STEERING. Here and not inside WheelUpdate: this is the first point
                             // where BOTH controller targets are this solve's, and where the body
@@ -2103,9 +2156,11 @@ if (g_VRRecordFK) {
                             for (int k = 0; k < g_solveCacheN; ++k) if (g_solveCacheIdx[k] == bi) return;
                             const float* t = reinterpret_cast<const float*>(boneBuf + bi * 48 + VRIK_TRANS_OFF);
                             const float* q = reinterpret_cast<const float*>(boneBuf + bi * 48 + VRIK_ROT_OFF);
+                            const float* s = reinterpret_cast<const float*>(boneBuf + bi * 48 + 32);
                             g_solveCacheIdx[g_solveCacheN] = bi;
                             g_solveCacheVal[g_solveCacheN][0]=t[0]; g_solveCacheVal[g_solveCacheN][1]=t[1]; g_solveCacheVal[g_solveCacheN][2]=t[2];
                             g_solveCacheVal[g_solveCacheN][3]=q[0]; g_solveCacheVal[g_solveCacheN][4]=q[1]; g_solveCacheVal[g_solveCacheN][5]=q[2]; g_solveCacheVal[g_solveCacheN][6]=q[3];
+                            g_solveCacheVal[g_solveCacheN][7]=s[0]; g_solveCacheVal[g_solveCacheN][8]=s[1]; g_solveCacheVal[g_solveCacheN][9]=s[2];
                             ++g_solveCacheN;
                         };
                         // ROOT + ANCESTORS (audit fix, user-approved). The engine

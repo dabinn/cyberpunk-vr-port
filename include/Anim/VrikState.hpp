@@ -123,6 +123,7 @@ extern volatile uint64_t  g_AnimPoseMatchCalls;
 extern volatile uintptr_t g_AnimPoseLastBoneBuf; // last matched player bone buffer (debug)
 extern float* g_pSharedHands;                    // shared-memory VR hand data (16 floats/hand layout)
 extern volatile int       g_VRBind;              // 0 off, 1=right pos, 2=right pos+rot, 3=both pos(+rot)
+extern volatile int       g_VRBodyScaleRestoreMask; // player pose buffers that still need authored root scale restored after VRIK turns off
 extern volatile float     g_VRBindScale;         // position scale (VR units -> model units)
 extern volatile float     g_VRBindOffX;
 extern volatile float     g_VRBindOffY;

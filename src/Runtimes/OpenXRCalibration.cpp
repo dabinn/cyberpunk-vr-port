@@ -298,7 +298,7 @@ bool OpenXRManager::SaveCalibrationToFile() {
         return false;
     }
     fprintf(f, "# CyberpunkVRPort VRIK auto-calibration\n");
-    fprintf(f, "version=3\n");
+    fprintf(f, "version=5\n");
     fprintf(f, "scaleR=%.4f\nscaleL=%.4f\n",
             m_calib[0].load(std::memory_order_relaxed),
             m_calib[1].load(std::memory_order_relaxed));
@@ -338,6 +338,8 @@ bool OpenXRManager::SaveCalibrationToFile() {
             m_userArmLenR.load(std::memory_order_relaxed),
             m_userArmLenL.load(std::memory_order_relaxed),
             m_userEyeHeight.load(std::memory_order_relaxed));
+    fprintf(f, "vrikBodyScale=%.4f\n", m_vrikBodyScale.load(std::memory_order_relaxed));
+    fprintf(f, "vrikEyeHeight=%.4f\n", m_vrikCalibratedEyeHeight.load(std::memory_order_relaxed));
     fclose(f);
     Log("Calibration saved -> %s\n", path);
     return true;
@@ -398,6 +400,10 @@ bool OpenXRManager::LoadCalibrationFromFile() {
             m_userArmLenL.store(val, std::memory_order_relaxed);
         if (strcmp(key, "userEyeHeight") == 0 && val > 0.0f && val <= 2.2f)
             m_userEyeHeight.store(val, std::memory_order_relaxed);
+        if (strcmp(key, "vrikBodyScale") == 0 && val >= 0.75f && val <= 1.35f)
+            m_vrikBodyScale.store(val, std::memory_order_relaxed);
+        if (strcmp(key, "vrikEyeHeight") == 0 && val > 0.0f && val < 2.5f)
+            m_vrikCalibratedEyeHeight.store(val, std::memory_order_relaxed);
         #undef M
         #undef E
         #undef C

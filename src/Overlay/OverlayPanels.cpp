@@ -136,6 +136,43 @@ bool DrawFovControl(LiveControlsUiState& state) {
 // shared memory (OpenXRManager::SetVRHandCalib). Defaults mirror the plugin's
 // baked calibration so the rig behaves identically before anything is touched.
 void DrawVRHandsControls() {
+    {
+        LiveControlsUiState st{};
+        GetLiveControlsUiState(&st);
+        ImGui::TextUnformatted("Play style");
+        ImGui::SameLine();
+        int style = st.xrVrikPlayStyle != 0 ? 1 : 0;
+        if (ImGui::RadioButton("Standing", style == 0)) {
+            st.xrVrikPlayStyle = 0;
+            SetLiveControlsUiState(&st, 1);
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Seated", style == 1)) {
+            st.xrVrikPlayStyle = 1;
+            SetLiveControlsUiState(&st, 1);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Calibrate")) {
+            if (style == 0) {
+                OpenXRManager::Get().RequestVrikPostureCalibration();
+            } else {
+                OpenXRManager::Get().RequestVrikSeatedDebugCalibration();
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Standing: samples the runtime HMD eye height and scales the whole avatar uniformly (X/Y/Z).\n"
+                "Seated: keeps the game's authored body proportions and records camera height for diagnostics.\n"
+                "Arm and leg segment lengths are never stretched independently by this mode.");
+        }
+        const float eyeHeight = style == 0
+            ? OpenXRManager::Get().GetVrikCalibratedEyeHeight()
+            : OpenXRManager::Get().GetVrikSeatedDebugEyeHeight();
+        ImGui::SameLine();
+        if (eyeHeight > 0.0f) ImGui::Text("Eye height: %.0f cm", eyeHeight * 100.0f);
+        else                  ImGui::TextUnformatted("Eye height: --");
+    }
+
     // Tracking toggle (writes shared-mem slot [32]). Pose-hook/player-rig bootstrap is
     // independent; this setting only selects whether controller-driven full-arm IK writes.
     // Must be 4 = full-arm IK. Mode 2 is the legacy direct bone-write fallback -> stretched

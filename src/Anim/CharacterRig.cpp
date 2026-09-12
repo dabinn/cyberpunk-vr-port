@@ -146,6 +146,7 @@ void VRIK_WriteHand(uint8_t* boneBuf, int bIdx,
 // Model-space FK scratch (recomputed each matched frame). Sized generously.
 float g_fkPos[VRIK_MAX_BONES][3];
 float g_fkRot[VRIK_MAX_BONES][4];
+float g_fkScale[VRIK_MAX_BONES][3];
 
 // FK SNAPSHOT -- the measurement channel for capsule geometry.
 //
@@ -177,23 +178,76 @@ void VRIK_ComputeFK(uint8_t* boneBuf, int count) {
     for (int i = 0; i < count; ++i) {
         const float* lt = reinterpret_cast<float*>(boneBuf + i * 48 + VRIK_TRANS_OFF);
         const float* lr = reinterpret_cast<float*>(boneBuf + i * 48 + VRIK_ROT_OFF);
+        const float* ls = reinterpret_cast<float*>(boneBuf + i * 48 + 32);
         float lpos[3] = { lt[0], lt[1], lt[2] };
         float lrot[4] = { lr[0], lr[1], lr[2], lr[3] };
+        float lscale[3] = { ls[0], ls[1], ls[2] };
+        for (int k = 0; k < 3; ++k) {
+            if (!std::isfinite(lscale[k]) || std::fabs(lscale[k]) < 1e-5f) lscale[k] = 1.0f;
+        }
         int p = g_VRBoneParent[i];
         if (p >= 0 && p < i) {
             VRIK_QuatMul(g_fkRot[p], lrot, g_fkRot[i]);
             VRIK_QuatNorm(g_fkRot[i]);
+            float scaledLocal[3] = {
+                lpos[0] * g_fkScale[p][0],
+                lpos[1] * g_fkScale[p][1],
+                lpos[2] * g_fkScale[p][2],
+            };
             float rp[3];
-            VRIK_QuatRotateVec(g_fkRot[p], lpos, rp);
+            VRIK_QuatRotateVec(g_fkRot[p], scaledLocal, rp);
             g_fkPos[i][0] = g_fkPos[p][0] + rp[0];
             g_fkPos[i][1] = g_fkPos[p][1] + rp[1];
             g_fkPos[i][2] = g_fkPos[p][2] + rp[2];
+            g_fkScale[i][0] = g_fkScale[p][0] * lscale[0];
+            g_fkScale[i][1] = g_fkScale[p][1] * lscale[1];
+            g_fkScale[i][2] = g_fkScale[p][2] * lscale[2];
         } else {
             g_fkRot[i][0]=lrot[0]; g_fkRot[i][1]=lrot[1]; g_fkRot[i][2]=lrot[2]; g_fkRot[i][3]=lrot[3];
             VRIK_QuatNorm(g_fkRot[i]);
             g_fkPos[i][0]=lpos[0]; g_fkPos[i][1]=lpos[1]; g_fkPos[i][2]=lpos[2];
+            g_fkScale[i][0]=lscale[0]; g_fkScale[i][1]=lscale[1]; g_fkScale[i][2]=lscale[2];
         }
     }
+}
+
+void VRIK_ApplyUniformBodyScale(uint8_t* boneBuf, uintptr_t trackBuf, float scale, int anchorIdx) {
+    if (!boneBuf) return;
+    if (scale < 0.75f) scale = 0.75f;
+    if (scale > 1.35f) scale = 1.35f;
+    static uintptr_t s_trackBuf[2] = {};
+    static float s_rootScale[2][3] = {{1.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 1.0f}};
+    const int slot = (trackBuf == g_PlayerTrackBufB && trackBuf != g_PlayerTrackBufA) ? 1 : 0;
+    if (s_trackBuf[slot] != trackBuf) {
+        const float* current = reinterpret_cast<const float*>(boneBuf + 32);
+        for (int k = 0; k < 3; ++k) {
+            s_rootScale[slot][k] = (std::isfinite(current[k]) && std::fabs(current[k]) > 1e-5f)
+                                       ? current[k] : 1.0f;
+        }
+        s_trackBuf[slot] = trackBuf;
+    }
+    float* rootScale = reinterpret_cast<float*>(boneBuf + 32);
+    float currentScale = 1.0f;
+    if (std::fabs(s_rootScale[slot][0]) > 1e-5f && std::isfinite(rootScale[0])) {
+        currentScale = rootScale[0] / s_rootScale[slot][0];
+        if (!std::isfinite(currentScale) || currentScale < 0.1f) currentScale = 1.0f;
+    }
+    if (anchorIdx >= 0 && anchorIdx < VRIK_MAX_BONES && currentScale > 1e-5f) {
+        // Scale the avatar ABOUT the tracked head instead of about the rig root.  Root-centred
+        // scaling also moves the camera/head upward, cancelling the extra leg reach we wanted.
+        // Derive the live multiplier from the buffer so this also reverses cleanly when switching
+        // back to Seated or when the engine preserved our previous root transform.
+        const float ratio = scale / currentScale;
+        float* rootPos = reinterpret_cast<float*>(boneBuf + VRIK_TRANS_OFF);
+        const float rootModel[3] = { g_fkPos[0][0], g_fkPos[0][1], g_fkPos[0][2] };
+        const float anchor[3] = { g_fkPos[anchorIdx][0], g_fkPos[anchorIdx][1], g_fkPos[anchorIdx][2] };
+        rootPos[0] = anchor[0] + (rootModel[0] - anchor[0]) * ratio;
+        rootPos[1] = anchor[1] + (rootModel[1] - anchor[1]) * ratio;
+        rootPos[2] = anchor[2] + (rootModel[2] - anchor[2]) * ratio;
+    }
+    rootScale[0] = s_rootScale[slot][0] * scale;
+    rootScale[1] = s_rootScale[slot][1] * scale;
+    rootScale[2] = s_rootScale[slot][2] * scale;
 }
 
 // Writes a model-space rotation back into a bone as a LOCAL rotation, given the
@@ -217,6 +271,13 @@ void VRIK_WriteLocalPos(uint8_t* boneBuf, int idx,
     };
     float pInv[4]; VRIK_QuatConj(parentModelRot, pInv);
     float local[3]; VRIK_QuatRotateVec(pInv, delta, local);
+    const int p = (idx >= 0 && idx < VRIK_MAX_BONES) ? g_VRBoneParent[idx] : -1;
+    if (p >= 0 && p < VRIK_MAX_BONES) {
+        for (int k = 0; k < 3; ++k) {
+            const float s = g_fkScale[p][k];
+            if (std::fabs(s) > 1e-5f) local[k] /= s;
+        }
+    }
     float* t = reinterpret_cast<float*>(boneBuf + idx * 48 + VRIK_TRANS_OFF);
     t[0]=local[0]; t[1]=local[1]; t[2]=local[2];
 }
@@ -421,7 +482,7 @@ void VRIK_SolveArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
                                  const float* targetModel, const float* handModelRot,
                                  const float* bodyRight, const float* bodyUp, const float* bodyFwd,
                                  float poleAngleRad, float swingGain, bool isLeft,
-                                 bool storeDbg) {
+                                 bool storeDbg, bool preserveBoneLengths) {
     if (upperIdx < 0 || foreIdx < 0 || handIdx < 0) return;
     if (upperIdx >= VRIK_MAX_BONES || foreIdx >= VRIK_MAX_BONES || handIdx >= VRIK_MAX_BONES) return;
 
@@ -446,9 +507,13 @@ void VRIK_SolveArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
     if (s_restUpLen[sideJ] <= 0.0f) { s_restUpLen[sideJ] = upLen; s_restForeLen[sideJ] = foreLen; }
     {
         const float ual = isLeft ? g_VRUserArmLenL : g_VRUserArmLenR;
-        const float calibHalf = (ual >= 0.45f) ? ual * 0.5f : 0.0f;
+        const float calibHalf = (!preserveBoneLengths && ual >= 0.45f) ? ual * 0.5f : 0.0f;
         upLen   = (calibHalf > 0.0f) ? calibHalf : s_restUpLen[sideJ];
         foreLen = (calibHalf > 0.0f) ? calibHalf : s_restForeLen[sideJ];
+        if (preserveBoneLengths) {
+            upLen = VRIK_Dist3(sh, el);
+            foreLen = VRIK_Dist3(el, wr);
+        }
     }
     // SHOULDER PROTRACTION (VRArmIK ShoulderPoser-lite). Reaching far FORWARD a real
     // shoulder slides several cm forward (scapula protracts); the avatar's fixed shoulder
@@ -457,7 +522,7 @@ void VRIK_SolveArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
     // forward, a touch out), written ABSOLUTE against the captured rest local translation
     // (the engine keeps our writes; incremental would creep).
     float shP[3] = { sh[0], sh[1], sh[2] };
-    {
+    if (!preserveBoneLengths) {
         const int par = g_VRBoneParent[upperIdx];
         if (par >= 0 && par < upperIdx) {
             float* tl = reinterpret_cast<float*>(boneBuf + upperIdx * 48 + VRIK_TRANS_OFF);
@@ -494,8 +559,27 @@ void VRIK_SolveArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
         }
     }
 
+    float fixedTarget[3] = { targetModel[0], targetModel[1], targetModel[2] };
+    const float* ikTarget = targetModel;
+    if (preserveBoneLengths) {
+        float reach[3] = { targetModel[0]-shP[0], targetModel[1]-shP[1], targetModel[2]-shP[2] };
+        const float d = std::sqrt(reach[0]*reach[0] + reach[1]*reach[1] + reach[2]*reach[2]);
+        const float maxReach = (upLen + foreLen) * 0.999f;
+        const float minReach = std::fabs(upLen - foreLen) + 0.001f;
+        float solved = d;
+        if (solved > maxReach) solved = maxReach;
+        if (solved < minReach) solved = minReach;
+        if (d > 1e-5f && std::fabs(solved - d) > 1e-6f) {
+            const float k = solved / d;
+            fixedTarget[0] = shP[0] + reach[0] * k;
+            fixedTarget[1] = shP[1] + reach[1] * k;
+            fixedTarget[2] = shP[2] + reach[2] * k;
+            ikTarget = fixedTarget;
+        }
+    }
+
     // Hand -> shoulder (F4VR convention; xDir is along this).
-    float handToShoulder[3] = { shP[0]-targetModel[0], shP[1]-targetModel[1], shP[2]-targetModel[2] };
+    float handToShoulder[3] = { shP[0]-ikTarget[0], shP[1]-ikTarget[1], shP[2]-ikTarget[2] };
     float hsLen = std::sqrt(handToShoulder[0]*handToShoulder[0]
                           + handToShoulder[1]*handToShoulder[1]
                           + handToShoulder[2]*handToShoulder[2]);
@@ -508,7 +592,7 @@ void VRIK_SolveArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
     // hand-shoulder line -> arm is perfectly straight. NOT clamping with an epsilon is the fix
     // for "не могу выпрямить руку вниз" — that bug came from forcing hsLen < upLen+foreLen.
     float upL = upLen, foreL = foreLen;
-    if (hsLen > upL + foreL) {
+    if (!preserveBoneLengths && hsLen > upL + foreL) {
         float diff = hsLen - upL - foreL;
         float ratio = foreL / (foreL + upL);
         foreL += ratio * diff;
@@ -525,7 +609,7 @@ void VRIK_SolveArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
     // center grip), so the cosine law held a permanent 10-15deg micro-bend ("по швам не
     // разгибает"). Within the last reach percents, ease the segment lengths toward exactly
     // the distance -> the arm straightens fully; max shrink a few cm, visually invisible.
-    {
+    if (!preserveBoneLengths) {
         const float sum0 = upL + foreL;
         if (sum0 > 1e-4f && hsLen < sum0) {
             const float r = hsLen / sum0;
@@ -954,7 +1038,7 @@ void VRIK_SolveArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
                 }
             }
         }
-        const float handUp = VRIK_Dot3(targetModel, bodyUp);
+        const float handUp = VRIK_Dot3(ikTarget, bodyUp);
         const float shUp   = VRIK_Dot3(shP, bodyUp);
         if (handUp <= shUp + 0.05f) {                       // arm not raised above the shoulder
             const float capUp = (handUp < shUp) ? handUp : shUp;
@@ -982,14 +1066,14 @@ void VRIK_SolveArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
     }
 
     float newElbow[3] = {
-        targetModel[0] + xDir[0]*xDist + yDir[0]*yDist,
-        targetModel[1] + xDir[1]*xDist + yDir[1]*yDist,
-        targetModel[2] + xDir[2]*xDist + yDir[2]*yDist,
+        ikTarget[0] + xDir[0]*xDist + yDir[0]*yDist,
+        ikTarget[1] + xDir[1]*xDist + yDir[1]*yDist,
+        ikTarget[2] + xDir[2]*xDist + yDir[2]*yDist,
     };
 
     float desUp[3] = { newElbow[0]-shP[0], newElbow[1]-shP[1], newElbow[2]-shP[2] };
     VRIK_Norm3(desUp);
-    float desFore[3] = { targetModel[0]-newElbow[0], targetModel[1]-newElbow[1], targetModel[2]-newElbow[2] };
+    float desFore[3] = { ikTarget[0]-newElbow[0], ikTarget[1]-newElbow[1], ikTarget[2]-newElbow[2] };
     VRIK_Norm3(desFore);
 
     // (Rig constants captured above, before the geometric bend — see s_rigCap block.)
@@ -999,7 +1083,7 @@ void VRIK_SolveArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
     // fall back to the pole plane (hinge = yDir x desUp... i.e. cross(desUp, -yDir)): the forearm
     // flexes toward -yDir from the shoulder-hand line, matching the capture convention.
     float hDes[3]; VRIK_Cross3(desUp, desFore, hDes);
-    {
+    if (!preserveBoneLengths) {
         float hl = std::sqrt(hDes[0]*hDes[0] + hDes[1]*hDes[1] + hDes[2]*hDes[2]);
         if (hl < 0.05f) {
             float negY[3] = { -yDir[0], -yDir[1], -yDir[2] };
@@ -1070,7 +1154,7 @@ void VRIK_SolveArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
     // (rubber-arm look). Write the ELBOW bone's parent-local translation too, so the upper
     // arm carries its share; caps keep it within anatomical looks.
     float elbowW[3] = { newElbow[0], newElbow[1], newElbow[2] };
-    {
+    if (!preserveBoneLengths) {
         float relU[3] = { newElbow[0]-shP[0], newElbow[1]-shP[1], newElbow[2]-shP[2] };
         const float rlU = std::sqrt(relU[0]*relU[0] + relU[1]*relU[1] + relU[2]*relU[2]);
         if (rlU > 1e-4f) {
@@ -1125,7 +1209,7 @@ void VRIK_SolveArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx,
     // the wrist sits ON the target. The visual forearm segment stretches/shrinks within anatomical
     // caps (0.7..1.3 of the native segment) -- the F4VR trade: exact hand presence over a few cm
     // of forearm skin stretch.
-    {
+    if (!preserveBoneLengths) {
         // Anchored at the WRITTEN elbow (elbowW), not the ideal one -- the hand's parent
         // model position is wherever the fore bone actually went.
         float rel[3] = { targetModel[0]-elbowW[0], targetModel[1]-elbowW[1], targetModel[2]-elbowW[2] };
@@ -1806,6 +1890,51 @@ void VRIK_PlaceBodyUnderHMD(uint8_t* boneBuf,
         // one piece -- no "weapon draw: camera/head back, hips forward" torso desync. After baking
         // camModelPos.xy = foot centre, so the legs stay vertical; the leg IK keeps the feet planted.
         float hipsTarget[3] = { headAnchor[0], headAnchor[1], headAnchor[2] - torsoVert };
+
+        // Do not raise the pelvis beyond what the fixed-length legs can still reach.  The old
+        // body-under-HMD path always moved hips to headAnchor-torsoVert and only discovered the
+        // impossible geometry later in VRIK_SolveLeg(), where the target distance is clamped to
+        // the leg length.  That clamp leaves the FK foot above its captured ground target.  Work
+        // backwards from each planted foot here instead: after the hips translation, the upper-leg
+        // root moves rigidly with the pelvis, so its horizontal distance to the target is known.
+        // The remaining leg reach gives the highest legal upper-leg Z, hence the highest legal hips
+        // Z.  This keeps the authored/scaled segment lengths intact and lets the existing rotation-
+        // only leg IK actually reach the target.
+        auto clampHipsZForLeg = [&](int upIdx, int midIdx, int footIdx, const float* footTarget) {
+            if (upIdx < 0 || midIdx < 0 || footIdx < 0
+                || upIdx >= VRIK_MAX_BONES || midIdx >= VRIK_MAX_BONES || footIdx >= VRIK_MAX_BONES) return;
+
+            const float upLen = std::sqrt(
+                (g_fkPos[midIdx][0] - g_fkPos[upIdx][0]) * (g_fkPos[midIdx][0] - g_fkPos[upIdx][0]) +
+                (g_fkPos[midIdx][1] - g_fkPos[upIdx][1]) * (g_fkPos[midIdx][1] - g_fkPos[upIdx][1]) +
+                (g_fkPos[midIdx][2] - g_fkPos[upIdx][2]) * (g_fkPos[midIdx][2] - g_fkPos[upIdx][2]));
+            const float loLen = std::sqrt(
+                (g_fkPos[footIdx][0] - g_fkPos[midIdx][0]) * (g_fkPos[footIdx][0] - g_fkPos[midIdx][0]) +
+                (g_fkPos[footIdx][1] - g_fkPos[midIdx][1]) * (g_fkPos[footIdx][1] - g_fkPos[midIdx][1]) +
+                (g_fkPos[footIdx][2] - g_fkPos[midIdx][2]) * (g_fkPos[footIdx][2] - g_fkPos[midIdx][2]));
+            const float reach = (upLen + loLen) * 0.999f;
+            if (reach < 1e-4f) return;
+
+            const float upFromHips[3] = {
+                g_fkPos[upIdx][0] - g_fkPos[hips][0],
+                g_fkPos[upIdx][1] - g_fkPos[hips][1],
+                g_fkPos[upIdx][2] - g_fkPos[hips][2] };
+            const float futureUpX = hipsTarget[0] + upFromHips[0];
+            const float futureUpY = hipsTarget[1] + upFromHips[1];
+            const float dx = footTarget[0] - futureUpX;
+            const float dy = footTarget[1] - futureUpY;
+            const float horizontalSq = dx * dx + dy * dy;
+            const float reachSq = reach * reach;
+            const float verticalReach = std::sqrt(std::max(0.0f, reachSq - horizontalSq));
+            const float maxHipsZ = footTarget[2] + verticalReach - upFromHips[2];
+            if (hipsTarget[2] > maxHipsZ) hipsTarget[2] = maxHipsZ;
+        };
+        if (haveR) {
+            clampHipsZForLeg(g_VRRightUpLegIdx, g_VRRightLegIdx, g_VRRightFootIdx, footR);
+        }
+        if (haveL) {
+            clampHipsZForLeg(g_VRLeftUpLegIdx, g_VRLeftLegIdx, g_VRLeftFootIdx, footL);
+        }
         int hp = g_VRBoneParent[hips];
         if (hp >= 0 && hp < VRIK_MAX_BONES) {
             VRIK_WriteLocalPos(boneBuf, hips, g_fkPos[hp], g_fkRot[hp], hipsTarget);
@@ -2043,6 +2172,6 @@ void VRIK_NoteShake(int hand, int stage, const float* pos) {
 
 int   g_solveCacheN = 0;
 int   g_solveCacheIdx[96];
-float g_solveCacheVal[96][7];
+float g_solveCacheVal[96][10];
 float g_solveCacheYaw = 0.0f;   // heading the cached solve was built with
 float g_solveCacheSnapCtr = -1.0f; // snap event counter [147] the cached solve consumed

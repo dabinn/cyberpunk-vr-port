@@ -528,6 +528,15 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     auto f15rC = RED4ext::CGlobalFunction::Create("SetVRDiagCapture", "SetVRDiagCapture", &SetVRDiagCapture);
     f15rC->flags = flags; f15rC->SetReturnType("Int32"); f15rC->AddParam("Int32", "on"); rtti->RegisterFunction(f15rC);
 
+    auto f15rPC = RED4ext::CGlobalFunction::Create("VRPostureCalibrate", "VRPostureCalibrate", &VRPostureCalibrate);
+    f15rPC->flags = flags; f15rPC->SetReturnType("Int32"); rtti->RegisterFunction(f15rPC);
+
+    auto f15rPS = RED4ext::CGlobalFunction::Create("VRPostureBodyScale", "VRPostureBodyScale", &VRPostureBodyScale);
+    f15rPS->flags = flags; f15rPS->SetReturnType("Float"); rtti->RegisterFunction(f15rPS);
+
+    auto f15rPE = RED4ext::CGlobalFunction::Create("VRPostureEyeHeight", "VRPostureEyeHeight", &VRPostureEyeHeight);
+    f15rPE->flags = flags; f15rPE->SetReturnType("Float"); rtti->RegisterFunction(f15rPE);
+
     auto f15rST = RED4ext::CGlobalFunction::Create("VRShoulderTestDiag", "VRShoulderTestDiag", &VRShoulderTestDiag);
     f15rST->flags = flags; f15rST->SetReturnType("Float"); f15rST->AddParam("Int32", "index"); rtti->RegisterFunction(f15rST);
 

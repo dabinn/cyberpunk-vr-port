@@ -65,6 +65,7 @@
 #include "Anim/WeaponAim.hpp"
 #include "Natives/NativeState.hpp"
 #include "Natives/NativeHelpers.hpp"
+#include "Runtimes/OpenXRManager.hpp"
 #include <MinHook.h>
 #include "Natives/NativeFunctions.hpp"
 #include "Natives/NativeHelpers.hpp"
@@ -240,6 +241,61 @@ int VRIK_DoArmPlayer() {
             if (leftFore >= 0)  g_VRLeftForeArmIdx   = leftFore;
             g_VRSpineCount = spineTmpCount;
             for (int s = 0; s < 8; ++s) g_VRSpineIdx[s] = (s < spineTmpCount) ? spineTmp[s] : -1;
+
+            // Standing posture calibration needs an authored ground-to-eye baseline that does not
+            // depend on the current locomotion/weapon animation. MetaRig::boneTransforms is the
+            // stable local-space reference chain; reconstruct model space through parentIndeces.
+            // Prefer the two eye joints; Head is only a fallback for rigs that omit explicit eyes.
+            if (metaRig->boneTransforms.Size() == boneCount &&
+                metaRig->parentIndeces.Size() == boneCount && boneCount > 0) {
+                auto referenceModelPos = [&](int idx, float out[3]) -> bool {
+                    if (idx < 0 || static_cast<uint32_t>(idx) >= boneCount) return false;
+                    int chain[128];
+                    int n = 0;
+                    for (int b = idx; b >= 0 && static_cast<uint32_t>(b) < boneCount && n < 128;
+                         b = metaRig->parentIndeces[b]) {
+                        chain[n++] = b;
+                        const int p = metaRig->parentIndeces[b];
+                        if (p < 0 || p == b) break;
+                    }
+                    float pos[3] = {0.0f, 0.0f, 0.0f};
+                    float rot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+                    float scale[3] = {1.0f, 1.0f, 1.0f};
+                    for (int ci = n - 1; ci >= 0; --ci) {
+                        const auto& t = metaRig->boneTransforms[chain[ci]];
+                        const float local[3] = {
+                            t.Translation.X * scale[0],
+                            t.Translation.Y * scale[1],
+                            t.Translation.Z * scale[2] };
+                        float moved[3];
+                        VRIK_QuatRotateVec(rot, local, moved);
+                        pos[0] += moved[0]; pos[1] += moved[1]; pos[2] += moved[2];
+                        const float localRot[4] = {t.Rotation.i, t.Rotation.j, t.Rotation.k, t.Rotation.r};
+                        float nextRot[4];
+                        VRIK_QuatMul(rot, localRot, nextRot);
+                        for (int k = 0; k < 4; ++k) rot[k] = nextRot[k];
+                        VRIK_QuatNorm(rot);
+                        scale[0] *= t.Scale.X; scale[1] *= t.Scale.Y; scale[2] *= t.Scale.Z;
+                    }
+                    out[0] = pos[0]; out[1] = pos[1]; out[2] = pos[2];
+                    return true;
+                };
+                float root[3] = {}, eye[3] = {};
+                float eyeZ = 0.0f;
+                int eyeN = 0;
+                if (referenceModelPos(0, root)) {
+                    if (referenceModelPos(g_VREyeLeftIdx, eye)) { eyeZ += eye[2]; ++eyeN; }
+                    if (referenceModelPos(g_VREyeRightIdx, eye)) { eyeZ += eye[2]; ++eyeN; }
+                    if (eyeN == 0 && referenceModelPos(g_VRHeadBoneIdx, eye)) {
+                        eyeZ = eye[2];
+                        eyeN = 1;
+                    }
+                    if (eyeN > 0) {
+                        OpenXRManager::Get().SetVrikAuthoredEyeHeight(
+                            eyeZ / static_cast<float>(eyeN) - root[2]);
+                    }
+                }
+            }
 
             // Publish the right-hand finger bone set. This resolve re-runs on every VRIK desync;
             // only (re)init rotations to identity BEFORE we have a pose. Otherwise a desync would

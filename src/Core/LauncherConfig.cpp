@@ -221,6 +221,7 @@ void EnsureLiveControlFileExists() {
     fprintf(file, "xr_snap_turn_pulse_ms=30\n");
     fprintf(file, "xr_mono_depth_capture=1\n");
     fprintf(file, "xr_physical_body_rotation=0\n");
+    fprintf(file, "xr_vrik_play_style=0\n");
     fprintf(file, "xr_ads_right_eye_alignment=0\n");
     fprintf(file, "xr_cutscene_suspend_tier=3\n");
     fprintf(file, "xr_immersive_holsters=1\n");

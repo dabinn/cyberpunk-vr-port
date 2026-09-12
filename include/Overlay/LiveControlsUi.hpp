@@ -93,6 +93,8 @@ struct LiveControlsUiState {
     // Physical body rotation. 1 = the avatar body follows HMD yaw on foot. 0 (default) =
     // classic stick / snap-turn heading. Vehicles are unaffected either way. F10 -> Controls tab.
     int xrPhysicalBodyRotation;
+    // VRIK posture policy. 0 = Standing, 1 = Seated. F10 -> VRIK tab.
+    int xrVrikPlayStyle;
     // Experimental non-VRIK ranged-weapon shoulder constraint A/B.
     int xrWeaponShoulderConstraintTest;
     // Move the authored ADS arm pose from the cyclopean camera axis toward the right eye.

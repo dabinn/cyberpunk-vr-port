@@ -350,6 +350,10 @@ void UpdateVRIKAnimInputs(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* 
         } else {
             g_VRBind = 0;
             if (s_lastReq > 0) {
+                int restoreMask = 0;
+                if (g_PlayerTrackBufA) restoreMask |= 1;
+                if (g_PlayerTrackBufB) restoreMask |= 2;
+                g_VRBodyScaleRestoreMask = restoreMask;
                 g_VRDiagCapture = 0;
                 g_pSharedHands[119] = 0.0f;
                 // The wheel grab lives inside the mode-4 solve; with tracking off nothing would ever

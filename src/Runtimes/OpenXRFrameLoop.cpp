@@ -1261,6 +1261,10 @@ DWORD OpenXRManager::FrameThreadMain() {
             (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
 
         if (headPoseLocated) {
+            // This is the runtime-space height, before the mod's own recenter/base subtraction.
+            // Standing posture calibration samples exactly this value. A mod Reset View therefore
+            // cannot redefine the player's physical eye height; a runtime-native recenter may.
+            m_runtimeHmdHeight.store(location.pose.position.y, std::memory_order_release);
             XrPosef basePose{};
             uint64_t baseGeneration = 0;
             bool baseReset = false;

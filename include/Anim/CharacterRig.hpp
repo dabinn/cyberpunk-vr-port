@@ -49,9 +49,10 @@ void VRIK_NoteShake(int hand, int stage, const float* pos);
 
 extern bool  g_viewPktValid;
 extern float g_fkRot[VRIK_MAX_BONES][4];
+extern float g_fkScale[VRIK_MAX_BONES][3];
 extern float g_solveCacheSnapCtr;
 extern uint32_t g_solveCacheTick;
-extern float g_solveCacheVal[96][7];
+extern float g_solveCacheVal[96][10];
 extern float g_solveCacheYaw;
 extern float g_viewPkt[17];
 extern float s_vrSharedSquatDrop;
@@ -72,6 +73,7 @@ int VRIK_FKCount();
 void VRIK_ApplyHandStop(int side, float* target, float* handRot);
 void VRIK_BodyAxesFromCamYaw(const float* camModelRot, float* bodyRight, float* bodyUp, float* bodyFwd);
 void VRIK_ComputeFK(uint8_t* boneBuf, int count);
+void VRIK_ApplyUniformBodyScale(uint8_t* boneBuf, uintptr_t trackBuf, float scale, int anchorIdx);
 void VRIK_Cross3(const float* a, const float* b, float* o);
 void VRIK_DampenTorsoWeaponPose(uint8_t* boneBuf);
 void VRIK_LatchViewPacket();
@@ -84,7 +86,7 @@ void VRIK_ScaleArmBonesFromRest(uint8_t* boneBuf, uintptr_t trackBuf, int boneCo
 // The inverse, for an arm handed to the driving animation: the rig's own rest translations back, the
 // captured shoulder protraction rest included. See the definition for why the engine will not do it.
 void VRIK_RestoreArmRestTrans(uint8_t* boneBuf, uintptr_t trackBuf, int boneCount, int upperIdx, int foreIdx, int handIdx, bool isLeft);
-void VRIK_SolveArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx, const float* targetModel, const float* handModelRot, const float* bodyRight, const float* bodyUp, const float* bodyFwd, float poleAngleRad, float swingGain, bool isLeft, bool storeDbg);
+void VRIK_SolveArm(uint8_t* boneBuf, int upperIdx, int foreIdx, int handIdx, const float* targetModel, const float* handModelRot, const float* bodyRight, const float* bodyUp, const float* bodyFwd, float poleAngleRad, float swingGain, bool isLeft, bool storeDbg, bool preserveBoneLengths);
 void VRIK_TwistAbout(const float* q, const float* a, float* outT);
 void VRIK_WriteLocalPos(uint8_t* boneBuf, int idx, const float* parentModelPos, const float* parentModelRot, const float* modelPos);
 void VRIK_WriteLocalRot(uint8_t* boneBuf, int idx, const float* parentModelRot, const float* modelRot);

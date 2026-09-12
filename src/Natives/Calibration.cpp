@@ -65,6 +65,7 @@
 #include "Anim/AdsEyeAlign.hpp"
 #include "Anim/WeaponAim.hpp"
 #include "Core/LiveControls.hpp"
+#include "Runtimes/OpenXRManager.hpp"
 #include "Natives/NativeState.hpp"
 #include "Natives/NativeHelpers.hpp"
 #include <MinHook.h>
@@ -211,7 +212,34 @@ void SetVRDiagCapture(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFra
     if (aOut) *aOut = g_VRDiagCapture;
 }
 
-// Diagnostic: logs the gizmo-computed world target (camPos + camQuat*mapLocalPos)
+void VRPostureCalibrate(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext); RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (g_liveControls.xrVrikPlayStyle == 0) {
+        OpenXRManager::Get().RequestVrikPostureCalibration();
+    } else {
+        OpenXRManager::Get().RequestVrikSeatedDebugCalibration();
+    }
+    if (aOut) *aOut = 1;
+}
+
+void VRPostureBodyScale(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, float* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext); RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *aOut = OpenXRManager::Get().GetVrikBodyScale();
+}
+
+void VRPostureEyeHeight(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, float* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext); RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    auto& xr = OpenXRManager::Get();
+    if (aOut) {
+        *aOut = g_liveControls.xrVrikPlayStyle == 0
+            ? xr.GetVrikCalibratedEyeHeight()
+            : xr.GetVrikSeatedDebugEyeHeight();
+    }
+}
+
 // Read-only telemetry for the experimental non-VRIK weapon-shoulder A/B.
 // 0 = any side valid. Per-side blocks are right=1..21, left=22..42:
 // +0 valid, +1 position error, +2 rotation error, +3/+4 raw/constrained total delta,
@@ -264,6 +292,7 @@ void VRShoulderTestDiag(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aF
     if (aOut) *aOut = value;
 }
 
+// Diagnostic: logs the gizmo-computed world target (camPos + camQuat*mapLocalPos)
 // next to the actual character arm-bone poses captured from the live pose buffer
 // (g_VRDiagBones, snapshotted pre-write by the hook when SetVRDiagCapture(1)).
 // The decisive lines compare (bufHand - bufHead) against (gizmoWorld - camPos):
@@ -714,4 +743,3 @@ void DumpRuntimeClassFunctions(RED4ext::IScriptable* aContext, RED4ext::CStackFr
     out.close();
     if (aOut) *aOut = dumped;
 }
-

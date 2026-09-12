@@ -742,6 +742,62 @@ public:
     float GetCalibrationProgress() const { return m_calibProgress.load(std::memory_order_relaxed); }
     int GetCalibrationState() const { return m_calibState.load(std::memory_order_relaxed); }
 
+    // Posture calibration is intentionally separate from the legacy T-pose arm calibration.
+    // Snapshot the RAW runtime-space HMD height at button time. The mod's own recenter/base pose
+    // must never leak into this value; the pose hook only supplies the authored rig geometry needed
+    // to turn that physical eye height into one uniform XYZ body scale.
+    void RequestVrikPostureCalibration() {
+        const float rawHeight = m_runtimeHmdHeight.load(std::memory_order_acquire);
+        if (!(rawHeight > 0.25f && rawHeight < 2.5f)) return;
+        m_vrikPosturePendingEyeHeight.store(rawHeight, std::memory_order_relaxed);
+        m_vrikPostureCalibReq.store(1, std::memory_order_release);
+    }
+    bool HasVrikPostureCalibrationRequest() const {
+        return m_vrikPostureCalibReq.load(std::memory_order_acquire) != 0;
+    }
+    bool ConsumeVrikPostureCalibrationRequest() {
+        return m_vrikPostureCalibReq.exchange(0, std::memory_order_acq_rel) != 0;
+    }
+    float GetVrikPosturePendingEyeHeight() const {
+        return m_vrikPosturePendingEyeHeight.load(std::memory_order_relaxed);
+    }
+    float GetVrikCalibratedEyeHeight() const {
+        return m_vrikCalibratedEyeHeight.load(std::memory_order_relaxed);
+    }
+    void SetVrikCalibratedEyeHeight(float height) {
+        if (height > 0.0f && height < 2.5f)
+            m_vrikCalibratedEyeHeight.store(height, std::memory_order_relaxed);
+    }
+    float GetVrikSeatedDebugEyeHeight() const {
+        return m_vrikSeatedDebugEyeHeight.load(std::memory_order_relaxed);
+    }
+    void SetVrikSeatedDebugEyeHeight(float height) {
+        if (height > 0.0f && height < 3.0f)
+            m_vrikSeatedDebugEyeHeight.store(height, std::memory_order_relaxed);
+    }
+    void RequestVrikSeatedDebugCalibration() {
+        m_vrikSeatedCalibReq.store(1, std::memory_order_release);
+    }
+    bool HasVrikSeatedDebugCalibrationRequest() const {
+        return m_vrikSeatedCalibReq.load(std::memory_order_acquire) != 0;
+    }
+    bool ConsumeVrikSeatedDebugCalibrationRequest() {
+        return m_vrikSeatedCalibReq.exchange(0, std::memory_order_acq_rel) != 0;
+    }
+    float GetVrikAuthoredEyeHeight() const {
+        return m_vrikAuthoredEyeHeight.load(std::memory_order_relaxed);
+    }
+    void SetVrikAuthoredEyeHeight(float height) {
+        if (height > 0.8f && height < 2.2f)
+            m_vrikAuthoredEyeHeight.store(height, std::memory_order_relaxed);
+    }
+    float GetVrikBodyScale() const { return m_vrikBodyScale.load(std::memory_order_relaxed); }
+    void SetVrikBodyScale(float scale) {
+        if (scale < 0.75f) scale = 0.75f;
+        if (scale > 1.35f) scale = 1.35f;
+        m_vrikBodyScale.store(scale, std::memory_order_relaxed);
+    }
+
     // Extra calibration parameters (anatomical HMD->shoulder offsets) that didn't fit in the
     // original 14-slot block. Stored on the manager so the plugin can pull them through shared
     // mem slots [70..76] and Save/Load can persist them.
@@ -960,6 +1016,14 @@ private:
     std::atomic<float> m_userArmLenR{0.0f};
     std::atomic<float> m_userArmLenL{0.0f};
     std::atomic<float> m_userEyeHeight{0.0f};
+    std::atomic<float> m_vrikBodyScale{1.0f};
+    std::atomic<float> m_runtimeHmdHeight{0.0f};
+    std::atomic<float> m_vrikPosturePendingEyeHeight{0.0f};
+    std::atomic<float> m_vrikCalibratedEyeHeight{0.0f};
+    std::atomic<float> m_vrikSeatedDebugEyeHeight{0.0f};
+    std::atomic<float> m_vrikAuthoredEyeHeight{0.0f};
+    std::atomic<int>   m_vrikPostureCalibReq{0};
+    std::atomic<int>   m_vrikSeatedCalibReq{0};
 
     // Camera->head bake offset (game-local right/forward/up), applied by dxgi's LocateCamera.
     std::atomic<float> m_camBakeOffset[3]{};
