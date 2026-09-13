@@ -1429,9 +1429,15 @@ void STDMETHODCALLTYPE hk_ResourceBarrier(ID3D12GraphicsCommandList* self,
     //
     // Identification is by exhaustion. Of every full-size candidate in that frame only this one is
     // R8G8B8A8_TYPELESS with both RENDER_TARGET and UNORDERED_ACCESS allowed: the HUD layer is the same
-    // 3072x3072 but SRGB and render-target-only, and the half-resolution TYPELESS pair is UAV-only and
-    // so cannot make this transition at all.
+    // size but SRGB and render-target-only, and the half-resolution TYPELESS pair is UAV-only and so
+    // cannot make this transition at all. Keep the size filter relative to the selected VRCAM instead
+    // of a literal captured resolution: reject half-size (including odd-size rounding), accept anything
+    // larger. If the selected size is unknown, do not guess -- the older capture path remains available.
     if (CyberpunkVR_FinalGrab && barriers && t_vrcam_node_active) {
+        const UINT vrcam_w = g_vrcam_sel_w.load(std::memory_order_relaxed);
+        const UINT vrcam_h = g_vrcam_sel_h.load(std::memory_order_relaxed);
+        const UINT half_w = (vrcam_w + 1u) / 2u;
+        const UINT half_h = (vrcam_h + 1u) / 2u;
         for (UINT i = 0; i < count; ++i) {
             const D3D12_RESOURCE_BARRIER& fb = barriers[i];
             if (fb.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || !fb.Transition.pResource) continue;
@@ -1441,7 +1447,8 @@ void STDMETHODCALLTYPE hk_ResourceBarrier(ID3D12GraphicsCommandList* self,
             if (!mirror_get_resource_desc(fb.Transition.pResource, &fd) ||
                     fd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
                     fd.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS ||
-                    fd.Width < 2048 || fd.Height < 2048) continue;
+                    !vrcam_w || !vrcam_h ||
+                    fd.Width <= half_w || fd.Height <= half_h) continue;
             if (!(fd.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ||
                     !(fd.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) continue;
             t_final_res = fb.Transition.pResource;

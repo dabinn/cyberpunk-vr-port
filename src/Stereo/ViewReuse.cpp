@@ -2866,6 +2866,15 @@ extern "C" __declspec(dllexport) uint32_t CyberpunkVR_CompLendSet = 1;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugCompLendWrites = 0;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugCompLendSkips = 0;
 
+static bool comp_lend_full_size(const uint32_t wh[2]) {
+    const uint32_t vrcam_w = g_vrcam_sel_w.load(std::memory_order_relaxed);
+    const uint32_t vrcam_h = g_vrcam_sel_h.load(std::memory_order_relaxed);
+    if (!vrcam_w || !vrcam_h) return false;
+    const uint32_t half_w = (vrcam_w / 2u) + (vrcam_w & 1u);
+    const uint32_t half_h = (vrcam_h / 2u) + (vrcam_h & 1u);
+    return wh[0] > half_w && wh[1] > half_h;
+}
+
 static void vd_lend_composition(uintptr_t vd) {
     if (!vd || !CyberpunkVR_CompLendSet) return;
     const uintptr_t set = g_comp_set.load(std::memory_order_acquire);
@@ -2880,12 +2889,12 @@ static void vd_lend_composition(uintptr_t vd) {
         InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugCompLendSkips));
         return;
     }
-    // The node loads the pass size out of this object at +0x50/+0x54 and both eyes render at 3072, so
-    // requiring a full-size object is the same guard, for the same reason, as the viewData capture: a
-    // recycled or half-built one does not carry it.
+    // The node loads the pass size out of this object at +0x50/+0x54. Reject a half-size or
+    // half-built object relative to the selected VRCAM resolution; a fixed threshold derived from
+    // the original 3072 capture rejects valid lower-resolution composition objects.
     uint32_t wh[2] = {0, 0};
     if (!cloud_cb_raw_copy(wh, reinterpret_cast<const uint8_t*>(pair[0]) + 0x50, 8) ||
-            wh[0] < 2048 || wh[1] < 2048) {
+            !comp_lend_full_size(wh)) {
         InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugCompLendSkips));
         return;
     }
@@ -2908,11 +2917,11 @@ static bool comp_lend_fetch(uint64_t out[2]) {
     uint64_t pair[2] = {0, 0};                              // {value, refcount} at holder + 600
     if (!cloud_cb_raw_copy(pair, reinterpret_cast<const uint8_t*>(holder) + 600, 16) || !pair[0])
         return false;
-    // The node loads the pass size out of this object at +0x50/+0x54 and both eyes render at 3072,
-    // so requiring a full-size object rejects a recycled or half-built one.
+    // The node loads the pass size out of this object at +0x50/+0x54. Require an object larger than
+    // the selected VRCAM half-size so a recycled or half-built one cannot be consumed.
     uint32_t wh[2] = {0, 0};
     if (!cloud_cb_raw_copy(wh, reinterpret_cast<const uint8_t*>(pair[0]) + 0x50, 8) ||
-            wh[0] < 2048 || wh[1] < 2048)
+            !comp_lend_full_size(wh))
         return false;
     out[0] = pair[0];
     out[1] = 0;                                             // no refcount, on purpose
