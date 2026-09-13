@@ -12,6 +12,7 @@
 #include "Core/LiveControls.hpp"
 #include "Core/Telemetry.hpp"
 #include "Hooks/Hook.hpp"
+#include "Hooks/ClassicControllerMapping.hpp"
 #include "Hooks/Trampoline.hpp"
 #include "Runtimes/OpenXRManager.hpp"
 #include "Utils/AobScanner.hpp"
@@ -118,6 +119,8 @@ extern "C" __declspec(dllexport) int32_t CyberpunkVR_ScannerFaceNav     = 1;   /
 extern "C" __declspec(dllexport) int32_t CyberpunkVR_ScannerTriggerTag  = 1;   // right trigger tags, and does not fire
 // Raised by the weapon module while the weapon is carried in the LEFT hand (see TwoHandGrip.cpp).
 extern "C" __declspec(dllexport) extern int CyberpunkVR_CarryLeft;
+extern "C" __declspec(dllexport) extern float CyberpunkVR_DebugTwoHandDist;
+extern "C" __declspec(dllexport) extern float CyberpunkVR_TwoHandRadius;
 extern "C" __declspec(dllexport) int32_t CyberpunkVR_ScannerStickTab    = 1;   // right stick click changes the tab
 // THE SCANNER'S ZOOM: hold the LEFT trigger and the right stick zooms, in the game's own steps.
 // The right stick is busy -- crouch, dash, pitch, snap turn -- so the trigger is the modifier that
@@ -263,6 +266,9 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     if (dwUserIndex != 0) return r;
     if (g_liveControls.xrXInputHook == 0) return r;
 
+    XINPUT_STATE physicalState{};
+    if (r == ERROR_SUCCESS) physicalState = *pState;
+
     VRControllerState vr{};
     if (!OpenXRManager::Get().GetControllerState(&vr)) return r;
 
@@ -275,9 +281,13 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // extra layer beneath it. Keep upstream's raw/default UI fallback intact for the upstream mapping,
     // but do not let it bypass Classic routing when the user explicitly selected Classic controls.
     const bool classicGeneral = g_liveControls.xrClassicOnFootControls != 0;
+    const bool mounted = g_isInVehicle;
+    const bool classicForCurrentPose = mounted
+        ? (g_liveControls.xrClassicVehicleControls != 0)
+        : classicGeneral;
 
     // THE VANILLA PAD, WHILE A MENU OR A BRAINDANCE IS UP. See CyberpunkVR_InputDefaultInUi.
-    if (!classicGeneral && CyberpunkVR_InputDefaultInUi != 0 &&
+    if (!classicForCurrentPose && CyberpunkVR_InputDefaultInUi != 0 &&
         (g_menuModeValue != 0 || g_bdActive.load(std::memory_order_relaxed) != 0)) {
         pState->Gamepad.wButtons |= vr.buttons;
         const BYTE ltUi = FloatToBYTE(vr.leftTrigger);
@@ -344,7 +354,6 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // the press that closes a popup cannot also eject a magazine.
     const bool uiPopupOpen = g_uiPopupOpen.load(std::memory_order_relaxed) != 0;
     const bool gameplayScreen = (g_menuModeValue == 0);
-    const bool mounted = g_isInVehicle;
     const bool classicOnFoot = !mounted && classicGeneral;
     const bool classicVehicle = mounted && (g_liveControls.xrClassicVehicleControls != 0);
 
@@ -389,9 +398,11 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // decision on the press edge so moving across a boundary while held cannot switch paths.
     // Wheel, smoke and unavailable-classifier states publish a non-RB route. Menus retain
     // their unconditional RB tab navigation even if they open after the grip was pressed.
+    bool rightGripClaimedBySpatialAction = false;
     {
         static bool s_rightGripWasDown = false;
         static bool s_rightGripRoutesToRb = false;
+        static bool s_rightGripSpatialClaim = false;
         bool menuOpenForRb = (g_menuModeValue != 0);
         float* sh = GetShotShared();
         if (!menuOpenForRb) {
@@ -401,11 +412,16 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         if (rightGripDown && !s_rightGripWasDown) {
             const int route = sh ? static_cast<int>(sh[vrshared::kRightGripRoute]) : 0;
             s_rightGripRoutesToRb = !mounted && route == 1;
+            s_rightGripSpatialClaim = route == 2;
         }
         if (!classicSwapDrivingInputs && rightGripDown && (menuOpenForRb || s_rightGripRoutesToRb)) {
             pState->Gamepad.wButtons |= 0x0200; // XINPUT_GAMEPAD_RIGHT_SHOULDER
         }
-        if (!rightGripDown) s_rightGripRoutesToRb = false;
+        if (!rightGripDown) {
+            s_rightGripRoutesToRb = false;
+            s_rightGripSpatialClaim = false;
+        }
+        rightGripClaimedBySpatialAction = rightGripDown && !menuOpenForRb && s_rightGripSpatialClaim;
         s_rightGripWasDown = rightGripDown;
         // And the LEFT grip's LB, on the same terms. It used to be emitted unconditionally from the frameloop,
         // which meant every gameplay squeeze of the left grip opened the SCANNER -- LB's gameplay binding. That
@@ -448,6 +464,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // The hand arms the zone on its own and the click gates the output, so a click with the hand
     // already at the ear takes effect on the same frame.
     bool scannerHold = false;
+    bool scannerGestureActive = false;
     {
         static bool   s_earArmed = false;
         static bool   s_gesture = false;      // the raw gesture this frame: hand at the ear + grip
@@ -529,12 +546,20 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
             scannerHold = s_gesture;
         }
         s_prevGesture = s_gesture;
+        scannerGestureActive = s_gesture;
     }
 
-    // Keep the spatial gesture and its LB latch, but let the game's Scanner context own the
-    // ordinary controller mapping when the Classic Scanner option is enabled.
+    // Keep the spatial gesture and its LB latch. Once Scanner is active, its own Classic parent
+    // independently decides whether the final controller state is rebuilt or left to upstream.
     const bool scannerRemapActive = scannerHold
         && (g_liveControls.xrClassicScannerControls == 0);
+    const cvr::input::ClassicContext classicContext = cvr::input::ResolveClassicContext(
+        scannerHold,
+        g_liveControls.xrClassicScannerControls != 0,
+        mounted,
+        classicGeneral,
+        g_liveControls.xrClassicVehicleControls != 0);
+    const bool classicContextActive = cvr::input::IsClassicContext(classicContext);
 
     // ---- THE SCANNER, WORKED WITH THE HAND THAT RAISED IT ---------------------------------------
     //
@@ -672,17 +697,18 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         const int32_t blockMs = (CyberpunkVR_PopupMagBlockMs > 0) ? CyberpunkVR_PopupMagBlockMs : 0;
         const bool justClosed = closedMs != 0ull &&
                                 (GetTickCount64() - closedMs) < static_cast<unsigned long long>(blockMs);
-        const bool magBlocked = classicOnFoot || uiPopupOpen || justClosed;
+        const bool magBlocked = classicContextActive || uiPopupOpen || justClosed;
         OpenXRManager::Get().SetSharedSlot(vrshared::kRightSecondaryBtn,
                                            (!magBlocked && (vr.buttons & 0x2000)) ? 1.0f : 0.0f);
     }
-    OpenXRManager::Get().SetSharedSlot(vrshared::kLeftSecondaryBtn,  (vr.buttons & 0x8000) ? 1.0f : 0.0f);
+    OpenXRManager::Get().SetSharedSlot(vrshared::kLeftSecondaryBtn,
+                                       (!classicContextActive && (vr.buttons & 0x8000)) ? 1.0f : 0.0f);
     // The right stick click, which the merge above deliberately does NOT pass on: the physical reload uses it as
     // the slide release. Published as a flag; the Lua side takes the rising edge.
     // The scanner used to hold this click and the publish was suppressed while it did. It fires on
     // the left grip now, so the click means one thing again and needs no guard.
     OpenXRManager::Get().SetSharedSlot(vrshared::kRightStickClick,
-                                       (!classicOnFoot && (vr.buttons & 0x0080)) ? 1.0f : 0.0f);
+                                       (!classicContextActive && (vr.buttons & 0x0080)) ? 1.0f : 0.0f);
     // One switch for the whole port. The launcher's DEBUG checkbox already gates the plugin's own
     // chatter; republishing it here lets the CET bridges obey it too, live, without each of them
     // growing a setting of its own that nobody remembers to turn off.
@@ -1192,7 +1218,8 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // on-foot heading instead, so in a camera it turned a body nobody can see while the view -- composed
     // from the lens -- did not move, and the stick could not pan the camera because its X never reached
     // the game. Off, the game's own continuous camera aim works exactly as it does on a flat screen.
-    if (g_liveControls.xrSnapTurn != 0 && !DeviceCamActive()) {
+    if (g_liveControls.xrSnapTurn != 0 && !DeviceCamActive()
+        && !(mounted && classicContextActive)) {
         // True instant snap turn: route the right-stick flick directly into a
         // yaw delta the game applies in ONE frame via the OnFootDeltaHook.
         // Stick X is consumed (zeroed) so the game never sees stick-driven
@@ -1305,6 +1332,58 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         }
     }
     pState->Gamepad.wButtons |= synthButtons;
+
+    if (classicContextActive) {
+        uint16_t classicExtraButtons = 0;
+        if (classicContext == cvr::input::ClassicContext::GeneralOnFoot) {
+            if (wantSprint) classicExtraButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+            if (wantCrouch) classicExtraButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
+            if (dashPulse) classicExtraButtons |= XINPUT_GAMEPAD_B;
+        }
+        if (scannerHold) classicExtraButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+
+        const int reloadOwnedHand = static_cast<int>(
+            OpenXRManager::Get().GetSharedSlot(vrshared::kReloadOwnedHand));
+        const bool smokingLeftHandActive = g_VRSmokeFingerActiveL != 0;
+        const bool lighterActuallyActive = CyberpunkVR_LtLighterGate != 0
+            && smokingLeftHandActive && g_VRSmokeLeftUseCig == 0
+            && !g_hasWeaponEquipped && !g_isInVehicle;
+        const bool twoHandGripZone = g_hasWeaponEquipped
+            && CyberpunkVR_DebugTwoHandDist >= 0.0f
+            && CyberpunkVR_DebugTwoHandDist <= CyberpunkVR_TwoHandRadius;
+        bool worldMapOpen = false;
+        if (float* shared = GetShotShared()) {
+            worldMapOpen = reinterpret_cast<volatile uint32_t*>(shared)[81] != 0u;
+        }
+        const bool spatialGameplayScreen = gameplayScreen && !worldMapOpen
+            && !deviceScreen && !uiPopupOpen;
+
+        cvr::input::ClassicComposeInput classicInput{};
+        classicInput.context = classicContext;
+        classicInput.leftX = lx;
+        classicInput.leftY = ly;
+        classicInput.rightX = rx;
+        classicInput.rightY = ry;
+        classicInput.swapTriggersAndGrips = classicSwapDrivingInputs;
+        classicInput.claimLeftGrip = spatialGameplayScreen && (scannerGestureActive || smokingLeftHandActive
+            || reloadOwnedHand == 0 || CyberpunkVR_CarryLeft != 0 || twoHandGripZone);
+        classicInput.claimRightGrip = spatialGameplayScreen && (rightGripClaimedBySpatialAction
+            || g_VRSmokeFingerActive != 0 || reloadOwnedHand == 1);
+        classicInput.claimLeftTrigger = spatialGameplayScreen && lighterActuallyActive;
+        if (!classicSwapDrivingInputs && spatialGameplayScreen) {
+            if (CyberpunkVR_CarryLeft != 0) {
+                classicInput.rightTriggerOverride = 1;
+            } else if (trgMode > 1.5f) {
+                classicInput.rightTriggerOverride = 2;
+            } else if (trgMode > 0.5f) {
+                classicInput.rightTriggerOverride = 1;
+            } else if (meleeImpulse > 0.5f) {
+                classicInput.rightTriggerOverride = 2;
+            }
+        }
+        classicInput.extraButtons = classicExtraButtons;
+        cvr::input::ComposeClassicControllerState(*pState, physicalState, vr, classicInput);
+    }
 
     // Bump packet number on any change so XInput consumers latch it.
     static uint16_t s_lastButtons = 0;
