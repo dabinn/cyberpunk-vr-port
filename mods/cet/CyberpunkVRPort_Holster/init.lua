@@ -115,6 +115,15 @@ registerForEvent('onUpdate', function(dt)
         return
     end
 
+    -- Classic Vehicle deliberately disables the holster spatial gesture. The seated VRIK pose can
+    -- place the hand inside a hip/back zone even when the player never reached for a holster. Keep
+    -- this separate from shared[163]: wheel/pedal ownership also gates reload, while this is holster-only.
+    if (GetVRSharedSlot(187) or 0.0) > 0.5 then
+        if canPublishGripRoute then SetVRRightGripRoute(2) end
+        rightGripPrev = (GetVRSharedSlot(49) > 0.5) and 1 or 0
+        return
+    end
+
     -- VEHICLE CONTROLS own the grip while a hand is at the wheel or classic grip pedals are active:
     -- shared[163] bit0 = right. The same press must not also equip a weapon.
     local wheelArmed = GetVRSharedSlot(163)

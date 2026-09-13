@@ -240,4 +240,7 @@ constexpr int kBarrelRayActive      = 181;   // checkbox on + mode 2 + weapon eq
 constexpr int kSightOriginX         = 182;   // ..184 world-space sight origin XYZ
 constexpr int kSightOriginValid     = 185;   // 1 = valid weapon-owned sight reference
 constexpr int kSightOriginSeq       = 186;   // odd while writing, even when coherent
+// 1 only while the player is mounted and Classic Vehicle controls are enabled. Holster uses this
+// to suppress its seated-body proximity gesture without pretending the grip is wheel/reload-owned.
+constexpr int kClassicVehicleActive = 187;
 } // namespace vrshared

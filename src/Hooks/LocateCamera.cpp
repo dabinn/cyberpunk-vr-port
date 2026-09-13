@@ -339,6 +339,9 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val,
             // character/camera position. Arms-only in vehicles.
             OpenXRManager::Get().SetSharedSlot(31, g_isInVehicle ? 1.0f : 0.0f);
             OpenXRManager::Get().SetSharedSlot(
+                vrshared::kClassicVehicleActive,
+                g_isInVehicle && g_liveControls.xrClassicVehicleControls != 0 ? 1.0f : 0.0f);
+            OpenXRManager::Get().SetSharedSlot(
                 vrshared::kAdsRightEyeAlignment,
                 g_liveControls.xrAdsRightEyeAlignment != 0 ? 1.0f : 0.0f);
             // CUTSCENE SUSPEND, producer half (PR #40 in substance, RTTI instead of CET).

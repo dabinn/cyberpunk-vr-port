@@ -139,6 +139,22 @@ set_target_properties(cyberpunkvrport_stereo PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/red4ext/plugins/CyberpunkVR_Stereo"
 )
 
+add_executable(classic_controller_mapping_tests EXCLUDE_FROM_ALL
+    tests/ClassicControllerMappingTests.cpp
+    src/Hooks/ClassicControllerMapping.cpp
+)
+target_compile_features(classic_controller_mapping_tests PRIVATE cxx_std_20)
+target_compile_definitions(classic_controller_mapping_tests PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_PLATFORM_WIN32 XR_USE_GRAPHICS_API_D3D12
+)
+target_include_directories(classic_controller_mapping_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(classic_controller_mapping_tests PRIVATE openxr_loader d3d12.lib dxgi.lib)
+if(MSVC)
+    target_compile_options(classic_controller_mapping_tests PRIVATE /W4 /permissive- /EHsc)
+endif()
+
 # ============================================================================================
 # Tools. Separate targets, never deployed with the plugin.
 # ============================================================================================
