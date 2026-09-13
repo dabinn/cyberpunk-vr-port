@@ -666,8 +666,8 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             // whole feature together here: toggle, free-look threshold, and its live readout.
             changed |= CheckboxInt("Physical body rotation", &state.xrPhysicalBodyRotation);
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("OFF (default): classic VR heading -- turn with stick / snap-turn, the head only looks.\n"
-                                  "ON: the character physically turns to follow your head, through the game's own\n"
+                ImGui::SetTooltip("OFF: classic VR heading -- turn with stick / snap-turn, the head only looks.\n"
+                                  "ON (Tofu default): the character physically turns to follow your head, through the game's own\n"
                                   "heading -- so aim, movement and collision follow it. The view stays where you are\n"
                                   "looking and recentring is untouched. Vehicles are unaffected.");
             }

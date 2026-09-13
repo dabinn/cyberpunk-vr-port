@@ -46,18 +46,18 @@ struct LiveControls {
     volatile int xrSnapTurn;        // 1 = discrete snap turn from right-stick X
     volatile float xrSnapTurnAngleDeg; // degrees per snap pulse
     volatile int xrMovementSource;  // 0 = Game, 1 = HMD, 2 = LeftHand, 3 = RightHand
-    volatile int xrMovementSpeedMode = 0; // 0 = fixed magnitude after deadzone (upstream default), 1 = analog left-stick magnitude
+    volatile int xrMovementSpeedMode = 1; // 0 = fixed magnitude after deadzone (upstream default), 1 = analog left-stick magnitude (Tofu default)
     volatile float xrLeftStickDeadzone = 0.15f; // raw left-stick travel ignored around centre
     volatile float xrRightStickDeadzone = 0.15f; // raw right-stick travel ignored around centre
     volatile float xrMaxInputThreshold = 0.90f; // raw travel treated as full deflection and used by full-stick gestures
     volatile int xrCombatHmdLocomotion = 1; // 1 = hand-directed locomotion switches to HMD while armed or aiming
-    volatile int xrLaserDotMode = 1; // 0 = steady projection, 1 = real world point, 2 = surface raycast
-    volatile float xrLaserDotRadiusMm = 6.0f; // apparent world-space radius in millimetres
-    volatile int xrLaserDotScaleWithDistance = 0; // mode 2 only: use the surface depth instead of the 2 m reference depth
+    volatile int xrLaserDotMode = 2; // 0 = steady projection, 1 = real world point, 2 = surface raycast (Tofu default)
+    volatile float xrLaserDotRadiusMm = 30.0f; // apparent world-space radius in millimetres
+    volatile int xrLaserDotScaleWithDistance = 1; // mode 2 only: use the surface depth instead of the 2 m reference depth
     volatile int xrHideLaserDotAds = 0; // 1 = hide the external dot while ADS and use the weapon sight origin for shots
     volatile int xrXInputInstall;   // 1 = install the XInput entry-point detour at startup (default 1, set 0 in vrport.ini to fully bypass)
     volatile int xrInputActions;    // 1 = create gameplay XrActions (thumbstick/trigger/buttons). 0 = pose-only legacy behaviour
-    volatile int xrChordActivation; // 0 = left L3 + right stick, 1 = right R3 + left stick, 2 = right thumbrest + left stick
+    volatile int xrChordActivation = 1; // 0 = left L3 + right stick, 1 = right R3 + left stick (Tofu default), 2 = right thumbrest + left stick
     volatile int xrExtraChordActions; // 1 = enable recenter/F10 chord actions; D-pad and Back remain unconditional
     volatile int xrClassicOnFootControls; // 1 = restore native VR buttons on foot; axis-action children below remain independent
     volatile int xrClassicDisableLsSprint; // effective only with classic on-foot controls: disable full-forward LS sprint
@@ -94,7 +94,7 @@ struct LiveControls {
     volatile float xrWheelHornRadius;   // how near the wheel centre counts as "on the hub", metres. Default 0.12.
     volatile int xrVehicleGunTrigger;   // 1 (default) = with a weapon out in the driver seat the right trigger FIRES (pad RB) and the throttle is latched.
     volatile float xrVehicleThrottleTrim; // how much of the throttle's full travel the left stick adds or removes per second while a weapon is out. Default 0.5.
-    volatile int xrPhysicalBodyRotation; // 1 = physical body rotation (avatar body follows HMD yaw). 0 (default) = classic stick/snap heading; vehicles unaffected.
+    volatile int xrPhysicalBodyRotation = 1; // 1 (Tofu default) = physical body rotation; 0 = classic stick/snap heading. Vehicles unaffected.
     volatile int xrAdsRightEyeAlignment; // 1 = move vanilla ADS arms toward the right eye. 0 (default) = keep the authored ADS position.
 };
 
