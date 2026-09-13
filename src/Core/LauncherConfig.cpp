@@ -107,10 +107,11 @@ void InitRuntimePaths() {
     // the binding/entry-point patch keeps the game from reaching its main menu.
     g_liveControls.xrXInputInstall = 1;
     g_liveControls.xrInputActions = 1;
-    g_liveControls.xrChordActivation = 0;
+    g_liveControls.xrChordActivation = 1;
     g_liveControls.xrExtraChordActions = 1;
-    // Preserve the upstream v0.1.2+ default when an existing ini has no speed-mode key.
-    g_liveControls.xrMovementSpeedMode = 0;
+    // Tofu default: preserve analog stick magnitude. The upstream v0.1.2+ fixed-speed policy
+    // remains available as mode 0 for users who prefer it.
+    g_liveControls.xrMovementSpeedMode = 1;
     g_liveControls.xrLeftStickDeadzone = 0.15f;
     g_liveControls.xrRightStickDeadzone = 0.15f;
     g_liveControls.xrMaxInputThreshold = 0.90f;
@@ -199,14 +200,14 @@ void EnsureLiveControlFileExists() {
     fprintf(file, "xr_snap_turn=0\n");
     fprintf(file, "xr_snap_turn_angle_deg=30\n");
     fprintf(file, "xr_movement_source=0\n");
-    fprintf(file, "xr_movement_speed_mode=0\n");
+    fprintf(file, "xr_movement_speed_mode=1\n");
     fprintf(file, "xr_left_stick_deadzone=0.15\n");
     fprintf(file, "xr_right_stick_deadzone=0.15\n");
     fprintf(file, "xr_max_input_threshold=0.90\n");
     fprintf(file, "xr_combat_hmd_locomotion=1\n");
-    fprintf(file, "xr_laser_dot_mode=1\n");
-    fprintf(file, "xr_laser_dot_radius_mm=6\n");
-    fprintf(file, "xr_laser_dot_scale_with_distance=0\n");
+    fprintf(file, "xr_laser_dot_mode=2\n");
+    fprintf(file, "xr_laser_dot_radius_mm=30\n");
+    fprintf(file, "xr_laser_dot_scale_with_distance=1\n");
     fprintf(file, "xr_hide_laser_dot_ads=0\n");
     // Default ON for the gameplay-input pipeline: both flags are required for the
     // VR controller to reach CP2077 as an XInput pad (otherwise the game detects no
@@ -215,12 +216,12 @@ void EnsureLiveControlFileExists() {
     // from reaching its main menu.
     fprintf(file, "xr_xinput_install=1\n");
     fprintf(file, "xr_input_actions=1\n");
-    fprintf(file, "xr_chord_activation=0\n");
+    fprintf(file, "xr_chord_activation=1\n");
     fprintf(file, "xr_extra_chord_actions=1\n");
     fprintf(file, "xr_mono_xqueue_wait=0\n");
     fprintf(file, "xr_snap_turn_pulse_ms=30\n");
     fprintf(file, "xr_mono_depth_capture=1\n");
-    fprintf(file, "xr_physical_body_rotation=0\n");
+    fprintf(file, "xr_physical_body_rotation=1\n");
     fprintf(file, "xr_ads_right_eye_alignment=0\n");
     fprintf(file, "xr_cutscene_suspend_tier=3\n");
     fprintf(file, "xr_immersive_holsters=1\n");

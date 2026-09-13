@@ -1,6 +1,6 @@
 // BodyYawFollow -- PHYSICAL BODY ROTATION: the character turns under the headset, the view does not
 // turn with it. Gated by "Physical body rotation" in the overlay (vrport.ini
-// xr_physical_body_rotation), off by default.
+// xr_physical_body_rotation), enabled by the Tofu default preset.
 //
 // THE GAME TURNS THE CHARACTER; THIS ONLY ASKS IT TO. The angle goes into the engine's own per-frame
 // heading delta on foot -- the channel the snap turn already uses (src/Hooks/OnFootDeltaHead.cpp) --

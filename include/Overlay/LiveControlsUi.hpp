@@ -46,7 +46,7 @@ struct LiveControlsUiState {
     // 0..3 enum (0=Game, 1=HMD, 2=LeftHand, 3=RightHand). The overlay edits the
     // latter and the proxy mirrors it back into the legacy field.
     int xrMovementSource;
-    // Left-stick locomotion magnitude. 0 = fixed after the deadzone (upstream default), 1 = analog.
+    // Left-stick locomotion magnitude. 0 = fixed after the deadzone (upstream default), 1 = analog (Tofu default).
     int xrMovementSpeedMode;
     // Raw stick tuning. Deadzones are per-stick; max threshold is shared by both sticks and full-stick gestures.
     float xrLeftStickDeadzone;
@@ -65,7 +65,7 @@ struct LiveControlsUiState {
     int xrXInputInstall;
     int xrInputActions;
     // Controller chord layout. 0 = left L3 + right stick D-pad (upstream default),
-    // 1 = right R3 + left stick D-pad, 2 = right
+    // 1 = right R3 + left stick D-pad (Tofu default), 2 = right
     // thumbrest + left stick D-pad.
     int xrChordActivation;
     // Optional chord actions only: VR recenter and F10 overlay toggle. D-pad
@@ -90,7 +90,7 @@ struct LiveControlsUiState {
     // ignoring visual holsters: over-shoulder = EquipmentSlot1, right hip = Slot2,
     // left hip = Slot3. Read by the CET Holster mod via GetVRSharedSlot(23).
     int xrImmersiveHolsters;
-    // Physical body rotation. 1 = the avatar body follows HMD yaw on foot. 0 (default) =
+    // Physical body rotation. 1 (Tofu default) = the avatar body follows HMD yaw on foot. 0 =
     // classic stick / snap-turn heading. Vehicles are unaffected either way. F10 -> Controls tab.
     int xrPhysicalBodyRotation;
     // Move the authored ADS arm pose from the cyclopean camera axis toward the right eye.
