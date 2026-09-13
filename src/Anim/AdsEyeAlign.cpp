@@ -489,6 +489,37 @@ bool ApplyShoulderConstraint(uint8_t* boneBuf, bool isLeft,
 
 }  // namespace
 
+bool ApplyWeaponShoulderConstraintForTarget(uint8_t* boneBuf, bool isLeft, const float* targetHand) {
+    if (!boneBuf || !targetHand || g_liveControls.xrWeaponShoulderConstraintTest == 0) {
+        return false;
+    }
+
+    const int upper = isLeft ? g_VRLeftUpperArmIdx : g_VRRightUpperArmIdx;
+    const int fore = isLeft ? g_VRLeftForeArmIdx : g_VRRightForeArmIdx;
+    const int hand = isLeft ? g_VRLeftBoneIdx : g_VRRightBoneIdx;
+    if (upper < 0 || fore < 0 || hand < 0 ||
+        upper >= VRIK_FKCount() || fore >= VRIK_FKCount() || hand >= VRIK_FKCount()) {
+        return false;
+    }
+
+    VRIK_ComputeFK(boneBuf, VRIK_FKCount());
+    float upperVec[3] = {g_fkPos[fore][0] - g_fkPos[upper][0],
+                         g_fkPos[fore][1] - g_fkPos[upper][1],
+                         g_fkPos[fore][2] - g_fkPos[upper][2]};
+    float foreVec[3] = {g_fkPos[hand][0] - g_fkPos[fore][0],
+                        g_fkPos[hand][1] - g_fkPos[fore][1],
+                        g_fkPos[hand][2] - g_fkPos[fore][2]};
+    const float upperLen = VRIK_Norm3(upperVec);
+    const float foreLen = VRIK_Norm3(foreVec);
+    if (upperLen < 1e-4f || foreLen < 1e-4f) return false;
+
+    ShoulderAngles rawAngles{}, constrainedAngles{};
+    const float minReach = std::fabs(upperLen - foreLen) + 1e-4f;
+    const float maxReach = upperLen + foreLen - 1e-4f;
+    return ApplyShoulderConstraint(
+        boneBuf, isLeft, targetHand, minReach, maxReach, rawAngles, constrainedAngles);
+}
+
 bool WriteWeaponModelRotViaRightHand(uint8_t* boneBuf, int weaponIdx,
                                      const float* desiredWeaponModel,
                                      const float* weaponLocalOverride) {
@@ -524,11 +555,18 @@ bool WriteWeaponModelRotViaRightHand(uint8_t* boneBuf, int weaponIdx,
 
 void PrepareAimArmTargets(uint8_t* boneBuf) {
     const bool headAim = IsHeadAimWeaponActive();
-    const bool nonVrikWeapon = g_pSharedHands && g_VRBind <= 0 &&
-                               g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
+    const bool weaponPoseActive = g_pSharedHands &&
+        (g_pSharedHands[vrshared::kWeaponFlag] > 0.5f ||
+         g_pSharedHands[vrshared::kMeleeWeaponFlag] > 0.5f);
+    const bool nonVrikWeapon = weaponPoseActive && g_VRBind <= 0;
     const bool nonVrik = nonVrikWeapon && CyberpunkVR_NonVrikAdsStabilizer;
-    const bool shoulderTest = nonVrikWeapon && !headAim &&
-                              g_liveControls.xrWeaponShoulderConstraintTest != 0;
+    // The F10 shoulder option is the safety gate. Apply it to every pose this shared solver can
+    // finish: ordinary non-VRIK poses and Head Aim (even when the saved VRIK preference is still
+    // mode 4). Full VRIK has a later owner and applies this same constraint immediately before
+    // VRIK_SolveArm(), so we deliberately do not pre-write that path here.
+    const bool shoulderTest = g_pSharedHands &&
+                              g_liveControls.xrWeaponShoulderConstraintTest != 0 &&
+                              (g_VRBind <= 0 || headAim);
     if (!shoulderTest) g_weaponShoulderConstraintDiag.valid = false;
     const bool aiming = g_isAiming;
     const bool alignmentEnabled = g_pSharedHands &&

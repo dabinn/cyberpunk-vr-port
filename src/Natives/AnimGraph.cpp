@@ -67,6 +67,7 @@
 #include "Anim/HeadAimWeapon.hpp"
 #include "Anim/AdsMuzzleStabilizer.hpp"
 #include "Anim/WeaponAim.hpp"
+#include "Core/LiveControls.hpp"
 #include "Natives/NativeState.hpp"
 #include "Natives/AnimInternal.hpp"
 #include "Natives/NativeHelpers.hpp"
@@ -362,9 +363,11 @@ void UpdateVRIKAnimInputs(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* 
         const bool headAimWork = cvr::anim::IsHeadAimWeaponActive();
         const bool nonVrikAdsWork = g_VRBind <= 0 && CyberpunkVR_NonVrikAdsStabilizer &&
             g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
+        const bool shoulderConstraintWork = g_VRBind <= 0 &&
+            g_liveControls.xrWeaponShoulderConstraintTest != 0;
         // Keep this in sync with Hooked_AnimPoseApply's hot-path work gate. This does not control
         // bootstrap; it only tells us when a stopped match counter is evidence of a stale player rig.
-        const bool poseWorkActive = g_VRBind > 0 || headAimWork || nonVrikAdsWork ||
+        const bool poseWorkActive = g_VRBind > 0 || headAimWork || nonVrikAdsWork || shoulderConstraintWork ||
             g_VRDiagCapture != 0 || g_WeaponRigActive != 0 || g_PoseCensusOn != 0 ||
             g_VRRecordFK != 0 || CyberpunkVR_TwoHandCaptureReq != 0 ||
             g_VRSmokeFingerActive != 0 || g_VRSmokeFingerCapture != 0 ||
