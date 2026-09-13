@@ -2,6 +2,9 @@
 
 # CyberpunkVR Port - Tofu Express X
 
+<p align="center"><img height="300" alt="車外第三人稱 VR 視角" src="https://github.com/user-attachments/assets/b7c7d759-2b73-4997-a48a-2d05e5a35aa5" /></p>
+<p align="center"><em>TE5開始支援車外視野！</em></p>
+
 **Tofu Express X** 是 CyberpunkVR Port 的另一個分支版本，在保留原版功能的同時，也提供更多額外的選項與設定，讓玩家能更自由地選擇自己喜歡的方式，在 VR 中體驗《Cyberpunk 2077》。
 
 這個專案最初著重於協助修復早期版本的問題，讓 VR Port 儘快達到可完整遊玩的狀態。隨著 VR Port 逐漸成熟，Tofu Express X 也開始在原本目標的基礎上，嘗試更廣泛的改善方向。
@@ -54,7 +57,15 @@ Auto Installer 也包含 Developer Mode，方便開發者測試本機檔案。
 
 * **可切換的搖桿到底 Sprint / Crouch。** 原版 Mod 會在左搖桿推到底時自動衝刺、右搖桿向下推到底時自動蹲下。現在可以從 F10 選單中自行開啟或關閉這些行為。
 
+* **類比移動與搖桿調整。** 移動時可保留左搖桿的類比輸入幅度，並可調整左右搖桿的 deadzone 與最大輸入門檻。
+
+<img height="120" alt="類比移動與搖桿調整" src="https://github.com/user-attachments/assets/94b40e11-14f8-4895-96e4-2a9dc541e559" />
+
 ## 視角控制與更可靠的武器瞄準
+
+* **車外第三人稱 VR 視角。** 車輛第三人稱視角現在支援立體渲染與完整 6DoF 頭部移動。這項新功能目前仍維持 opt-in，讓它有更多時間接受測試。
+
+<img height="300" alt="車外第三人稱 VR 視角" src="https://github.com/user-attachments/assets/b7c7d759-2b73-4997-a48a-2d05e5a35aa5" />
 
 * **修正垂直視角控制。** 關閉 **Disable Mouse Y** 後，現在可以正確恢復滑鼠或右搖桿的垂直視角控制，讓進階玩家擁有更多控制自由。
 
