@@ -126,8 +126,7 @@ extern "C" inline void* Hooked_AnimPoseApply(void* a1, void* a2, void* a3, unsig
     const bool nonVrikAdsWork = g_pSharedHands && CyberpunkVR_NonVrikAdsStabilizer &&
         g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
     const bool shoulderTestWork = g_pSharedHands && g_VRBind <= 0 &&
-        g_liveControls.xrWeaponShoulderConstraintTest != 0 &&
-        g_pSharedHands[vrshared::kWeaponFlag] > 0.5f;
+        g_liveControls.xrWeaponShoulderConstraintTest != 0;
     if (g_VRBind <= 0 && !headAimWork && !nonVrikAdsWork && !shoulderTestWork &&
         g_VRDiagCapture == 0 && g_WeaponRigActive == 0 &&
         g_PoseCensusOn == 0 && g_VRRecordFK == 0 && CyberpunkVR_TwoHandCaptureReq == 0 &&
@@ -1576,6 +1575,12 @@ if (g_VRRecordFK) {
                                 // right-wrist position/orientation target, so the finite-distance
                                 // correction uses the same pivot that VRIK_SolveArm will realize.
                                 cvr::anim::ApplyWristTargetAdsBallisticCorrection(boneBuf, target, handRot);
+                                // F10 shoulder clamp is a final anatomical bound, not a pose owner.
+                                // Apply the same T-pose/reach-aware constraint used by non-VRIK /
+                                // Head Aim after VRIK has chosen its final hand target, then let the
+                                // normal VRIK arm solver preserve that target. No vehicle/melee gate.
+                                cvr::anim::ApplyWeaponShoulderConstraintForTarget(
+                                    boneBuf, /*isLeft*/false, target);
                                 VRIK_SolveArm(boneBuf, g_VRRightUpperArmIdx, g_VRRightForeArmIdx,
                                               g_VRRightBoneIdx, target, handRot,
                                               bodyRight, bodyUp, bodyFwd,
@@ -1948,6 +1953,8 @@ if (g_VRRecordFK) {
                             cvr::anim::WheelStoreTarget(1, target);
                             cvr::anim::WheelBlendTarget(1, target, handRot);
                             if (!wheelOffL) {
+                                cvr::anim::ApplyWeaponShoulderConstraintForTarget(
+                                    boneBuf, /*isLeft*/true, target);
                                 VRIK_SolveArm(boneBuf, g_VRLeftUpperArmIdx, g_VRLeftForeArmIdx,
                                               g_VRLeftBoneIdx, target, handRot,
                                               bodyRight, bodyUp, bodyFwd,

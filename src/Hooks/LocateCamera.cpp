@@ -18,6 +18,7 @@
 #include "Camera/CameraLink.hpp"
 #include "Camera/CameraState.hpp"
 #include "Anim/CharacterRig.hpp"  // g_VrikFrameEpoch: exact camera/entity frame pairing
+#include "Anim/HeadAimWeapon.hpp"
 #include "Utils/LogThrottle.hpp"
 #include "Core/LiveControls.hpp"
 #include "Core/Telemetry.hpp"
@@ -998,13 +999,20 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val,
             vehOff[1] = g_liveControls.xrVehHeadOffsetY;
             vehOff[2] = g_liveControls.xrVehHeadOffsetZ;
         }
+        // Temporary release workaround: the upstream VRIK presentation was tuned around a higher
+        // view while full hand tracking owned the pose. Keep that 15 cm lift tied to the effective
+        // full-VRIK owner, so Head Aim (which suspends the controller-driven solve) and tracking OFF
+        // both return to the normal HMD height. Vehicles retain their dedicated seated offsets.
+        const float vrikViewLift = (!g_isInVehicle && g_VRBind == 4 && !cvr::anim::IsHeadAimWeaponActive())
+            ? 0.15f
+            : 0.0f;
         if (float* shEye = GetShotShared()) {
             if (allowGameCameraTranslation) {
                 // Publish the TOTAL view offset actually applied ([120..123]) so hand
                 // targets stay consistent with whatever the user tunes the view to.
                 shEye[120] = g_liveControls.xrHeadOffsetX + camBake[0] + vehOff[0];
                 shEye[121] = g_liveControls.xrHeadOffsetY + camBake[1] + vehOff[1];
-                shEye[122] = g_liveControls.xrHeadOffsetZ + camBake[2] + vehOff[2];
+                shEye[122] = g_liveControls.xrHeadOffsetZ + camBake[2] + vehOff[2] + vrikViewLift;
                 shEye[123] = 1.0f;
             } else {
                 shEye[123] = 0.0f;
@@ -1020,7 +1028,7 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val,
                  : 0.0f);
         const float localUp = xrPose.posY * posScale +
             (allowGameCameraTranslation
-                 ? (g_liveControls.xrHeadOffsetZ + camBake[2] + vehOff[2])
+                 ? (g_liveControls.xrHeadOffsetZ + camBake[2] + vehOff[2] + vrikViewLift)
                  : 0.0f);
 
         // Perfectly level heading matrix for translation (no sliding into the floor when pitched).

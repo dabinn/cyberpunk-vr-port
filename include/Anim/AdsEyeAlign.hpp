@@ -50,6 +50,11 @@ void PrepareAimArmTargets(uint8_t* boneBuf);
 // writer, because the right hand's rotation is read back from the pose it left.
 void SolvePreparedAimArms(uint8_t* boneBuf);
 
+// Apply the same T-pose/reach-aware shoulder constraint to one arm before another owner (for
+// example full VRIK) performs its own arm solve. The F10 option is the only feature gate here;
+// Head Aim, melee, vehicle and empty-hand state are deliberately not excluded.
+bool ApplyWeaponShoulderConstraintForTarget(uint8_t* boneBuf, bool isLeft, const float* targetHand);
+
 // Last sample from the experimental non-VRIK weapon-shoulder A/B. Diagnostics only; the returned
 // data never participates in the solve.
 bool GetWeaponShoulderConstraintDiag(WeaponShoulderConstraintDiag& out);
