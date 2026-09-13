@@ -2,6 +2,9 @@
 
 # CyberpunkVR Port - Tofu Express X
 
+<p align="center"><img height="300" alt="Third-person vehicle VR view" src="https://github.com/user-attachments/assets/b7c7d759-2b73-4997-a48a-2d05e5a35aa5" /></p>
+<p align="center"><em>TE5 now supports third-person vehicle views!</em></p>
+
 **Tofu Express X** is an alternative fork of CyberpunkVR Port that preserves the original features while providing additional options and settings, giving players more freedom to experience Cyberpunk 2077 in VR in the way they prefer.
 
 The project initially focused on helping fix issues in the early versions and bringing the VR Port to a fully playable state as quickly as possible. As the VR Port matured, Tofu Express X began exploring a broader range of improvements while continuing to build on that goal.
@@ -49,8 +52,15 @@ The mod is not limited to VR controllers. If you prefer a gamepad or even keyboa
 [Watch the vehicle combat demonstration on YouTube](https://www.youtube.com/watch?v=n6bx6JbvSgs)
 
 - **A toggle for full-stick sprint and crouch.** The original mod always sprints when the left stick is pushed fully forward and crouches when the right stick is pushed fully down. These behaviors can now be enabled or disabled from the F10 menu.
+- **Analog locomotion and stick tuning.** Movement can preserve analog left-stick magnitude, with configurable left/right stick deadzones and a maximum input threshold.
+
+<img height="120" alt="Analog locomotion and stick tuning" src="https://github.com/user-attachments/assets/94b40e11-14f8-4895-96e4-2a9dc541e559" />
 
 ## View Control and More Reliable Weapon Aiming
+
+- **Third-person vehicle view in VR.** Vehicle third-person view now supports stereo rendering and full 6DoF head movement. This new view remains opt-in for now while it receives more testing.
+
+<img height="300" alt="Third-person vehicle VR view" src="https://github.com/user-attachments/assets/b7c7d759-2b73-4997-a48a-2d05e5a35aa5" />
 
 - **Fixed vertical view control.** Turning off **Disable Mouse Y** now correctly restores vertical view control through the mouse or right stick, giving advanced players more control.
 - **Decoupled VR Head Aim** is designed for players who prefer a gamepad. Unlike traditional head aiming—sometimes jokingly called "gun-face"—head and body rotation are independent. You can freely aim the weapon with your head without changing the body's facing direction.
