@@ -57,7 +57,6 @@ local meleeEnabled = true
 local meleePrevRel = nil       -- weapon pos relative to player, last frame (so walking != a swing)
 local MELEE_SWING_SPEED = 2.5  -- m/s of weapon motion relative to player — peaks at 2-5 m/s on a real swing
 local MELEE_BOX = 0.22         -- blade hit radius (m) — tight to NPC body silhouette
-local mantisPrevHand = nil     -- right-hand raw position, last frame (mantis blades only) RA
 
 -- SWING WHOOSH: in the flat game the whoosh rides on the attack anim's audio events, which a VR
 -- swing never plays — so redscript VRMeleeWhoosh replays the weapon's own audio-config whoosh
@@ -1277,25 +1276,12 @@ registerForEvent('onUpdate', function(dt)
         -- newcomer gets its own pcall.
         if wpn then updateMuzzle(wpn) end
         local isMeleeWeapon = false
-        local isMantisBlades = false -- RA
-        pcall(function() -- Reworked to support mantis blades physical melee detection. RA
-            if wpn then
-                isMeleeWeapon = WeaponObject.IsMelee(wpn:GetItemID())
-                -- Cyberware arm weapons don't come back true from IsMelee(), and GetWeaponRecord()
-                -- is nil for them too -- identify by TDBID name instead (same technique this file
-                -- already uses for grip-family matching, a few lines up).
-                local key = nil
-                pcall(function() key = TDBID.ToStringDEBUG(ItemID.GetTDBID(wpn:GetItemID())) end)
-                -- logAlways("VRMantisProbe: key=%s", tostring(key)) -- check if it is mantis blades RA
-                if key and string.find(string.lower(key), 'mantis', 1, true) then
-                    isMantisBlades = true
-                    isMeleeWeapon = true   -- let it ride the same swing-detection pipeline as swords
-                end
-            end
+        pcall(function()
+            if wpn then isMeleeWeapon = WeaponObject.IsMelee(wpn:GetItemID()) end
             if type(SetVRMeleeWeaponState) == 'function' then
                 SetVRMeleeWeaponState(isMeleeWeapon and 1 or 0)
             end
-        end) -- End -- Reworked to support mantis blades physical melee detection. RA
+        end)
         local okSight = pcall(function() publishSightOrigin(wpn) end)
         if not okSight and type(SetVRSightOrigin) == 'function' then
             SetVRSightOrigin(0.0, 0.0, 0.0, 0)
@@ -1386,9 +1372,7 @@ registerForEvent('onUpdate', function(dt)
             speed = math.sqrt(dx*dx + dy*dy + dz*dz) / math.max(dt or 0.016, 0.001)
         end
         meleePrevRel = rel
-                if speed > 0.3 then
-            logAlways("VRSpeedProbe: speed=%.2f isMantis=%s", speed, tostring(isMantisBlades))
-        end
+
         -- VR GUARD decision (see the header above): guard ON unless the blade points into the
         -- forward thrust cone. thrust = dot(normalized 3D blade fwd, normalized horizontal body
         -- fwd): forward-horizontal ≈ 1 (no guard), up/down/across ≈ 0, reverse < 0 (guard).
@@ -1476,29 +1460,6 @@ registerForEvent('onUpdate', function(dt)
             local strong = false
             if type(GetVRMeleeTrigger) == 'function' then strong = (GetVRMeleeTrigger() == 1) end
             pcall(function() pl:VRMeleeBladeHit(wpn, wp, fwd, MELEE_BOX, strong) end)
-        end
-        -- MANTIS BLADES RT TEST -- tracks the RIGHT HAND directly (shared slots 9/10/11), not the
-        -- weapon transform: confirmed by testing that wpn:GetWorldPosition() stays flat when cyberware
-        -- blades are equipped, unlike a handheld sword.
-        if isMantisBlades and type(GetVRSharedSlot) == 'function' then
-            local hx, hy, hz = GetVRSharedSlot(9), GetVRSharedSlot(10), GetVRSharedSlot(11)
-            local handSpeed = 0.0
-            if mantisPrevHand then
-                local dx = hx - mantisPrevHand.x
-                local dy = hy - mantisPrevHand.y
-                local dz = hz - mantisPrevHand.z
-                handSpeed = math.sqrt(dx*dx + dy*dy + dz*dz) / math.max(dt or 0.016, 0.001)
-            end
-            mantisPrevHand = { x = hx, y = hy, z = hz }
-            if handSpeed > 0.3 then
-                -- logAlways("VRHandSpeedProbe: handSpeed=%.2f", handSpeed)   -- remove once confirmed
-            end
-            if handSpeed >= MELEE_SWING_SPEED and handSpeed < 20.0 and guardClock >= whooshEquipUntil then
-                if type(SetVRMeleeFire) == 'function' then
-                    -- logAlways("VRMantisRT: firing, handSpeed=%.2f", handSpeed)
-                    pcall(function() SetVRMeleeFire(1) end)
-                end
-            end
         end
     end)
 end)
