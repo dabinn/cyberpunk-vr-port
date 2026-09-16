@@ -1451,7 +1451,7 @@ registerForEvent('onUpdate', function(dt)
             end
         end
 
-        local isMeleeWeapon = false
+                local isMeleeWeapon = false
         local isMantisBlades = false -- RA01
         local isGorillaArms = false -- RA01
         local isMonowire = false -- RA01
@@ -1477,8 +1477,14 @@ registerForEvent('onUpdate', function(dt)
                     isMeleeWeapon = true
                 end
             end
+            -- RA01: keep isMeleeWeapon TRUE for monowire (needed so the swing/RT-fire pipeline below
+            -- still runs), but don't publish "melee weapon" to the native side for it -- that flag
+            -- also drives the non-VRIK ADS arm-pose solver, which ran a normal-weapon-geometry pose
+            -- solve for monowire's wire the instant it was equipped and produced a mid-slash-looking
+            -- idle pose.
+            local publishMeleeFlag = isMeleeWeapon and not isMonowire
             if type(SetVRMeleeWeaponState) == 'function' then
-                SetVRMeleeWeaponState(isMeleeWeapon and 1 or 0)
+                SetVRMeleeWeaponState(publishMeleeFlag and 1 or 0)
             end
         end) -- End -- Reworked to support mantis blades physical melee detection. RA01
         
@@ -1680,13 +1686,10 @@ registerForEvent('onUpdate', function(dt)
                 handSpeed = math.sqrt(dx*dx + dy*dy + dz*dz) / math.max(dt or 0.016, 0.001)
             end
             mantisPrevHand = { x = hx, y = hy, z = hz }
-            if not cyberMeleeArmLoggedOnce then
-                cyberMeleeArmLoggedOnce = true
-                local which = isMantisBlades and 'mantis' or (isGorillaArms and 'gorilla' or 'monowire')
-                if not cyberMeleeArmLoggedOnce[which] then
-                    cyberMeleeArmLoggedOnce[which] = true
-                    logAlways("CyberMeleeArm: detected=%s (tracking RIGHT hand, slots 9-11)", which)
-                end
+            local which = isMantisBlades and 'mantis' or (isGorillaArms and 'gorilla' or 'monowire')
+            if not cyberMeleeArmLoggedOnce[which] then
+                cyberMeleeArmLoggedOnce[which] = true
+                logAlways("CyberMeleeArm: detected=%s (tracking RIGHT hand, slots 9-11)", which)
             end
             -- RA01: edge-trigger + re-arm (same idea as the whoosh gate above) -- fire ONE RT tap per
             -- swing episode instead of holding RT down for the whole swing's duration above threshold.
