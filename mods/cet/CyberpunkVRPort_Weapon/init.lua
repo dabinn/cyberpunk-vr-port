@@ -64,7 +64,7 @@ local MELEE_BOX = 0.22         -- blade hit radius (m) — tight to NPC body sil
 
 -- Cyberware -- Cyberarms variables
 local mantisPrevHand = nil     -- right-hand raw position, last frame (mantis blades only) --RA01
-local cyberMeleeArmLoggedOnce = false -- logging variable RA01
+local cyberMeleeArmLoggedOnce = { mantis = false, gorilla = false, monowire = false } -- logging variable RA01
 local cyberMeleeArmArmed = true -- RA01: gate so RT taps once per swing, not every frame above threshold
 -- SWING WHOOSH: in the flat game the whoosh rides on the attack anim's audio events, which a VR
 -- swing never plays — so redscript VRMeleeWhoosh replays the weapon's own audio-config whoosh
@@ -1683,7 +1683,10 @@ registerForEvent('onUpdate', function(dt)
             if not cyberMeleeArmLoggedOnce then
                 cyberMeleeArmLoggedOnce = true
                 local which = isMantisBlades and 'mantis' or (isGorillaArms and 'gorilla' or 'monowire')
-                logAlways("CyberMeleeArm: detected=%s (tracking RIGHT hand, slots 9-11)", which)
+                if not cyberMeleeArmLoggedOnce[which] then
+                    cyberMeleeArmLoggedOnce[which] = true
+                    logAlways("CyberMeleeArm: detected=%s (tracking RIGHT hand, slots 9-11)", which)
+                end
             end
             -- RA01: edge-trigger + re-arm (same idea as the whoosh gate above) -- fire ONE RT tap per
             -- swing episode instead of holding RT down for the whole swing's duration above threshold.
