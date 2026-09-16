@@ -90,6 +90,17 @@ Choose from three Laser Dot modes:
 
 [Watch Surface Raycast tracking real surfaces](https://www.youtube.com/watch?v=lIXc0hclnn0)
 
+### Cyberwear arms Work in VR
+Mantis Blades, Projectile Launcher, Gorilla arms, and Mono Wire are all now fully playable in VR. 
+- **Controls ->**
+- ***Mantis Blades, Mono-wire, Gorilla-arms ->***
+- #### Normal attack -> Physically swing or punch right arm then left arm to attack normal.
+- #### Strong attack -> To do a strong attack, hold down RT, charge, then release
+- #### blocking -> LT
+- ***Projectile Launcher***
+- #### Move right arm over to left arm, press and hold/fast press right grip
+- #### Aim with the hmd using the cross hairs that appear
+
 ## Controller Setup
 
 Press **F10**, open **Controls**, and adjust the options to your preference.
