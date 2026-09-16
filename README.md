@@ -94,12 +94,18 @@ Choose from three Laser Dot modes:
 Mantis Blades, Projectile Launcher, Gorilla arms, and Mono Wire are all now fully playable in VR. 
 - **Controls ->**
 - ***Mantis Blades, Mono-wire, Gorilla-arms ->***
-- #### Normal attack -> Physically swing or punch right arm then left arm to attack normal.
-- #### Strong attack -> To do a strong attack, hold down RT, charge, then release
+- #### Normal attack -> *Physically swing or punch right arm then left arm to attack normal.*
+- #### Strong attack -> *To do a strong attack, hold down RT, charge, then release*
 - #### blocking -> LT
 - ***Projectile Launcher***
-- #### Move right arm over to left arm, press and hold/fast press right grip
-- #### Aim with the hmd using the cross hairs that appear
+- #### *Move right arm over to left arm, press and hold/fast press right grip*
+- #### *Aim with the hmd using the cross hairs that appear*
+
+- ##### Videos showing all arm cyberwear features with explation here ->
+- Mono-wire Demo/Howto -> https://youtu.be/-ztac2ud36g
+- Gorilla-arms Demo/Howto -> https://youtu.be/gDY4ZRkiSo0
+- Mantis-blades Demo/Howto -> https://youtu.be/Ig6a4Isk8Uk
+- Projectile-launcher-system Demo/Howto -> https://youtu.be/OWWRU60JJ1g
 
 ## Controller Setup
 
