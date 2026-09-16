@@ -325,7 +325,20 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val,
 
             if (playerHandle && g_equippedWeaponProp) {
                 auto equippedWeapon = g_equippedWeaponProp->GetValue<RED4ext::WeakHandle<RED4ext::IScriptable>>(playerHandle.instance);
-                g_hasWeaponEquipped = (equippedWeapon.instance != nullptr);
+                // RA01 - bug fix for Monowire and Projectile Launcher intermittent visual issue on load -> 
+                // NOT equippedWeapon.instance != nullptr. A WeakHandle's .instance is a raw
+                // pointer value copied at the moment this WeakHandle was constructed -- it is
+                // only cleared by the STRONG Handle's own destructor (SharedPtrBase::Destroy()),
+                // never by a WeakHandle that merely holds a copy of the same bits. Once
+                // equippedRightHandWeapon has pointed at any real weapon, .instance can keep
+                // reading non-null forever even after that weapon object is long destroyed --
+                // which is exactly the "stuck true for the rest of the session" pattern behind
+                // the Launcher/Monowire mis-render bug (see project doc
+                // cyberware-weaponflag-visual-bug.md). Expired() checks the live strong-ref
+                // count (refCount->strongRefs) instead of the cached pointer, so it correctly
+                // reports false once the referenced object is actually gone -- verified against
+                // RED4ext.SDK's Handle.hpp / Memory/SharedPtr.hpp.
+                g_hasWeaponEquipped = !equippedWeapon.Expired();
             }
 
             // Weapon flag lives in [144]. It used to be written to [126], COLLIDING with
