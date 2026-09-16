@@ -59,9 +59,13 @@ local muzzleDebugAt = nil --RA
 local meleeEnabled = true
 local meleePrevRel = nil       -- weapon pos relative to player, last frame (so walking != a swing)
 local MELEE_SWING_SPEED = 2.5  -- m/s of weapon motion relative to player — peaks at 2-5 m/s on a real swing
+local MELEE_REARM_SPEED = 1.0  -- m/s: hand must slow below this before the next RT tap can fire -- RA01
 local MELEE_BOX = 0.22         -- blade hit radius (m) — tight to NPC body silhouette
-local mantisPrevHand = nil     -- right-hand raw position, last frame (mantis blades only) RA
 
+-- Cyberware -- Cyberarms variables
+local mantisPrevHand = nil     -- right-hand raw position, last frame (mantis blades only) --RA01
+local cyberMeleeArmLoggedOnce = false -- logging variable RA01
+local cyberMeleeArmArmed = true -- RA01: gate so RT taps once per swing, not every frame above threshold
 -- SWING WHOOSH: in the flat game the whoosh rides on the attack anim's audio events, which a VR
 -- swing never plays — so redscript VRMeleeWhoosh replays the weapon's own audio-config whoosh
 -- (per-family, positional on the weapon). Fired here on the swing EDGE: once per swing episode
@@ -1448,19 +1452,29 @@ registerForEvent('onUpdate', function(dt)
         end
 
         local isMeleeWeapon = false
-        local isMantisBlades = false -- RA
-        pcall(function() -- Reworked to support mantis blades physical melee detection. RA01
-            if wpn then
+        local isMantisBlades = false -- RA01
+        local isGorillaArms = false -- RA01
+        local isMonowire = false -- RA01
+        pcall(function() -- Reworked to support mantis blades,mono wire, and gorilla arms physical melee detection. RA01
+             if wpn then
                 isMeleeWeapon = WeaponObject.IsMelee(wpn:GetItemID())
                 -- Cyberware arm weapons don't come back true from IsMelee(), and GetWeaponRecord()
                 -- is nil for them too -- identify by TDBID name instead (same technique this file
                 -- already uses for grip-family matching, a few lines up).
                 local key = nil
                 pcall(function() key = TDBID.ToStringDEBUG(ItemID.GetTDBID(wpn:GetItemID())) end)
-                -- logAlways("VRMantisProbe: key=%s", tostring(key)) -- check if it is mantis blades RA
-                if key and string.find(string.lower(key), 'mantis', 1, true) then
+                local low = key and string.lower(key) or nil
+                if low and string.find(low, 'mantis', 1, true) then
                     isMantisBlades = true
                     isMeleeWeapon = true   -- let it ride the same swing-detection pipeline as swords
+                end
+                if low and (string.find(low, 'strongarms', 1, true) or string.find(low, 'gorilla', 1, true)) then
+                    isGorillaArms = true
+                    isMeleeWeapon = true
+                end
+                if low and (string.find(low, 'nanowires', 1, true) or string.find(low, 'monowire', 1, true)) then
+                    isMonowire = true
+                    isMeleeWeapon = true
                 end
             end
             if type(SetVRMeleeWeaponState) == 'function' then
@@ -1649,10 +1663,14 @@ registerForEvent('onUpdate', function(dt)
             if type(GetVRMeleeTrigger) == 'function' then strong = (GetVRMeleeTrigger() == 1) end
             pcall(function() pl:VRMeleeBladeHit(wpn, wp, fwd, MELEE_BOX, strong) end)
         end
-        -- MANTIS BLADES RT TEST -- tracks the RIGHT HAND directly (shared slots 9/10/11), not the
-        -- weapon transform: confirmed by testing that wpn:GetWorldPosition() stays flat when cyberware
-        -- blades are equipped, unlike a handheld sword.
-        if isMantisBlades and type(GetVRSharedSlot) == 'function' then
+        -- CYBER-ARM MELEE RT -- mantis blades, gorilla arms and monowire all share the same problem:
+        -- wpn:GetWorldPosition() stays flat for cyberware arm weapons (confirmed for mantis by testing),
+        -- so swing speed comes from the RIGHT HAND directly (shared slots 9/10/11) instead of the weapon
+        -- pipeline above. Gorilla/monowire assumed to share mantis's right-hand mapping until tested --
+        -- see the one-time log below; if a swing never registers, that weapon is on the left hand instead.
+        -- RA01 --start
+        local isCyberMeleeArm = isMantisBlades or isGorillaArms or isMonowire
+        if isCyberMeleeArm and type(GetVRSharedSlot) == 'function' then
             local hx, hy, hz = GetVRSharedSlot(9), GetVRSharedSlot(10), GetVRSharedSlot(11)
             local handSpeed = 0.0
             if mantisPrevHand then
@@ -1662,16 +1680,24 @@ registerForEvent('onUpdate', function(dt)
                 handSpeed = math.sqrt(dx*dx + dy*dy + dz*dz) / math.max(dt or 0.016, 0.001)
             end
             mantisPrevHand = { x = hx, y = hy, z = hz }
-            if handSpeed > 0.3 then
-                -- logAlways("VRHandSpeedProbe: handSpeed=%.2f", handSpeed)   -- remove once confirmed
+            if not cyberMeleeArmLoggedOnce then
+                cyberMeleeArmLoggedOnce = true
+                local which = isMantisBlades and 'mantis' or (isGorillaArms and 'gorilla' or 'monowire')
+                logAlways("CyberMeleeArm: detected=%s (tracking RIGHT hand, slots 9-11)", which)
             end
-            if handSpeed >= MELEE_SWING_SPEED and handSpeed < 20.0 and guardClock >= whooshEquipUntil then
+            -- RA01: edge-trigger + re-arm (same idea as the whoosh gate above) -- fire ONE RT tap per
+            -- swing episode instead of holding RT down for the whole swing's duration above threshold.
+            if handSpeed < MELEE_REARM_SPEED then
+                cyberMeleeArmArmed = true
+            elseif cyberMeleeArmArmed and handSpeed >= MELEE_SWING_SPEED and handSpeed < 20.0
+               and guardClock >= whooshEquipUntil then
+                cyberMeleeArmArmed = false
                 if type(SetVRMeleeFire) == 'function' then
-                    -- logAlways("VRMantisRT: firing, handSpeed=%.2f", handSpeed)
                     pcall(function() SetVRMeleeFire(1) end)
                 end
             end
         end
+        -- RA01 --end
     end)
 end)
 
