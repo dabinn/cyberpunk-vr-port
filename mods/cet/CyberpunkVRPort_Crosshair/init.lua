@@ -1,55 +1,80 @@
 local container = nil
 
+-- RA01 force crosshair to show only when projectile launcher is active start
+local LAUNCHER_CROSSHAIR_OFFSET_Y = 350.0 --adjust launcher crosshair position -ie. where the laucher is aimed from
+            -- pos = y down, neg = y up ---- SetTranslation
+
+local function isLauncherEquipped()
+    local ok, result = pcall(function()
+        local pl = Game.GetPlayer()
+        local wpn = pl and pl:GetActiveWeapon()
+        if not wpn then return false end
+        local key = TDBID.ToStringDEBUG(ItemID.GetTDBID(wpn:GetItemID()))
+        return key ~= nil and string.find(string.lower(key), 'projectilelauncher', 1, true) ~= nil
+    end)
+    return ok and result or false
+end
+
+local crosshairOffsetLoggedOnce = false
+
+local function applyCrosshairVisibility()
+    if not container then return end
+    if not IsDefined(container) then
+        container = nil
+        return
+    end
+
+    local aimEnabled = GetVRWeaponAim()
+    local forceShow = isLauncherEquipped()
+    local visible = forceShow or (not aimEnabled)
+
+    local root = container:GetRootWidget()
+    local active = container:GetActiveCrosshairWidget()
+
+    root:SetVisible(visible)
+    active:SetVisible(visible)
+
+    -- Nudge it down for the launcher only. pcall'd on its own so if SetTranslation/Vector2.new
+    -- ever mismatches, only the positioning is lost -- the visibility toggle above still runs.
+    local offsetY = forceShow and LAUNCHER_CROSSHAIR_OFFSET_Y or 0.0
+    local ok = pcall(function()
+        root:SetTranslation(Vector2.new(0.0, offsetY))
+        active:SetTranslation(Vector2.new(0.0, offsetY))
+    end)
+    if not crosshairOffsetLoggedOnce then
+        crosshairOffsetLoggedOnce = true
+        if ok then
+            print(string.format("[VR] Crosshair offset applied: y=%.1f", offsetY))
+        else
+            print("[VR] Crosshair offset FAILED -- SetTranslation/Vector2.new didn't take")
+        end
+    end
+end
+-- RA01 force crosshair to show only when projectile launcher is active end
+
 registerForEvent("onInit", function()
-    -- Controlla se la funzione esiste (dentro onInit)
     if type(GetVRWeaponAim) ~= 'function' then
         print("[VR] ERROR: GetVRWeaponAim function not found!")
         return
     end
-    
 
     Observe("gameuiCrosshairContainerController", "OnInitialize", function(this)
         container = this
         print("[VR] Crosshair container captured")
     end)
 
-
     Observe("gameuiCrosshairBaseGameController", "OnCrosshairStateChange", function(this, old, new)
-        if not container then return end
-        if not IsDefined(container) then 
-            container = nil 
-            return
-        end
-
-        local aimEnabled = GetVRWeaponAim()
-
-        --print("[VR] OnCrosshairStateChange CALLED")        
-        if aimEnabled then
-            container:GetRootWidget():SetVisible(false)
-            container:GetActiveCrosshairWidget():SetVisible(false)
-        else
-            container:GetRootWidget():SetVisible(true)
-            container:GetActiveCrosshairWidget():SetVisible(true)
-        end
+        applyCrosshairVisibility()
     end)
 
     Observe("gameuiCrosshairBaseGameController", "UpdateCrosshairState", function(this)
-        if not container then return end
-        if not IsDefined(container) then 
-            container = nil 
-            return
-        end
+        applyCrosshairVisibility()
+    end)
 
-        local aimEnabled = GetVRWeaponAim()
-        
-        --print("[VR] UpdateCrosshairState CALLED")        
-
-        if aimEnabled then
-            container:GetRootWidget():SetVisible(false)
-            container:GetActiveCrosshairWidget():SetVisible(false)
-        else
-            container:GetRootWidget():SetVisible(true)
-            container:GetActiveCrosshairWidget():SetVisible(true)
-        end
+    -- Belt-and-suspenders: also re-assert every frame, in case the 
+    -- Projectile launcher becomes active
+    -- without either of the two events above firing on their own.
+    registerForEvent('onUpdate', function(dt)
+        pcall(applyCrosshairVisibility)
     end)
 end)

@@ -50,6 +50,9 @@ end
 
 local installed = false
 local installTimer = 0.0
+-- local plProbeAt = nil -- RA
+local axisProbeAt = nil -- RA
+local muzzleDebugAt = nil --RA
 
 -- VR motion-melee tuning + state. A VR swing (the player's own hand = the animation) deals damage via
 -- redscript on the touched enemy. NO RT injection (that would play the game's own attack animation).
@@ -300,7 +303,8 @@ local function killCameraRecoil(wpn, wid)
         -- shotgun first: it is the one class that wants both halves, and 'shotgundual' contains none
         -- of the other tokens
         if string.find(low, 'shotgun', 1, true) then cls = 3
-        elseif string.find(low, 'handgun', 1, true) or string.find(low, 'revolver', 1, true) then cls = 1
+        elseif string.find(low, 'handgun', 1, true) or string.find(low, 'revolver', 1, true)
+            or string.find(low, 'launcher', 1, true) or string.find(low, 'projectilelauncher', 1, true) then cls = 1 -- RA01
         -- SNIPERS BEFORE RIFLES, or 'sniperrifle' would be caught by the 'rifle' token below and lose
         -- its own class. The precision family goes with them: it is the semi-automatic half of the same
         -- thing and fires the same class of round.
@@ -315,7 +319,7 @@ local function killCameraRecoil(wpn, wid)
             or string.find(low, 'axe', 1, true)     or string.find(low, 'hammer', 1, true)
             or string.find(low, 'club', 1, true)    or string.find(low, 'chainsword', 1, true)
             or string.find(low, 'sword', 1, true)   or string.find(low, 'fists', 1, true)
-            or string.find(low, 'melee', 1, true)   then cls = 5
+            or string.find(low, 'melee', 1, true) then cls = 5
         end
     end
     if type(SetVRWeaponClass) == 'function' then SetVRWeaponClass(cls) end
@@ -430,9 +434,144 @@ local CARRY_TOL_M     = 0.01      -- a centimetre is close enough to stop
 local CARRY_MAX_TRIES = 3
 local muzzlePosProbed = false
 local muzzleEnumDone = false
+
+-- Cyberware arm fix - projectile launcher start - RA01 p1
+
+-- VRHandRawRot's raw orientation doesn't point where the launcher visually does -- confirmed by
+-- testing: shots landed consistently ~35 deg right and ~45 deg up from where the hand pointed.
+-- These two offsets rotate the published direction to compensate, done in WORLD space around the
+-- hand's OWN current right/up axes (from the already-verified GetRight/GetUp), so we don't have to
+-- guess which local axis index means "up" in this engine's convention.
+--
+-- Signs are a first guess from the reported error (rotate left/down to cancel a right/up bias).
+-- If a shot still drifts the same way, increase the magnitude; if it swings the OPPOSITE way
+-- (e.g. now goes left instead of centered), you overshot -- try half the value; if it goes
+-- somewhere unrelated entirely, negate the sign.
+local AIM_YAW_OFFSET_DEG   = -35.0   -- around the hand's current up axis
+local AIM_PITCH_OFFSET_DEG = -90.0   -- around the hand's current right axis
+
+local MUZZLE_TIP_OFFSET_FWD   = 0.20
+local MUZZLE_TIP_OFFSET_RIGHT = 0.00
+local MUZZLE_TIP_OFFSET_UP    = 0.00
+
+local function hamiltonMul(a, b)
+    return {
+        r = a.r*b.r - a.i*b.i - a.j*b.j - a.k*b.k,
+        i = a.r*b.i + a.i*b.r + a.j*b.k - a.k*b.j,
+        j = a.r*b.j - a.i*b.k + a.j*b.r + a.k*b.i,
+        k = a.r*b.k + a.i*b.j - a.j*b.i + a.k*b.r,
+    }
+end
+
+local function axisAngleQuat(axis, angleDeg)
+    local half = math.rad(angleDeg) * 0.5
+    local s = math.sin(half)
+    return { i = axis.x * s, j = axis.y * s, k = axis.z * s, r = math.cos(half) }
+end
+
+-- HEAD AIM for the projectile launcher specifically. The native toggle in HeadAimWeapon.cpp is a
+-- single global on/off switch with no per-weapon hook exposed to CET -- doing this natively would
+-- need a source change and a DLL rebuild. Same result without touching native code: since this
+-- weapon's whole muzzle publish already goes through here, swap the DIRECTION we publish to the
+-- camera's orientation instead of the hand's. The ORIGIN still comes from the hand -- that's a
+-- physical correction (wrist pivot -> barrel tip), unrelated to which way you're aiming.
+local headAimLoggedOnce = false
+
+local function publishMuzzleFromHand(x, y, z, qi, qj, qk, qr)
+    local handQ = Quaternion.new(qi, qj, qk, qr)
+
+    -- Pick the aim direction: camera orientation if we can get it, hand rotation as a safety
+    -- fallback if that call ever fails, so a bad lookup falls back to hand-aim instead of breaking
+    -- the weapon entirely.
+    local aimQ = handQ
+    local okCam, camQ = pcall(function()
+        local cam = Game.GetCameraSystem()
+        return cam and cam:GetActiveCameraOrientation()
+    end)
+    if okCam and camQ then
+        aimQ = camQ
+    end
+    if not headAimLoggedOnce then
+        headAimLoggedOnce = true
+        logAlways("LauncherHeadAim: %s (okCam=%s)",
+            (okCam and camQ) and "camera orientation OK -- using head aim" or "camera orientation unavailable -- falling back to hand aim",
+            tostring(okCam))
+    end
+
+    if type(SetVRMuzzleQuat) == 'function' then
+        SetVRMuzzleQuat(aimQ.i, aimQ.j, aimQ.k, aimQ.r)
+    end
+    if type(SetVRMuzzlePos) ~= 'function' then return end
+
+    -- Origin: still the hand's own position, nudged toward the barrel tip along the HAND's basis
+    -- (not the camera's) -- this is about where the launcher physically sits, not which way it aims.
+    local ox, oy, oz = x, y, z
+    pcall(function()
+        local f = Quaternion.GetForward(handQ)
+        local r = type(Quaternion.GetRight) == 'function' and Quaternion.GetRight(handQ) or nil
+        local u = type(Quaternion.GetUp) == 'function' and Quaternion.GetUp(handQ) or nil
+        if f then
+            ox = ox + f.x * MUZZLE_TIP_OFFSET_FWD
+            oy = oy + f.y * MUZZLE_TIP_OFFSET_FWD
+            oz = oz + f.z * MUZZLE_TIP_OFFSET_FWD
+        end
+        if r and MUZZLE_TIP_OFFSET_RIGHT ~= 0.0 then
+            ox = ox + r.x * MUZZLE_TIP_OFFSET_RIGHT
+            oy = oy + r.y * MUZZLE_TIP_OFFSET_RIGHT
+            oz = oz + r.z * MUZZLE_TIP_OFFSET_RIGHT
+        end
+        if u and MUZZLE_TIP_OFFSET_UP ~= 0.0 then
+            ox = ox + u.x * MUZZLE_TIP_OFFSET_UP
+            oy = oy + u.y * MUZZLE_TIP_OFFSET_UP
+            oz = oz + u.z * MUZZLE_TIP_OFFSET_UP
+        end
+    end)
+
+    SetVRMuzzlePos(ox, oy, oz)
+    if type(SetVRAimHit) ~= 'function' then return end
+    pcall(function()
+        local f = Quaternion.GetForward(aimQ)
+        if not f then return end
+        local o = Vector4.new(ox, oy, oz, 1)
+        local far = Vector4.new(ox + f.x * 200.0, oy + f.y * 200.0, oz + f.z * 200.0, 1)
+        local sq = Game.GetSpatialQueriesSystem()
+        if not sq then return end
+        local ok, res = sq:SyncRaycastByCollisionGroup(o, far, CName.new("Static"), false, false)
+        if ok and res and res.position then
+            local n = res.normal
+            SetVRAimHit(res.position.x, res.position.y, res.position.z,
+                        n and n.x or 0.0, n and n.y or 0.0, n and n.z or 0.0)
+        end
+    end)
+end
+
+-- 0 = left hand, 1 = right hand (native param is named `right`). Flip this if testing shows the
+-- launcher tracking the wrong arm.
+local CYBERARM_HAND_INDEX = 0
+-- Cyberware arm fix - projectile launcher end - RA01
+
 local function updateMuzzle(wpn)
+    -- Cyberware arm fix - coupled head aim - projectile launcher start p2 - RA01
+    local isCyberArmRanged = false
+    pcall(function()
+        local key = TDBID.ToStringDEBUG(ItemID.GetTDBID(wpn:GetItemID()))
+        if key and string.find(string.lower(key), 'projectilelauncher', 1, true) then
+            isCyberArmRanged = true
+        end
+    end)
+    if isCyberArmRanged and type(VRHandRawWorld) == 'function' and type(VRHandRawRot) == 'function' then
+        local okP, pos = pcall(VRHandRawWorld, CYBERARM_HAND_INDEX)
+        local okR, rot = pcall(VRHandRawRot, CYBERARM_HAND_INDEX)
+        if okP and okR and pos and rot then
+            publishMuzzleFromHand(pos.x, pos.y, pos.z, rot.i, rot.j, rot.k, rot.r)
+            return
+        end
+    end
+
     local xf = wpn:GetMuzzleSlotWorldTransform()
     if not xf then return end
+    -- Cyberware arm fix - projectile launcher start p2 - RA01
+
     local q = xf.Orientation or (xf.GetOrientation and xf:GetOrientation())
     if q and type(SetVRMuzzleQuat) == 'function' then
         SetVRMuzzleQuat(q.i, q.j, q.k, q.r)
@@ -1131,6 +1270,7 @@ end
 local function updateBarrelRay(dt)
     if type(GetVRSharedSlot) ~= 'function' then return end
     if type(SetVRBarrelRayHit) ~= 'function' then return end
+
     if GetVRSharedSlot(181) < 0.5 then
         stopBarrelRay()
         return
@@ -1168,6 +1308,8 @@ local function updateBarrelRay(dt)
     local worldHit, worldDistanceSq = nil, nil
     local success, result = barrelRaySystem:SyncRaycastByQueryPreset(
         from, to, BARREL_RAY_PRESET, false)
+    local launcherReticleActive = false -- RA01
+    local launcherReticleLoggedOnce = false -- RA01
     if success and result then
         local p = result.position
         if p and type(p.x) == 'number' and type(p.y) == 'number' and type(p.z) == 'number' then
@@ -1276,9 +1418,38 @@ registerForEvent('onUpdate', function(dt)
         -- immediately. Isolation belongs in the OTHER direction: the muzzle keeps its place and the
         -- newcomer gets its own pcall.
         if wpn then updateMuzzle(wpn) end
+        
+        -- check 2 RA
+        local isProjLauncher2 = false
+        if wpn then
+            pcall(function()
+                local key = TDBID.ToStringDEBUG(ItemID.GetTDBID(wpn:GetItemID()))
+                if key and string.find(string.lower(key), 'projectilelauncher', 1, true) then
+                    isProjLauncher2 = true
+                end
+            end)
+        end
+        if isProjLauncher2 and type(VRHandRawRot) == 'function' then
+            local now2 = (os and os.clock and os.clock()) or 0.0
+            if not axisProbeAt or now2 - axisProbeAt > 0.5 then
+                axisProbeAt = now2
+                local okR, rot = pcall(VRHandRawRot, CYBERARM_HAND_INDEX)
+                if okR and rot then
+                    local rq = Quaternion.new(rot.i, rot.j, rot.k, rot.r)
+                    local fwd = Quaternion.GetForward(rq)
+                    local right = type(Quaternion.GetRight) == 'function' and Quaternion.GetRight(rq) or nil
+                    local up = type(Quaternion.GetUp) == 'function' and Quaternion.GetUp(rq) or nil
+                    local pf = Game.GetPlayer() and Game.GetPlayer():GetWorldForward()
+                    logAlways("AxisProbe: handFwd=(%.2f,%.2f,%.2f) handRight=(%s) handUp=(%s) playerFwd=(%.2f,%.2f,%.2f)",
+                        fwd.x, fwd.y, fwd.z, tostring(right), tostring(up),
+                        pf and pf.x or -9, pf and pf.y or -9, pf and pf.z or -9)
+                end
+            end
+        end
+
         local isMeleeWeapon = false
         local isMantisBlades = false -- RA
-        pcall(function() -- Reworked to support mantis blades physical melee detection. RA
+        pcall(function() -- Reworked to support mantis blades physical melee detection. RA01
             if wpn then
                 isMeleeWeapon = WeaponObject.IsMelee(wpn:GetItemID())
                 -- Cyberware arm weapons don't come back true from IsMelee(), and GetWeaponRecord()
@@ -1295,7 +1466,8 @@ registerForEvent('onUpdate', function(dt)
             if type(SetVRMeleeWeaponState) == 'function' then
                 SetVRMeleeWeaponState(isMeleeWeapon and 1 or 0)
             end
-        end) -- End -- Reworked to support mantis blades physical melee detection. RA
+        end) -- End -- Reworked to support mantis blades physical melee detection. RA01
+        
         local okSight = pcall(function() publishSightOrigin(wpn) end)
         if not okSight and type(SetVRSightOrigin) == 'function' then
             SetVRSightOrigin(0.0, 0.0, 0.0, 0)
@@ -1387,7 +1559,7 @@ registerForEvent('onUpdate', function(dt)
         end
         meleePrevRel = rel
                 if speed > 0.3 then
-            logAlways("VRSpeedProbe: speed=%.2f isMantis=%s", speed, tostring(isMantisBlades))
+            -- logAlways("VRSpeedProbe: speed=%.2f isMantis=%s", speed, tostring(isMantisBlades))
         end
         -- VR GUARD decision (see the header above): guard ON unless the blade points into the
         -- forward thrust cone. thrust = dot(normalized 3D blade fwd, normalized horizontal body
