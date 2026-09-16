@@ -866,6 +866,11 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     fMeleeWeaponState->flags = flags;
     fMeleeWeaponState->AddParam("Int32", "melee");
     rtti->RegisterFunction(fMeleeWeaponState);
+    auto fWeaponState = RED4ext::CGlobalFunction::Create(
+        "SetVRWeaponState", "SetVRWeaponState", &SetVRWeaponState);
+    fWeaponState->flags = flags;
+    fWeaponState->AddParam("Int32", "weapon");
+    rtti->RegisterFunction(fWeaponState);
     auto fTrgMode = RED4ext::CGlobalFunction::Create("SetVRTriggerMode", "SetVRTriggerMode", &SetVRTriggerMode);
     fTrgMode->flags = flags; fTrgMode->AddParam("Int32","mode"); rtti->RegisterFunction(fTrgMode);
     auto fCamFreeze = RED4ext::CGlobalFunction::Create("SetVRCamBoneFreeze", "SetVRCamBoneFreeze", &SetVRCamBoneFreeze);

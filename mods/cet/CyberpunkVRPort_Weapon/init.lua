@@ -1486,6 +1486,19 @@ registerForEvent('onUpdate', function(dt)
             if type(SetVRMeleeWeaponState) == 'function' then
                 SetVRMeleeWeaponState(publishMeleeFlag and 1 or 0)
             end
+            -- kWeaponFlag (native shared[144]) gates the firearm-oriented ADS arm-pose solver and
+            -- the laser-dot overlay, both of which assume a real gun's muzzle-slot geometry. It used
+            -- to be auto-detected natively from equippedRightHandWeapon being non-null, but every
+            -- cyberware item classified above also occupies that same equip slot while active, so a
+            -- native "is anything equipped" test could never tell a real gun from cyberware -- that
+            -- was the actual cause of the intermittent Launcher/Monowire mis-render bug, not
+            -- staleness. This is the single source of truth for slot 144 now (native no longer
+            -- writes it in LocateCamera.cpp), same pattern as the melee flag above.
+            local publishWeaponFlag = (wpn ~= nil) and not isMeleeWeapon and not isMonowire
+                and not isMantisBlades and not isGorillaArms and not isProjLauncher2
+            if type(SetVRWeaponState) == 'function' then
+                SetVRWeaponState(publishWeaponFlag and 1 or 0)
+            end
         end) -- End -- Reworked to support mantis blades physical melee detection. RA01
         
         local okSight = pcall(function() publishSightOrigin(wpn) end)

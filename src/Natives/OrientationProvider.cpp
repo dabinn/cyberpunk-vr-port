@@ -1169,6 +1169,19 @@ void SetVRMeleeWeaponState(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, 
     EnsureSharedMemory();
     if (g_pSharedHands) g_pSharedHands[vrshared::kMeleeWeaponFlag] = v ? 1.0f : 0.0f;
 }
+// kWeaponFlag [144] gates the firearm-oriented ADS arm-pose solver and the laser-dot overlay --
+// both expect a REAL gun's muzzle-slot geometry. It used to be auto-detected natively in
+// LocateCamera.cpp from equippedRightHandWeapon being non-null, but cyberware (Projectile
+// Launcher, Monowire, Mantis Blades, Gorilla Arms) also occupies that same RTTI property while
+// active, so a raw "is anything equipped" test can't tell a real gun from cyberware -- it isn't a
+// staleness problem, the property genuinely reflects the cyberware. The CET side already
+// classifies every one of those cyberware items (same TDBID/IsMelee checks that feed
+// SetVRMeleeWeaponState above), so make it authoritative here too, the same way melee already is.
+void SetVRWeaponState(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t) {
+    int32_t v = 0; RED4ext::GetParameter(aFrame, &v); aFrame->code++;
+    EnsureSharedMemory();
+    if (g_pSharedHands) g_pSharedHands[vrshared::kWeaponFlag] = v ? 1.0f : 0.0f;
+}
 // THE PORT'S SAY OVER THE RIGHT TRIGGER -> shared[161], read by the XInput merge in the stereo module.
 // 0 = pass it through, 1 = swallow it, 2 = press it fully. The physical reload uses both ends: a revolver with its
 // cylinder swung out swallows the trigger (it has nothing under the hammer), and a cocked one presses it fully as
