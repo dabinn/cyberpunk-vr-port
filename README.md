@@ -102,9 +102,9 @@ Mantis Blades, Projectile Launcher, Gorilla arms, and Mono Wire are all now full
 - #### *Aim with the hmd using the cross hairs that appear*
 
 - ##### Videos showing all arm cyberwear features with explation here ->
-- Mono-wire Demo/Howto -> https://youtu.be/-ztac2ud36g
-- Gorilla-arms Demo/Howto -> https://youtu.be/gDY4ZRkiSo0
-- Mantis-blades Demo/Howto -> https://youtu.be/Ig6a4Isk8Uk
+- Mono-wire Demo/Howto -> https://youtu.be/JNLB6E0kyAM
+- Gorilla-arms Demo/Howto -> https://youtu.be/E5SZNIT-MOc
+- Mantis-blades Demo/Howto -> https://youtu.be/btSc5UCfmSs
 - Projectile-launcher-system Demo/Howto -> https://youtu.be/OWWRU60JJ1g
 
 ## Controller Setup
