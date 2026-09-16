@@ -266,7 +266,15 @@ static void cloud_cb_apply_vrcam(__int64 cb) {
 // that VRCAM does not follow the dusk-to-dawn transition at all, which is a TIME failure: the
 // weather/time-of-day blend reaches MAIN's view block and not the second one. Mode 2 prints
 // every differing run, so the extent of that block gets named instead of guessed at.
-extern "C" __declspec(dllexport) int32_t CyberpunkVR_ViewDataDiff = 2;   // OFF: 33 MB and 16693 lines per session
+extern "C" __declspec(dllexport) int32_t CyberpunkVR_ViewDataDiff = 0;   // OFF: 33 MB and 16693 lines per session --RA01 This dev diagnotic was left on, switching it from 2 to 0 to turn it off, it is causing the game to stutter every 10s.
+//RA01 notes on CyberpunkVR_ViewDataDiff and why it SHOULD be left off.
+//What CyberpunkVR_ViewDataDiff actually gates, tracing each call site:
+//ctx_diff_vrcam / ctx_capture_main — these write to a pair of globals (g_ctx_main, g_ctx_have) that literally nothing else in the file reads. They exist solely to produce the [fgflags-all] log line. Turning them off drops dead code paths, not functionality.
+//viewdata_diff_vrcam — same story, produces the [vdiff] and [fog] log lines by comparing two snapshots it holds itself. It never writes those snapshots back into the game's view data.
+//cloud_cb_diff_vrcam — already only fires at >= 2, so it's also just a log call.
+/*setting it to 0 just stops ~31,000 lines/session of mutex-locked memcpy + 
+  snprintf + disk writes that were happening every frame for no visual benefit
+     — which is exactly the reason for the every 10s stutter.*/
 constexpr size_t VIEWDATA_BYTES = 0xFF0;      // the view object's size, from the HUD reversing
 static uint8_t g_vd_main[VIEWDATA_BYTES];
 static std::atomic<bool> g_vd_have{false};
