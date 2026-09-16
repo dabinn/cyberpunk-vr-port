@@ -325,27 +325,39 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val,
 
             if (playerHandle && g_equippedWeaponProp) {
                 auto equippedWeapon = g_equippedWeaponProp->GetValue<RED4ext::WeakHandle<RED4ext::IScriptable>>(playerHandle.instance);
-                // RA01 - bug fix for Monowire and Projectile Launcher intermittent visual issue on load -> 
-                // NOT equippedWeapon.instance != nullptr. A WeakHandle's .instance is a raw
-                // pointer value copied at the moment this WeakHandle was constructed -- it is
-                // only cleared by the STRONG Handle's own destructor (SharedPtrBase::Destroy()),
-                // never by a WeakHandle that merely holds a copy of the same bits. Once
-                // equippedRightHandWeapon has pointed at any real weapon, .instance can keep
-                // reading non-null forever even after that weapon object is long destroyed --
-                // which is exactly the "stuck true for the rest of the session" pattern behind
-                // the Launcher/Monowire mis-render bug (see project doc
-                // cyberware-weaponflag-visual-bug.md). Expired() checks the live strong-ref
-                // count (refCount->strongRefs) instead of the cached pointer, so it correctly
-                // reports false once the referenced object is actually gone -- verified against
-                // RED4ext.SDK's Handle.hpp / Memory/SharedPtr.hpp.
+                // RA01 - bug fix attempt #1 for Monowire and Projectile Launcher intermittent visual
+                // issue on load -> Expired() over equippedWeapon.instance != nullptr: a WeakHandle's
+                // .instance is a raw pointer copied at construction time and only cleared by the
+                // STRONG Handle's own destructor, never by a WeakHandle holding a copy of the same
+                // bits, so a raw null check can read stale. Expired() checks the live strong-ref
+                // count instead (verified against RED4ext.SDK's Handle.hpp / Memory/SharedPtr.hpp) --
+                // more correct in general, but retested and NOT what was behind the bug (still
+                // reproduced after this alone): see the note below, and
+                // cyberware-weaponflag-visual-bug.md.
+                //
+                // g_hasWeaponEquipped is a broad "something is in the equip slot" signal consumed by
+                // XInput.cpp (lighter/vehicle-gun gating), WristGuard.cpp and TwoHandGrip.cpp -- those
+                // all legitimately want to fire for cyberware too (e.g. two-hand grip on the
+                // Launcher), so this stays a simple non-expired check. It is deliberately NOT used to
+                // gate shared slot 144 below anymore -- see that comment.
                 g_hasWeaponEquipped = !equippedWeapon.Expired();
             }
 
-            // Weapon flag lives in [144]. It used to be written to [126], COLLIDING with
-            // the OpenXR HMD position publish ([124..126] -- [126] is the HMD Z!) that
-            // VRIK reads as its head base and the overlay laser gate read as a weapon
-            // flag (audit find).
-            OpenXRManager::Get().SetSharedSlot(144, g_hasWeaponEquipped ? 1.0f : 0.0f);
+            // RA01 - bug fix attempt #2 for the same Monowire/Launcher bug -> kWeaponFlag [144] used
+            // to be auto-derived from g_hasWeaponEquipped right here, but that gates the
+            // firearm-oriented ADS arm-pose solver and the laser-dot overlay, both of which expect a
+            // REAL gun's muzzle-slot geometry -- and cyberware (Projectile Launcher, Monowire, Mantis
+            // Blades, Gorilla Arms) also occupies equippedRightHandWeapon while active, so "is
+            // anything equipped" can never be the right test here. It is not a staleness bug: the
+            // property genuinely reflects the cyberware. The CET Weapon mod already classifies every
+            // one of those items (TDBID / WeaponObject.IsMelee checks) to drive kMeleeWeaponFlag via
+            // SetVRMeleeWeaponState, so slot 144 is now driven the same way, exclusively, via
+            // SetVRWeaponState (src/Natives/OrientationProvider.cpp) -- do not also write it here, or
+            // the two writers will race every frame.
+            //
+            // Slot lives at [144]; it used to be written to [126], COLLIDING with the OpenXR HMD
+            // position publish ([124..126] -- [126] is the HMD Z!) that VRIK reads as its head base
+            // and the overlay laser gate read as a weapon flag (audit find).
             // In-vehicle flag [31]: the VRIK hook disables the whole BODY chain
             // (PlaceBodyUnderHMD / torso dampen / girdle pins / legs) while seated --
             // the vehicle drives the puppet, body IK fights it and breaks the
