@@ -446,17 +446,21 @@ void DrawBarrelCrosshair() {
     CyberpunkVR_BarrelDotWorld = laserDotMode;
 
     const float enableLaser = OpenXRManager::Get().GetSharedSlot(144);   // weapon flag (was [126]: HMD-Z collision)
+    // RA01: melee weapons and melee-style cyberware (Mantis Blades, Gorilla Arms, Monowire) publish
+    // this flag from Lua (SetVRMeleeWeaponState) -- keep the laser dot off them the same way the
+    // vanilla UI crosshair already is.
+    const float meleeFlag = OpenXRManager::Get().GetSharedSlot(vrshared::kMeleeWeaponFlag);
     const bool surfaceMode = laserDotMode == 2;
     const bool hideForAds = g_drawBarrelCross && g_liveControls.xrHideLaserDotAds != 0 && g_isAiming;
     const bool drawLaser = g_drawBarrelCross && !hideForAds;
-    const bool raycastActive = drawLaser && surfaceMode && enableLaser >= 0.9f;
+    const bool raycastActive = drawLaser && surfaceMode && enableLaser >= 0.9f && meleeFlag < 0.5f;
     // CET owns every physics query. Publish the UI/mode gate before returning so disabling a dot
     // stops muzzle and visibility work rather than merely stopping the final draw.
     OpenXRManager::Get().SetSharedSlot(vrshared::kBarrelRayActive, raycastActive ? 1.0f : 0.0f);
-    
+
     float rad = 3.0f;
-    
-    if (!drawLaser || enableLaser < 0.9f){
+
+    if (!drawLaser || enableLaser < 0.9f || meleeFlag >= 0.5f){
         // Clear the legacy mirror publication immediately when the common UI/weapon gate closes;
         // the HMD's dedicated second-eye ImGui list is reset independently every frame.
         CyberpunkVR_BarrelDotTick = 0;
