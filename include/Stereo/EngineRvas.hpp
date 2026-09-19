@@ -40,6 +40,7 @@ constexpr uintptr_t RUN_NODE_BATCH_SUBMIT_RVA = 0xA9BA28;
 constexpr uintptr_t RUN_NODE_BATCH_WORK_RVA   = 0xAC4A04;
 constexpr uintptr_t GRAPH_REQUEST_BUILD_RVA = 0x36FCD0;
 constexpr uintptr_t GRAPH_CONTEXT_PREPARE_RVA = 0x79ACA0;
+constexpr uintptr_t GRAPH_CACHE_LOOKUP_RVA = 0x983C80; // aggregate graph hash lookup/create before per-entry rebuild gate
 constexpr uintptr_t PREPARE_COLLECTOR_WORK_RVA = 0x79B03C;
 constexpr uintptr_t CAMERA_RESOURCE_SCOPE_WORK_RVA = 0xC992DC;
 constexpr uintptr_t FRAME_BUILD_MARKER_RVA = 0x244AE0;

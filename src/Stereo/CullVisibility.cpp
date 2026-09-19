@@ -895,9 +895,40 @@ static thread_local bool t_preserve_vrcam_graph = false;
 static thread_local void* t_preserve_container = nullptr;
 
 using GraphContextPrepareFn = void*(__fastcall*)(void*, void*, void*);
+using GraphCacheLookupFn = __int64(__fastcall*)(__int64, int, uint64_t, int, uint8_t*);
 using GraphContextResetFn = __int64(__fastcall*)(void*);
 static GraphContextPrepareFn g_orig_graph_context_prepare = nullptr;
+static GraphCacheLookupFn g_orig_graph_cache_lookup = nullptr;
 static GraphContextResetFn g_orig_graph_context_reset = nullptr;
+
+static thread_local uintptr_t t_graph_active_entry = 0;
+static thread_local uint64_t t_graph_active_key = 0;
+
+static __int64 __fastcall Detour_GraphCacheLookup(
+    __int64 cache, int arg2, uint64_t hash, int active_count, uint8_t* created) {
+    uint64_t effective_hash = hash;
+    const uint64_t vrcam_key = g_vrcam_ctx_key.load(std::memory_order_acquire);
+    const bool salt_vrcam = vrcam_key && t_graph_active_entry && t_graph_active_key == vrcam_key;
+    if (salt_vrcam) {
+        // The engine aggregate graph cache does not include the active graph-instance identity.
+        // A late-created VRCAM can therefore alias a graph compiled earlier for MAIN even though
+        // instance-salted resource declarations differ. Build a separate FNV domain from the
+        // original aggregate hash plus VRCAM's stable selection key instead of continuing the
+        // engine hash directly; the latter was observed to alias another startup cache variant.
+        effective_hash = 0xCBF29CE484222325ull;
+        auto mix_u64 = [&effective_hash](uint64_t value) {
+            for (uint32_t i = 0; i < 8; ++i) {
+                effective_hash ^= static_cast<uint8_t>(value);
+                effective_hash *= 0x100000001B3ull;
+                value >>= 8;
+            }
+        };
+        mix_u64(0x565243414D475250ull); // "VRCAMGRP" domain marker
+        mix_u64(hash);
+        mix_u64(vrcam_key);
+    }
+    return g_orig_graph_cache_lookup(cache, arg2, effective_hash, active_count, created);
+}
 
 static void* __fastcall Detour_GraphContextPrepare(void* a1, void* a2, void* a3) {
     const bool previous_preserve = t_preserve_vrcam_graph;
@@ -935,6 +966,19 @@ static void* __fastcall Detour_GraphContextPrepare(void* a1, void* a2, void* a3)
     }
 
     void* const result = g_orig_graph_context_prepare(a1, a2, a3);
+    t_graph_active_entry = 0;
+    t_graph_active_key = 0;
+    if (a1) {
+        __try {
+            auto* const base = reinterpret_cast<uint8_t*>(a1);
+            const uint32_t count = *reinterpret_cast<uint32_t*>(base + 0x54);
+            auto** const entries = *reinterpret_cast<uint8_t***>(base + 0x48);
+            if (count && entries && entries[0]) {
+                t_graph_active_entry = reinterpret_cast<uintptr_t>(entries[0]);
+                t_graph_active_key = *reinterpret_cast<uint64_t*>(entries[0] + 0x28);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
     t_preserve_vrcam_graph = previous_preserve;
     t_preserve_container = previous_container;
     return result;
@@ -1239,6 +1283,7 @@ void lod_thresh_report() {
 
 // ---- registered where they are defined -----------------------------------------------------
 CVR_DETOUR("[cull] DoCulling sub_140B2BEFC", DOCULLING_RVA, Detour_DoCulling, g_orig_doculling)
+CVR_DETOUR("[cull] GraphCacheLookup sub_140983C80", GRAPH_CACHE_LOOKUP_RVA, Detour_GraphCacheLookup, g_orig_graph_cache_lookup)
 CVR_DETOUR("[cull] GraphContextPrepare sub_14079ACA0", GRAPH_CONTEXT_PREPARE_RVA, Detour_GraphContextPrepare, g_orig_graph_context_prepare)
 CVR_DETOUR("[cull] GraphContextReset sub_14079C05C", GRAPH_CONTEXT_RESET_RVA, Detour_GraphContextReset, g_orig_graph_context_reset)
 CVR_DETOUR("[cull] MaterializeWorker sub_14036DDC4", MATERIALIZE_WORKER_RVA, Detour_MaterializeWorker, g_orig_materialize_worker)
