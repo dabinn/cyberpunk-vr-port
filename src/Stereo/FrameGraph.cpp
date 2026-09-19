@@ -244,6 +244,9 @@ static const uint64_t LIGHTING_COMPUTE_BIT_F1 = (1ULL << 24);    // CLEAR in f1 
 // its frustum -> main GI (ambient light/shadows) flicker out-the-window. CLEARED
 // for VRCAM -> its GI node skips the update and reuses main's GI.
 static const uint64_t GI_FEATURE_BIT = (1ULL << 31);
+// bit 33 feeds SharedPixelConsts+0x2E0. When present, PrepareSceneRendering writes
+// the normal lighting value; when absent it writes the disabled -1 sentinel.
+static const uint64_t SHARED_PIXEL_LIGHTING_BIT = (1ULL << 33);
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugFgMainF0 = 0x3C00017FAD75FF51ULL;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugFgMainF1 = 0x000000000517F008ULL;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugFgRttF0 = 0;
@@ -760,6 +763,11 @@ static thread_local uint32_t t_vrcam_h = 0;
 // thread that runs FlagCompute, so a command-list hook cannot use them.
 std::atomic<uint32_t> g_vrcam_view_w{0};
 std::atomic<uint32_t> g_vrcam_view_h{0};
+// FlagCompute runs before SetStreamlineConstants. The latter mirrors MAIN's AA/upscaler
+// mode (viewData+0xF94) onto VRCAM, but that is too late for feature-bit calculation.
+// Lend MAIN's mode only while FlagCompute runs, then restore VRCAM's native field.
+static std::atomic<uint32_t> g_flagcompute_main_aa{0};
+static std::atomic<bool> g_flagcompute_main_aa_valid{false};
 
 // STEP 1 SCOPE: this file forces the VRCAM view's PROJECTION only -- fov, zoom, near
 // and far, copied from MAIN so the second view frames the world identically. It does
@@ -867,7 +875,32 @@ __int64 __fastcall Detour_FlagCompute(void* a1, __int64 a2, __int64 a3, __int64 
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) { vrcam = false; }
     }
+    uint32_t flagcompute_saved_aa = 0;
+    bool flagcompute_restore_aa = false;
+    if (a3 && a4 && CyberpunkVR_StreamlineHistoryFix) {
+        __try {
+            const uint64_t key = *reinterpret_cast<uint64_t*>(a3 + 0x28);
+            uint32_t* const aa = reinterpret_cast<uint32_t*>(a4 + 0xF94);
+            if (key == 0) {
+                g_flagcompute_main_aa.store(*aa, std::memory_order_release);
+                g_flagcompute_main_aa_valid.store(true, std::memory_order_release);
+            } else if (key == g_vrcam_ctx_key &&
+                       g_flagcompute_main_aa_valid.load(std::memory_order_acquire)) {
+                const uint32_t want = g_flagcompute_main_aa.load(std::memory_order_acquire);
+                flagcompute_saved_aa = *aa;
+                if (flagcompute_saved_aa != want) {
+                    *aa = want;
+                    flagcompute_restore_aa = true;
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
     __int64 res = g_orig_flag_compute(a1, a2, a3, a4);
+    if (flagcompute_restore_aa) {
+        __try {
+            *reinterpret_cast<uint32_t*>(a4 + 0xF94) = flagcompute_saved_aa;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
     if (res && vrcam && g_force_view_flags.load(std::memory_order_relaxed)) {
         __try {
             // (Optional / default-OFF) Force VRCAM's feature flags to the current
@@ -911,6 +944,9 @@ __int64 __fastcall Detour_FlagCompute(void* a1, __int64 a2, __int64 a3, __int64 
                 }
                 if (CyberpunkVR_DistantReuseMode == 0)
                     vf0 &= ~DISTANT_SHADOW_BIT;   // A/B: distant OFF for vrcam
+                if (CyberpunkVR_StreamlineHistoryFix)
+                    vf0 = (vf0 & ~SHARED_PIXEL_LIGHTING_BIT) |
+                          (f[0] & SHARED_PIXEL_LIGHTING_BIT);
                 f[0] = vf0;
                 f[1] = m1;
                 CyberpunkVR_DebugFgRttF0 = f[0];
