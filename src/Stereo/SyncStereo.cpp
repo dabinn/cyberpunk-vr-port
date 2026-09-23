@@ -621,6 +621,16 @@ using Resolve3D20Fn = __int64(__fastcall*)(__int64, uint32_t*, uint32_t*, __int6
 static Resolve3D20Fn g_orig_resolve3d20 = nullptr;
 extern uint8_t* g_exe_base;     // defined below with the other engine globals
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugResolveHits = 0;
+// VolumetricFog's F31 pass consumes an anonymous temporal-history wrapper. The two
+// sequential stereo graph domains resolve that wrapper one generation apart even
+// though they are rendering the same stereo frame. MAIN is recorded after VRCAM, so
+// the next VRCAM invocation must consume the generation selected by the immediately
+// preceding MAIN invocation. Keep this fix at the exact F31 wrapper-B resolve site so
+// each eye still owns its current/output resource and every other fog resource.
+static std::atomic<uint32_t> g_fog_history_main_handle{0};
+static std::atomic<uint64_t> g_fog_history_main_seq{0};
+static std::atomic<uint64_t> g_fog_history_resolve_seq{0};
+extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugFogHistorySyncHits = 0;
 // ROOT CAUSE / ARCHITECTURAL FIX (layer 2 = deterministic version binding).
 // The frame graph versions each logical resource; a consumer resolves "the current
 // generation" of a logical id via the per-view declare counter v7 = *(a1+24064*salt+64)
@@ -685,6 +695,44 @@ static __int64 __fastcall Detour_Resolve3D20(__int64 reg, uint32_t* out,
     const __int64 r = g_orig_resolve3d20(reg, out, idp, r9);
     if (!out || !idp) return r;
     const uint32_t id = idp[0];
+
+    // Cyberpunk 2.31 VolumetricFog +0x61D0BB resolves wrapper-B immediately before
+    // F31BB266B5236342. Runtime tracing proved VRCAM selects the adjacent history-ring
+    // generation here; lending only MAIN's last selected generation fixes the missing
+    // night-window occlusion while leaving MAIN and the current/output UAV untouched.
+    if (g_exe_base && t_current_node_work ==
+            reinterpret_cast<uintptr_t>(g_exe_base) + VOLUMETRIC_FOG_NODE_RVA &&
+            (t_view_side == 0 || t_view_side == 1)) {
+        const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+        const uintptr_t base = reinterpret_cast<uintptr_t>(g_exe_base);
+        const uint32_t caller_rva = caller >= base
+            ? static_cast<uint32_t>(caller - base) : 0u;
+        if (caller_rva == 0x61D0C0u) {
+            const uint64_t seq = g_fog_history_resolve_seq.fetch_add(
+                1u, std::memory_order_acq_rel) + 1u;
+            if (t_view_side == 0) {
+                g_fog_history_main_handle.store(*out, std::memory_order_release);
+                g_fog_history_main_seq.store(seq, std::memory_order_release);
+            } else {
+                const uint64_t main_seq =
+                    g_fog_history_main_seq.load(std::memory_order_acquire);
+                const uint32_t main_handle =
+                    g_fog_history_main_handle.load(std::memory_order_acquire);
+                if (main_handle != 0u && main_seq != 0u && seq > main_seq &&
+                        (seq - main_seq) <= 2u && main_handle != *out) {
+                    *out = main_handle;
+                    const uint64_t hit = static_cast<uint64_t>(InterlockedIncrement64(
+                        reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugFogHistorySyncHits)));
+                    if (hit <= 8u) {
+                        log("[fog-history-sync] V hit=%llu key=%08X handle=%08X mainSeq=%llu seq=%llu",
+                            static_cast<unsigned long long>(hit), id, main_handle,
+                            static_cast<unsigned long long>(main_seq),
+                            static_cast<unsigned long long>(seq));
+                    }
+                }
+            }
+        }
+    }
     if ((id & 0x00FFFFFFu) != POSTCOLOR_LOW) return r;      // post-color ids only
     const bool in_fin = t_mirror_copy_node_active;          // vrcam Final2D consumer
     const bool in_tm  = t_vrcam_node_active && t_current_node_work ==
