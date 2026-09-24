@@ -37,4 +37,12 @@ registerForEvent("onUpdate", function(dt)
     VrcamSel.tick(dt)
 end)
 
+registerForEvent("onOverlayOpen", function()
+    SetVRCetOverlayVisible(1)
+end)
+
+registerForEvent("onOverlayClose", function()
+    SetVRCetOverlayVisible(0)
+end)
+
 return Stereo

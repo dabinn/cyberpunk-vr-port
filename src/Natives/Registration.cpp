@@ -9,9 +9,23 @@
 #include <RED4ext/RED4ext.hpp>
 #include <RED4ext/Scripting/Functions.hpp>
 
+extern void SetCetOverlayVisible(bool visible);
+
+static void SetVRCetOverlayVisible(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext); RED4EXT_UNUSED_PARAMETER(a4);
+    int32_t visible = 0;
+    RED4ext::GetParameter(aFrame, &visible);
+    aFrame->code++;
+    SetCetOverlayVisible(visible != 0);
+    if (aOut) *aOut = visible != 0 ? 1 : 0;
+}
+
 RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     auto rtti = RED4ext::CRTTISystem::Get();
     RED4ext::CBaseFunction::Flags flags = {.isNative = true, .isStatic = true};
+
+    auto cetOverlay = RED4ext::CGlobalFunction::Create("SetVRCetOverlayVisible", "SetVRCetOverlayVisible", &SetVRCetOverlayVisible);
+    cetOverlay->flags = flags; cetOverlay->SetReturnType("Int32"); cetOverlay->AddParam("Int32", "visible"); rtti->RegisterFunction(cetOverlay);
 
     auto f1 = RED4ext::CGlobalFunction::Create("GetLeftVRHandValid", "GetLeftVRHandValid", &GetLeftVRHandValid);
     f1->flags = flags; f1->SetReturnType("Bool"); rtti->RegisterFunction(f1);

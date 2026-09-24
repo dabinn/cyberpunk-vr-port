@@ -149,6 +149,27 @@ static GetSystemMetricsFn g_origGetSystemMetrics = nullptr;
 static GetMessagePosFn g_origGetMessagePos = nullptr;
 HWND g_gameHwnd = nullptr;
 
+static std::atomic<bool> g_cetVirtualCursorActive{false};
+static std::atomic<bool> g_cetVirtualCursorValid{false};
+static std::atomic<LONG> g_cetVirtualCursorX{0};
+static std::atomic<LONG> g_cetVirtualCursorY{0};
+static std::atomic<LONG> g_cetPhysicalCursorX{0};
+static std::atomic<LONG> g_cetPhysicalCursorY{0};
+static std::atomic<uint32_t> g_cetBoundaryCaptureMask{0};
+static RECT g_cetBoundarySavedClip{};
+static bool g_cetBoundarySavedClipValid = false;
+static std::mutex g_cetBoundaryCaptureMutex;
+
+enum CetBoundaryCapture : uint32_t {
+    CetCaptureLeft = 1u << 0,
+    CetCaptureRight = 1u << 1,
+    CetCaptureTop = 1u << 2,
+    CetCaptureBottom = 1u << 3,
+};
+
+static BOOL WINAPI HookedGetCursorPos(LPPOINT lpPoint);
+static BOOL WINAPI HookedSetCursorPos(int X, int Y);
+
 static BOOL SetPhysicalCursorClip(const RECT* rect) {
     static const auto clipCursor = reinterpret_cast<ClipCursorFn>(
         GetProcAddress(GetModuleHandleW(L"user32.dll"), "ClipCursor"));
@@ -161,6 +182,57 @@ struct DesktopCursorTransform {
     int clientWidth = 0;
     int clientHeight = 0;
 };
+
+static RECT GetCetBoundaryClipRect(const DesktopCursorTransform& transform, uint32_t mask) {
+    RECT rect{
+        transform.clientOrigin.x,
+        transform.clientOrigin.y,
+        transform.clientOrigin.x + transform.clientWidth,
+        transform.clientOrigin.y + transform.clientHeight,
+    };
+    if (mask & CetCaptureLeft) rect.right = rect.left + 1;
+    if (mask & CetCaptureRight) rect.left = rect.right - 1;
+    if (mask & CetCaptureTop) rect.bottom = rect.top + 1;
+    if (mask & CetCaptureBottom) rect.top = rect.bottom - 1;
+    return rect;
+}
+
+static bool ApplyCetBoundaryCursorClip(const DesktopCursorTransform& transform, uint32_t mask) {
+    if (!mask) return false;
+    const RECT rect = GetCetBoundaryClipRect(transform, mask);
+    return SetPhysicalCursorClip(&rect) != FALSE;
+}
+
+static void SetCetBoundaryCaptureMask(uint32_t mask, const DesktopCursorTransform& transform) {
+    std::lock_guard<std::mutex> lock(g_cetBoundaryCaptureMutex);
+    const uint32_t previous = g_cetBoundaryCaptureMask.load(std::memory_order_relaxed);
+    if (previous == mask) {
+        if (mask) ApplyCetBoundaryCursorClip(transform, mask);
+        return;
+    }
+
+    if (!previous && mask) {
+        g_cetBoundarySavedClipValid = GetClipCursor(&g_cetBoundarySavedClip) != FALSE;
+    }
+
+    g_cetBoundaryCaptureMask.store(mask, std::memory_order_release);
+    if (mask) {
+        ApplyCetBoundaryCursorClip(transform, mask);
+        return;
+    }
+
+    if (previous) {
+        SetPhysicalCursorClip(g_cetBoundarySavedClipValid ? &g_cetBoundarySavedClip : nullptr);
+        g_cetBoundarySavedClipValid = false;
+    }
+}
+
+static void ReleaseCetBoundaryCapture() {
+    std::lock_guard<std::mutex> lock(g_cetBoundaryCaptureMutex);
+    if (!g_cetBoundaryCaptureMask.exchange(0, std::memory_order_acq_rel)) return;
+    SetPhysicalCursorClip(g_cetBoundarySavedClipValid ? &g_cetBoundarySavedClip : nullptr);
+    g_cetBoundarySavedClipValid = false;
+}
 
 static bool GetDesktopCursorTransform(DesktopCursorTransform& out) {
     if (!g_gameHwnd) return false;
@@ -203,6 +275,215 @@ static POINT VirtualToPhysicalScreen(POINT point, const DesktopCursorTransform& 
         transform.clientOrigin.x + static_cast<LONG>(std::lround(x)),
         transform.clientOrigin.y + static_cast<LONG>(std::lround(y))
     };
+}
+
+static LONG ClampCetVirtualCoordinate(LONG value, bool horizontal) {
+    const LONG size = static_cast<LONG>(horizontal ? GetForcedDisplayModeWidth() : GetForcedDisplayModeHeight());
+    if (size <= 0) return 0;
+    return (std::max)(0L, (std::min)(size - 1, value));
+}
+
+static bool InitializeCetVirtualCursorFromPhysical() {
+    if (!g_origGetCursorPos) return false;
+
+    DesktopCursorTransform transform{};
+    POINT physical{};
+    if (!GetDesktopCursorTransform(transform) || !g_origGetCursorPos(&physical)) return false;
+
+    const POINT virtualScreen = PhysicalToVirtualScreen(physical, transform);
+    g_cetVirtualCursorX.store(
+        ClampCetVirtualCoordinate(virtualScreen.x - transform.clientOrigin.x, true), std::memory_order_relaxed);
+    g_cetVirtualCursorY.store(
+        ClampCetVirtualCoordinate(virtualScreen.y - transform.clientOrigin.y, false), std::memory_order_relaxed);
+    g_cetPhysicalCursorX.store(physical.x - transform.clientOrigin.x, std::memory_order_relaxed);
+    g_cetPhysicalCursorY.store(physical.y - transform.clientOrigin.y, std::memory_order_relaxed);
+    g_cetVirtualCursorValid.store(true, std::memory_order_release);
+    return true;
+}
+
+void SetCetVirtualCursorVisible(bool visible) {
+    if (!visible) {
+        ReleaseCetBoundaryCapture();
+        g_cetVirtualCursorActive.store(false, std::memory_order_release);
+        g_cetVirtualCursorValid.store(false, std::memory_order_release);
+        return;
+    }
+
+    ReleaseCetBoundaryCapture();
+    const bool initialized = InitializeCetVirtualCursorFromPhysical();
+    g_cetVirtualCursorActive.store(initialized, std::memory_order_release);
+}
+
+bool GetCetVirtualCursorClientPosition(float* x, float* y) {
+    if (!x || !y || !g_cetVirtualCursorActive.load(std::memory_order_acquire) ||
+        !g_cetVirtualCursorValid.load(std::memory_order_acquire)) {
+        return false;
+    }
+    *x = static_cast<float>(g_cetVirtualCursorX.load(std::memory_order_relaxed));
+    *y = static_cast<float>(g_cetVirtualCursorY.load(std::memory_order_relaxed));
+    return true;
+}
+
+void SyncCetVirtualCursorFromPhysicalClient(LPARAM lParam) {
+    if (!g_cetVirtualCursorActive.load(std::memory_order_acquire)) return;
+
+    DesktopCursorTransform transform{};
+    if (!GetDesktopCursorTransform(transform)) return;
+
+    const LONG physicalX = static_cast<short>(LOWORD(lParam));
+    const LONG physicalY = static_cast<short>(HIWORD(lParam));
+    g_cetPhysicalCursorX.store(physicalX, std::memory_order_relaxed);
+    g_cetPhysicalCursorY.store(physicalY, std::memory_order_relaxed);
+
+    const uint32_t capture = g_cetBoundaryCaptureMask.load(std::memory_order_acquire);
+    LONG nextX = g_cetVirtualCursorX.load(std::memory_order_relaxed);
+    LONG nextY = g_cetVirtualCursorY.load(std::memory_order_relaxed);
+    if (!(capture & (CetCaptureLeft | CetCaptureRight))) {
+        nextX = ClampCetVirtualCoordinate(static_cast<LONG>(std::lround(
+            transform.cover.sourceX + static_cast<double>(physicalX) * transform.cover.sourceWidth /
+                transform.cover.destinationWidth)), true);
+    }
+    if (!(capture & (CetCaptureTop | CetCaptureBottom))) {
+        nextY = ClampCetVirtualCoordinate(static_cast<LONG>(std::lround(
+            transform.cover.sourceY + static_cast<double>(physicalY) * transform.cover.sourceHeight /
+                transform.cover.destinationHeight)), false);
+    }
+
+    g_cetVirtualCursorX.store(nextX, std::memory_order_relaxed);
+    g_cetVirtualCursorY.store(nextY, std::memory_order_relaxed);
+    g_cetVirtualCursorValid.store(true, std::memory_order_release);
+}
+
+void UpdateCetVirtualCursorFromRawInput(LPARAM lParam) {
+    if (!g_cetVirtualCursorActive.load(std::memory_order_acquire) ||
+        !g_cetVirtualCursorValid.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    RAWINPUT input{};
+    UINT size = sizeof(input);
+    if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, &input, &size,
+                        sizeof(RAWINPUTHEADER)) != sizeof(input) ||
+        input.header.dwType != RIM_TYPEMOUSE || (input.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {
+        return;
+    }
+
+    DesktopCursorTransform transform{};
+    if (!GetDesktopCursorTransform(transform)) return;
+
+    LONG x = g_cetVirtualCursorX.load(std::memory_order_relaxed);
+    LONG y = g_cetVirtualCursorY.load(std::memory_order_relaxed);
+    const LONG physicalX = g_cetPhysicalCursorX.load(std::memory_order_relaxed);
+    const LONG physicalY = g_cetPhysicalCursorY.load(std::memory_order_relaxed);
+    const double visibleMinX = transform.cover.sourceX;
+    const double visibleMaxX = transform.cover.sourceX + transform.cover.sourceWidth - 1.0;
+    const double visibleMinY = transform.cover.sourceY;
+    const double visibleMaxY = transform.cover.sourceY + transform.cover.sourceHeight - 1.0;
+    const LONG dx = input.data.mouse.lLastX;
+    const LONG dy = input.data.mouse.lLastY;
+    const LONG scaledDx = static_cast<LONG>(std::lround(
+        static_cast<double>(dx) * transform.cover.sourceWidth / transform.cover.destinationWidth));
+    const LONG scaledDy = static_cast<LONG>(std::lround(
+        static_cast<double>(dy) * transform.cover.sourceHeight / transform.cover.destinationHeight));
+    const LONG minX = static_cast<LONG>(std::lround(visibleMinX));
+    const LONG maxX = static_cast<LONG>(std::lround(visibleMaxX));
+    const LONG minY = static_cast<LONG>(std::lround(visibleMinY));
+    const LONG maxY = static_cast<LONG>(std::lround(visibleMaxY));
+    const LONG virtualMaxX = static_cast<LONG>(GetForcedDisplayModeWidth()) - 1;
+    const LONG virtualMaxY = static_cast<LONG>(GetForcedDisplayModeHeight()) - 1;
+    uint32_t capture = g_cetBoundaryCaptureMask.load(std::memory_order_acquire);
+    const uint32_t previousCapture = capture;
+
+    if (capture & CetCaptureLeft) {
+        const LONG candidate = ClampCetVirtualCoordinate(x + scaledDx, true);
+        if (scaledDx > 0 && candidate >= minX) {
+            x = minX;
+            capture &= ~CetCaptureLeft;
+        } else {
+            x = candidate;
+        }
+    } else if (capture & CetCaptureRight) {
+        const LONG candidate = ClampCetVirtualCoordinate(x + scaledDx, true);
+        if (scaledDx < 0 && candidate <= maxX) {
+            x = maxX;
+            capture &= ~CetCaptureRight;
+        } else {
+            x = candidate;
+        }
+    } else if (minX > 0 && physicalX <= 0 && dx < 0) {
+        capture |= CetCaptureLeft;
+        x = ClampCetVirtualCoordinate(x + scaledDx, true);
+    } else if (maxX < virtualMaxX && physicalX >= transform.clientWidth - 1 && dx > 0) {
+        capture |= CetCaptureRight;
+        x = ClampCetVirtualCoordinate(x + scaledDx, true);
+    }
+
+    if (capture & CetCaptureTop) {
+        const LONG candidate = ClampCetVirtualCoordinate(y + scaledDy, false);
+        if (scaledDy > 0 && candidate >= minY) {
+            y = minY;
+            capture &= ~CetCaptureTop;
+        } else {
+            y = candidate;
+        }
+    } else if (capture & CetCaptureBottom) {
+        const LONG candidate = ClampCetVirtualCoordinate(y + scaledDy, false);
+        if (scaledDy < 0 && candidate <= maxY) {
+            y = maxY;
+            capture &= ~CetCaptureBottom;
+        } else {
+            y = candidate;
+        }
+    } else if (minY > 0 && physicalY <= 0 && dy < 0) {
+        capture |= CetCaptureTop;
+        y = ClampCetVirtualCoordinate(y + scaledDy, false);
+    } else if (maxY < virtualMaxY && physicalY >= transform.clientHeight - 1 && dy > 0) {
+        capture |= CetCaptureBottom;
+        y = ClampCetVirtualCoordinate(y + scaledDy, false);
+    }
+
+    g_cetVirtualCursorX.store(x, std::memory_order_relaxed);
+    g_cetVirtualCursorY.store(y, std::memory_order_relaxed);
+    if (capture != previousCapture) SetCetBoundaryCaptureMask(capture, transform);
+}
+
+static BOOL WINAPI HookedCetGetCursorPos(LPPOINT lpPoint) {
+    if (lpPoint && g_cetVirtualCursorActive.load(std::memory_order_acquire) &&
+        g_cetVirtualCursorValid.load(std::memory_order_acquire)) {
+        DesktopCursorTransform transform{};
+        if (GetDesktopCursorTransform(transform)) {
+            lpPoint->x = transform.clientOrigin.x + g_cetVirtualCursorX.load(std::memory_order_relaxed);
+            lpPoint->y = transform.clientOrigin.y + g_cetVirtualCursorY.load(std::memory_order_relaxed);
+            return TRUE;
+        }
+    }
+    return HookedGetCursorPos(lpPoint);
+}
+
+static BOOL WINAPI HookedCetSetCursorPos(int X, int Y) {
+    if (g_cetVirtualCursorActive.load(std::memory_order_acquire)) {
+        DesktopCursorTransform transform{};
+        if (GetDesktopCursorTransform(transform)) {
+            const LONG virtualX = ClampCetVirtualCoordinate(X - transform.clientOrigin.x, true);
+            const LONG virtualY = ClampCetVirtualCoordinate(Y - transform.clientOrigin.y, false);
+            g_cetVirtualCursorX.store(virtualX, std::memory_order_relaxed);
+            g_cetVirtualCursorY.store(virtualY, std::memory_order_relaxed);
+            g_cetVirtualCursorValid.store(true, std::memory_order_release);
+            uint32_t capture = 0;
+            const double visibleMinX = transform.cover.sourceX;
+            const double visibleMaxX = transform.cover.sourceX + transform.cover.sourceWidth - 1.0;
+            const double visibleMinY = transform.cover.sourceY;
+            const double visibleMaxY = transform.cover.sourceY + transform.cover.sourceHeight - 1.0;
+            if (virtualX < visibleMinX) capture |= CetCaptureLeft;
+            else if (virtualX > visibleMaxX) capture |= CetCaptureRight;
+            if (virtualY < visibleMinY) capture |= CetCaptureTop;
+            else if (virtualY > visibleMaxY) capture |= CetCaptureBottom;
+            SetCetBoundaryCaptureMask(capture, transform);
+            const POINT mapped = VirtualToPhysicalScreen({X, Y}, transform);
+            return g_origSetCursorPos ? g_origSetCursorPos(mapped.x, mapped.y) : FALSE;
+        }
+    }
+    return HookedSetCursorPos(X, Y);
 }
 
 static LONG VirtualEdgeToPhysical(LONG value, bool horizontal, const DesktopCursorTransform& transform) {
@@ -496,6 +777,16 @@ void InstallOSHooks() {
         HookIAT(hMod, "user32.dll", "GetSystemMetrics", reinterpret_cast<void*>(HookedGetSystemMetrics), reinterpret_cast<void**>(&g_origGetSystemMetrics));
         HookIAT(hMod, "user32.dll", "GetMessagePos", reinterpret_cast<void*>(HookedGetMessagePos), reinterpret_cast<void**>(&g_origGetMessagePos));
     }
+
+    // CET has its own Win32 ImGui backend. Give it the same virtual client and cursor
+    // coordinates as the game; its mouse-message path is handled by OverlayWndProc.
+    if (HMODULE hCet = GetModuleHandleA("cyber_engine_tweaks.asi")) {
+        HookIAT(hCet, "user32.dll", "GetClientRect", reinterpret_cast<void*>(HookedGetClientRect), reinterpret_cast<void**>(&g_origGetClientRect));
+        HookIAT(hCet, "user32.dll", "GetCursorPos", reinterpret_cast<void*>(HookedCetGetCursorPos), reinterpret_cast<void**>(&g_origGetCursorPos));
+        HookIAT(hCet, "user32.dll", "SetCursorPos", reinterpret_cast<void*>(HookedCetSetCursorPos), reinterpret_cast<void**>(&g_origSetCursorPos));
+    } else {
+        Log("InstallOSHooks: CET module not loaded; CET cursor hooks unavailable\n");
+    }
 }
 
 static bool GetClampedClientRect(HWND hwnd, RECT* outRect) {
@@ -532,6 +823,14 @@ static bool GetClampedClientRect(HWND hwnd, RECT* outRect) {
 }
 
 void UpdateCursorCapture(HWND hwnd) {
+    const uint32_t cetCapture = g_cetBoundaryCaptureMask.load(std::memory_order_acquire);
+    if (cetCapture) {
+        DesktopCursorTransform transform{};
+        if (GetDesktopCursorTransform(transform) && ApplyCetBoundaryCursorClip(transform, cetCapture)) {
+            return;
+        }
+    }
+
     if (OverlayIsVisible()) {
         if (g_cursorClipped) {
             SetPhysicalCursorClip(nullptr);

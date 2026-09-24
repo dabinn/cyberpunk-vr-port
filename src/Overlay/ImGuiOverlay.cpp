@@ -1,6 +1,8 @@
 #include "Overlay/ImGuiOverlay.hpp"
 #include "Overlay/LiveControlsUi.hpp"
+#include "Render/DesktopMirror.hpp"
 #include "Runtimes/OpenXRManager.hpp"
+#include "Stereo/CetOverlayLayer.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -21,6 +23,10 @@ extern volatile int g_verboseLog; // per-frame log spam toggle (default off)
 
 
 extern void Log(const char* fmt, ...);
+extern void SetCetVirtualCursorVisible(bool visible);
+extern bool GetCetVirtualCursorClientPosition(float* x, float* y);
+extern void SyncCetVirtualCursorFromPhysicalClient(LPARAM lParam);
+extern void UpdateCetVirtualCursorFromRawInput(LPARAM lParam);
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -144,6 +150,7 @@ HWND g_hwnd = nullptr;
 WNDPROC g_originalWndProc = nullptr;
 bool g_imguiInitialized = false;
 bool g_menuVisible = false;
+std::atomic<bool> g_cetOverlayVisible{false};
 std::atomic<uint32_t> g_menuToggleRequests{0};
 bool g_drawHandLocator = false;
 bool g_drawHandProxy3D = false;
@@ -189,6 +196,7 @@ void ReleaseRenderTargets() {
             Log("Overlay teardown drain timed out; continuing (the device may be gone).\n");
         }
     }
+    CetOverlayInvalidateSwapchainResources();
     for (FrameContext& frame : g_frames) {
         SafeRelease(frame.renderTarget);
         SafeRelease(frame.allocator);
@@ -200,6 +208,14 @@ void ReleaseRenderTargets() {
     SafeRelease(g_swapChain3);
     g_frameCount = 0;
     g_rtvFormat = DXGI_FORMAT_UNKNOWN;
+}
+
+bool OverlayIsSwapchainBackbuffer(ID3D12Resource* resource) {
+    if (!resource) return false;
+    for (const FrameContext& frame : g_frames) {
+        if (frame.renderTarget == resource) return true;
+    }
+    return false;
 }
 
 void ShutdownOverlay() {
@@ -459,6 +475,9 @@ void ToggleOverlayMenu() {
     if (g_menuVisible) {
         ReleaseGameMouseCapture();
     }
+    if (g_cetOverlayVisible.load(std::memory_order_relaxed)) {
+        SetCetVirtualCursorVisible(!g_menuVisible);
+    }
     if (g_verboseLog) Log("ImGui overlay %s.\n", g_menuVisible ? "shown" : "hidden");
 }
 
@@ -466,6 +485,24 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     static int totalMsgCount = 0;
     if (g_verboseLog && totalMsgCount++ % 5000 == 0) {
         Log("OverlayWndProc: msg=%u, hwnd=%p, count=%d\n", msg, hwnd, totalMsgCount);
+    }
+
+    const bool cetCursorActive = g_cetOverlayVisible.load(std::memory_order_relaxed) && !g_menuVisible;
+    if (cetCursorActive) {
+        if (msg == WM_INPUT) {
+            UpdateCetVirtualCursorFromRawInput(lParam);
+        } else if (msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
+                   msg == WM_LBUTTONDBLCLK || msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
+                   msg == WM_RBUTTONDBLCLK || msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP ||
+                   msg == WM_MBUTTONDBLCLK || msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP) {
+            SyncCetVirtualCursorFromPhysicalClient(lParam);
+        } else if (msg == WM_KILLFOCUS) {
+            SetCetVirtualCursorVisible(false);
+        } else if (msg == WM_SETFOCUS) {
+            SetCetVirtualCursorVisible(true);
+        }
+    } else if (msg == WM_SETFOCUS && g_cetOverlayVisible.load(std::memory_order_relaxed) && !g_menuVisible) {
+        SetCetVirtualCursorVisible(true);
     }
 
     // 1. Scale mouse coordinates FIRST so ImGui and game receive the scaled input
@@ -515,10 +552,26 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
     }
 
+    if (g_cetOverlayVisible.load(std::memory_order_relaxed) && !g_menuVisible &&
+        (msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
+         msg == WM_LBUTTONDBLCLK || msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
+         msg == WM_RBUTTONDBLCLK || msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP ||
+         msg == WM_MBUTTONDBLCLK || msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP)) {
+        float x = 0.0f;
+        float y = 0.0f;
+        if (GetCetVirtualCursorClientPosition(&x, &y)) {
+            lParam = MAKELPARAM(static_cast<WORD>(std::lround(x)), static_cast<WORD>(std::lround(y)));
+        }
+    }
     return g_originalWndProc ? CallWindowProcA(g_originalWndProc, hwnd, msg, wParam, lParam) : DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 }  // namespace overlay
 using namespace overlay;
+
+void SetCetOverlayVisible(bool visible) {
+    g_cetOverlayVisible.store(visible, std::memory_order_relaxed);
+    SetCetVirtualCursorVisible(visible && !g_menuVisible);
+}
 
 extern "C" void RequestOverlayToggle() {
     g_menuToggleRequests.fetch_add(1, std::memory_order_release);
@@ -616,6 +669,27 @@ void OverlayRender(IDXGISwapChain* swapChain) {
     DrawBarrelCrosshair();
     DrawCompactAdsCameraTelemetry();
 
+    if (g_cetOverlayVisible.load(std::memory_order_relaxed) && !g_menuVisible) {
+        float cursorX = 0.0f;
+        float cursorY = 0.0f;
+        if (GetCetVirtualCursorClientPosition(&cursorX, &cursorY)) {
+            ImDrawList* draw = ImGui::GetForegroundDrawList();
+            const ImVec2 p(cursorX, cursorY);
+            const ImVec2 p1(cursorX + 6.0f, cursorY + 18.0f);
+            const ImVec2 p2(cursorX + 10.0f, cursorY + 11.0f);
+            const ImVec2 p3(cursorX + 17.0f, cursorY + 10.0f);
+            draw->AddTriangleFilled(p, p1, p2, IM_COL32(0, 0, 0, 255));
+            draw->AddTriangleFilled(ImVec2(cursorX + 1.0f, cursorY + 1.0f),
+                                    ImVec2(cursorX + 6.0f, cursorY + 16.0f),
+                                    ImVec2(cursorX + 9.0f, cursorY + 10.0f),
+                                    IM_COL32(255, 255, 255, 255));
+            draw->AddLine(p2, p3, IM_COL32(0, 0, 0, 255), 3.0f);
+            draw->AddLine(ImVec2(cursorX + 9.0f, cursorY + 10.0f),
+                          ImVec2(cursorX + 15.0f, cursorY + 10.0f),
+                          IM_COL32(255, 255, 255, 255), 1.0f);
+        }
+    }
+
     LiveControlsUiState state{};
     GetLiveControlsUiState(&state);
 
@@ -653,6 +727,11 @@ void OverlayRender(IDXGISwapChain* swapChain) {
     toRt.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
     toRt.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     g_cmdList->ResourceBarrier(1, &toRt);
+
+    if (CetOverlayRecordIntoTarget(g_cmdList, frame.renderTarget, 0.0f)) {
+        if (++CyberpunkVR_DebugCetMainComposites == 1)
+            Log("[cet-layer] MAIN composite active.\n");
+    }
 
     g_cmdList->OMSetRenderTargets(1, &frame.rtv, FALSE, nullptr);
     ID3D12DescriptorHeap* heaps[] = {g_srvHeap};

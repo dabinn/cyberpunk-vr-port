@@ -8,6 +8,7 @@
 #include "Utils/XrMath.hpp"
 #include "Utils/SharedSlots.hpp"
 #include "Runtimes/RuntimeFovCorrection.hpp"
+#include "Stereo/CetOverlayLayer.hpp"
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -947,6 +948,12 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
                                                            CyberpunkVR_VisionOffY))
                                 ++CyberpunkVR_DebugVisionOverlays;
                         }
+                    }
+
+                    if (vrcamEyeCaptured && CetOverlayRecordIntoTarget(
+                            m_captureCmdList, eyeSlotTex, 0.0f)) {
+                        if (++CyberpunkVR_DebugCetEyeComposites == 1)
+                            Log("[cet-layer] VRCAM eye composite active.\n");
                     }
 
                     // AND THE OVERLAY ITSELF -- the F10 menu and the mouse cursor, which live in
