@@ -2048,10 +2048,10 @@ DWORD OpenXRManager::FrameThreadMain() {
                 // ---- the second eye -------------------------------------------------------
                 // OUR OWN right-eye copy, produced at Present on the capture list (see
                 // EnsureVrcamEyeTexture / the blit in CaptureMonoPresentedFrame). By the time
-                // it gets here it is already the eye swapchain's format and size, so it is
-                // copied exactly the way MAIN's snapshot is -- no shader work, no engine
-                // resource touched from this thread. That separation is the fix for the GPU
-                // hang the submit-side version caused.
+                // it gets here it already has the eye swapchain's bit layout and size. It is
+                // copied like MAIN when the swapchain is sRGB, or decoded to linear by the
+                // UNORM fallback pass. Neither path touches an engine resource from this thread.
+                // That separation is the fix for the GPU hang the submit-side version caused.
                 //
                 // Requiring the same serial keeps the pair honest: a frame with no VRCAM blit
                 // (component off, menus, loading, or a skipped capture) leaves this null and
@@ -2180,7 +2180,8 @@ DWORD OpenXRManager::FrameThreadMain() {
                         bool doMonoSharpen = false;
                         // DISABLED: in-submit CAS GPU-crashes; needs an
                         // SRV scratch rework before re-enabling.
-                        if (false && monoSharp > 0.0001f && m_d3dDevice && texture && monoSource) {
+                        if (false && !m_decodeSrgbForUnormSwapchain && monoSharp > 0.0001f &&
+                            m_d3dDevice && texture && monoSource) {
                             if (!m_sharpenPass) m_sharpenPass = std::make_unique<SharpenPass>();
                             const D3D12_RESOURCE_DESC sd = texture->GetDesc();
                             m_sharpenReady = m_sharpenPass->EnsureInitialized(
@@ -2188,6 +2189,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                                 static_cast<uint32_t>(sd.Width), sd.Height);
                             doMonoSharpen = m_sharpenReady;
                         }
+                        bool didSrgbDecode = false;
                         if (doMonoSharpen) {
                             // monoSource rests in COPY_SOURCE (CaptureMonoPresentedFrame).
                             D3D12_RESOURCE_BARRIER pre[2] = {};
@@ -2239,6 +2241,42 @@ DWORD OpenXRManager::FrameThreadMain() {
                             post[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
                             post[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
                             m_cmdList->ResourceBarrier(2, post);
+                        } else if (m_decodeSrgbForUnormSwapchain && m_srgbToLinearPass) {
+                            ID3D12Resource* eyeSource = monoSource;
+                            const bool usingVrcam =
+                                eye == (CyberpunkVR_MainIsRightEye ? 0u : 1u) && vrcamEye;
+                            if (usingVrcam) {
+                                eyeSource = vrcamEye;
+                            }
+
+                            D3D12_RESOURCE_BARRIER toShaderRead{};
+                            toShaderRead.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                            toShaderRead.Transition.pResource = eyeSource;
+                            toShaderRead.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                            toShaderRead.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                            toShaderRead.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                            m_cmdList->ResourceBarrier(1, &toShaderRead);
+
+                            didSrgbDecode = m_srgbToLinearPass->Record(
+                                m_cmdList, eyeSource, texture,
+                                m_cmdAllocatorIndex * 2 + eye);
+
+                            D3D12_RESOURCE_BARRIER toCopySource{};
+                            toCopySource.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                            toCopySource.Transition.pResource = eyeSource;
+                            toCopySource.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                            toCopySource.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                            toCopySource.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                            m_cmdList->ResourceBarrier(1, &toCopySource);
+
+                            if (!didSrgbDecode) {
+                                Log("OpenXRManager: sRGB-to-linear submit failed for eye %u\n", eye);
+                                copyReady = false;
+                                break;
+                            }
+                            if (usingVrcam) {
+                                ++CyberpunkVR_DebugStereoEyeSubmits;
+                            }
                         } else if (eye == (CyberpunkVR_MainIsRightEye ? 0u : 1u) && vrcamEye) {
                             {
                                 // Identical in shape to the MAIN branch below -- both operands
@@ -2266,7 +2304,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                                 ++CyberpunkVR_DebugStereoEyeSubmits;
                             }
                         }
-                        if (!(doMonoSharpen ||
+                        if (!(doMonoSharpen || didSrgbDecode ||
                               (eye == (CyberpunkVR_MainIsRightEye ? 0u : 1u) && vrcamEye))) {
                             D3D12_RESOURCE_BARRIER toCopyDest{};
                             toCopyDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;

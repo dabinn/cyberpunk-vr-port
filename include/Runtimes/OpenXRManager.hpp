@@ -15,6 +15,7 @@
 #include "Render/DepthResolve.hpp"
 #include "Render/SharpenPass.hpp"
 #include "Render/ColorBlit.hpp"
+#include "Render/SrgbToLinearPass.hpp"
 
 struct IDXGISwapChain;
 
@@ -1057,8 +1058,8 @@ private:
 
     // ---- right eye (VRCAM) ---------------------------------------------------------------
     // OUR OWN copy of the VRCAM view, produced at Present on the capture list, already in the
-    // eye swapchain's format and size. The submit then treats it exactly like MAIN's
-    // snapshot: a plain CopyResource into the XR image.
+    // eye swapchain's bit layout and size. The submit normally uses CopyResource; a runtime
+    // with no sRGB swapchain format instead receives an sRGB-to-linear shader draw.
     //
     // The conversion belongs here, not in the submit. sync_stereo's snapshot is written by the
     // engine and also read by the desktop mirror on another queue; reaching for it from the
@@ -1077,8 +1078,9 @@ private:
     //   m_eyeImageFmt - the eye RESOURCE's format. The runtime allocates it TYPELESS
     //                   (measured: 27 = R8G8B8A8_TYPELESS) so the app can choose a view.
     //                   Our own eye texture must match this for CopyResource to be legal.
-    //   m_eyeViewFmt  - the TYPED format the swapchain was created with (_UNORM_SRGB). This
-    //                   is what an RTV and a PSO must use; a typeless RTV is invalid, and
+    //   m_eyeViewFmt  - the TYPED format the swapchain was created with (normally
+    //                   _UNORM_SRGB, with converted _UNORM as fallback). This is what an RTV
+    //                   and a PSO must use; a typeless RTV is invalid, and
     //                   creating one took the GPU down instantly (DXGI_ERROR_DEVICE_HUNG
     //                   right after "stereo capture texture ready ... fmt=27").
     std::atomic<uint32_t> m_eyeImageFmt{0};
@@ -1193,6 +1195,8 @@ private:
     // image is written to the swapchain when xr_sharpness > 0.
     std::unique_ptr<SharpenPass> m_sharpenPass;
     bool m_sharpenReady = false;
+    std::unique_ptr<SrgbToLinearPass> m_srgbToLinearPass;
+    bool m_decodeSrgbForUnormSwapchain = false;
 
     // Reuse-last-frame path: persistent "last good" eye images + their pose/fov.
     // On a stale tick we re-present these with the stashed pose so the runtime

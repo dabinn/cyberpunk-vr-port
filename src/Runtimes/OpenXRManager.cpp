@@ -477,7 +477,7 @@ void OpenXRManager::MaybeLogRuntimeFovDetails(const XrFovf& left, const XrFovf& 
 
 // [ExtrapolatePose / RotateVector moved to openxr_math.h (inline)]
 
-// [ContainsSwapchainFormat / PickMonoSwapchainFormat moved to openxr_internal.h (inline)]
+// [Swapchain format selection lives in Runtimes/OpenXRSwapchainFormat.hpp.]
 
 // [ApplyForcedProjectionFov moved to openxr_internal.h (inline)]
 
@@ -2136,6 +2136,11 @@ void OpenXRManager::Shutdown() {
         m_colorBlit->Shutdown();
         m_colorBlit.reset();
     }
+    if (m_srgbToLinearPass) {
+        m_srgbToLinearPass->Shutdown();
+        m_srgbToLinearPass.reset();
+    }
+    m_decodeSrgbForUnormSwapchain = false;
     if (m_monoCapturedFrame.texture) {
         m_monoCapturedFrame.texture->Release();
         m_monoCapturedFrame.texture = nullptr;
