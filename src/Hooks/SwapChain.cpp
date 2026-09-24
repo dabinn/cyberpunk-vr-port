@@ -1,6 +1,7 @@
 #include <MinHook.h>
 #include "Hooks/RenderDocBridge.hpp"
 #include "Hooks/SwapChainInternal.hpp"
+#include "Render/DesktopMirror.hpp"
 #include <thread>
 #include "Hooks/SwapChain.hpp"
 #include "Overlay/ImGuiOverlay.hpp"
@@ -75,6 +76,27 @@ if (ansiName && ansiName[0] != '\0') {
     return ansiName;
 }
 return WideToUtf8(wideName, buffer, bufferSize);
+}
+
+void FitRenderSizeInsideBounds(
+        UINT renderWidth, UINT renderHeight, UINT maxWidth, UINT maxHeight,
+        UINT& outWidth, UINT& outHeight) {
+    outWidth = renderWidth;
+    outHeight = renderHeight;
+    if (!renderWidth || !renderHeight || !maxWidth || !maxHeight) return;
+    if (renderWidth <= maxWidth && renderHeight <= maxHeight) return;
+
+    // Keep the desktop client at the render aspect. DXGI_SCALING_STRETCH is used for the
+    // windowed swapchain, so independently clamping width/height would visibly distort the
+    // mirror whenever the VR render target is taller or wider than the monitor.
+    if (static_cast<uint64_t>(renderWidth) * maxHeight >
+        static_cast<uint64_t>(renderHeight) * maxWidth) {
+        outWidth = maxWidth;
+        outHeight = static_cast<UINT>((static_cast<uint64_t>(renderHeight) * maxWidth + renderWidth / 2) / renderWidth);
+    } else {
+        outHeight = maxHeight;
+        outWidth = static_cast<UINT>((static_cast<uint64_t>(renderWidth) * maxHeight + renderHeight / 2) / renderHeight);
+    }
 }
 
 namespace {
@@ -204,6 +226,11 @@ HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* swapChain, UINT syncInte
     // AFTER the pump, so an inline cycle is complete when its numbers are read and the
     // wait/begin/end totals are allowed to be exactly equal. Once a second; see the definition.
     OpenXRManager::Get().ReportXrFrameRates();
+    // OpenXR has already captured the complete MAIN backbuffer. Only now replace the desktop
+    // presentation with a monitor-aspect center crop; the HMD keeps the full vertical image.
+    if (hasDesc && desc.OutputWindow) {
+        DesktopMirrorRender(swapChain, desc.OutputWindow);
+    }
     void** vtable = *reinterpret_cast<void***>(swapChain);
     PresentFn originalFn = GetOriginalMethod<PresentFn>(vtable, 8);
     const HRESULT hr = originalFn ? originalFn(swapChain, syncInterval, flags) : DXGI_ERROR_INVALID_CALL;
@@ -305,6 +332,7 @@ HRESULT STDMETHODCALLTYPE HookedResizeBuffers(IDXGISwapChain* swapChain, UINT bu
     void** vtable = *reinterpret_cast<void***>(swapChain);
     ResizeBuffersFn originalFn = GetOriginalMethod<ResizeBuffersFn>(vtable, 13);
     OverlayInvalidateSwapchainResources();
+    DesktopMirrorInvalidate();
     return originalFn ? originalFn(swapChain, bufferCount, outWidth, outHeight, newFormat, flags) : DXGI_ERROR_INVALID_CALL;
 }
 
@@ -325,6 +353,7 @@ HRESULT STDMETHODCALLTYPE HookedResizeBuffers1(IDXGISwapChain3* swapChain, UINT 
     void** vtable = *reinterpret_cast<void***>(swapChain);
     ResizeBuffers1Fn originalFn = GetOriginalMethod<ResizeBuffers1Fn>(vtable, 39);
     OverlayInvalidateSwapchainResources();
+    DesktopMirrorInvalidate();
     return originalFn ? originalFn(swapChain, bufferCount, outWidth, outHeight, format, flags, creationNodeMask, presentQueue) : DXGI_ERROR_INVALID_CALL;
 }
 
@@ -436,6 +465,7 @@ HRESULT STDMETHODCALLTYPE DXGIFactoryWrapper::CreateSwapChain(IUnknown* pDevice,
             RememberDredDevice(d3dDevice);
             OpenXRManager::Get().InitGraphics(d3dDevice, pQueue);
             OverlaySetDeviceAndQueue(d3dDevice, pQueue);
+            DesktopMirrorSetDeviceAndQueue(d3dDevice, pQueue);
             InstallCommandQueueDiagHook(pQueue);
             InstallDepthCaptureHooks(d3dDevice);
             // The device here came from the queue the GAME passed, so it is the game-facing one --
@@ -452,22 +482,26 @@ HRESULT STDMETHODCALLTYPE DXGIFactoryWrapper::CreateSwapChain(IUnknown* pDevice,
     g_gameHwnd = hWnd;
     UINT windowWidth = GetForcedWindowWidth();
     UINT windowHeight = GetForcedWindowHeight();
+    int windowX = 0;
+    int windowY = 0;
+    bool placeWindow = false;
     if (windowWidth == forcedWidth) {
         windowWidth = 0;
     }
     if (windowWidth == 0 && hWnd) {
-        HMONITOR monitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTOPRIMARY);
-        MONITORINFO mi = { sizeof(MONITORINFO) };
-        if (GetMonitorInfoA(monitor, &mi)) {
-            int monWidth = mi.rcMonitor.right - mi.rcMonitor.left;
-            int monHeight = mi.rcMonitor.bottom - mi.rcMonitor.top;
-            windowWidth = monWidth;
-            windowHeight = monHeight;
+        RECT windowRect{};
+        if (GetDesktopMonitorWindowRect(hWnd, windowRect)) {
+            windowWidth = static_cast<UINT>(windowRect.right - windowRect.left);
+            windowHeight = static_cast<UINT>(windowRect.bottom - windowRect.top);
+            windowX = windowRect.left;
+            windowY = windowRect.top;
+            placeWindow = true;
         }
     }
     if (windowWidth != 0 && windowHeight != 0 && hWnd) {
-        SetWindowPos(hWnd, nullptr, 0, 0, windowWidth, windowHeight, SWP_NOMOVE | SWP_NOZORDER);
-        Log("CreateSwapChain: Capped window size to %ux%u\n", windowWidth, windowHeight);
+        const UINT flags = SWP_NOZORDER | (placeWindow ? 0 : SWP_NOMOVE);
+        SetWindowPos(hWnd, nullptr, windowX, windowY, windowWidth, windowHeight, flags);
+        Log("CreateSwapChain: desktop outer window set to %ux%u\n", windowWidth, windowHeight);
     }
     const HRESULT hr = m_real->CreateSwapChain(pDevice, swapDesc, ppSwapChain);
     if (SUCCEEDED(hr) && ppSwapChain && *ppSwapChain) {
@@ -544,6 +578,7 @@ static void PluginPreSwapchain(IUnknown* pDevice) {
             RememberDredDevice(d3dDevice);
             OpenXRManager::Get().InitGraphics(d3dDevice, pQueue);
             OverlaySetDeviceAndQueue(d3dDevice, pQueue);
+            DesktopMirrorSetDeviceAndQueue(d3dDevice, pQueue);
             InstallCommandQueueDiagHook(pQueue);
             InstallDepthCaptureHooks(d3dDevice);
             // The device here came from the queue the GAME passed, so it is the game-facing one --
@@ -561,26 +596,29 @@ static void PluginPreSwapchain(IUnknown* pDevice) {
 static void PluginPostSwapchain(IDXGISwapChain* sc, HWND hwnd) {
     if (!sc || IsOurOwnWindow(hwnd)) return;
 
-    // Cap the WINDOW to the monitor. The swapchain is forced to the VR render size (2560x2560
-    // here), and without this the game sizes its window to match and hangs off the screen --
-    // which is exactly what happened once the proxy stopped doing it. The backbuffer stays at
-    // the forced size; only the window is clamped.
+    // In automatic mode the desktop client follows the current monitor. The backbuffer keeps the
+    // forced VR render size; DesktopMirrorRender applies the monitor-aspect crop before Present.
     if (hwnd) {
         UINT winW = GetForcedWindowWidth();
         UINT winH = GetForcedWindowHeight();
+        int winX = 0;
+        int winY = 0;
+        bool placeWindow = false;
         if (winW == GetForcedDisplayModeWidth()) winW = 0;   // not a real window override
         if (winW == 0) {
-            HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
-            MONITORINFO mi = { sizeof(MONITORINFO) };
-            if (GetMonitorInfoA(mon, &mi)) {
-                winW = static_cast<UINT>(mi.rcMonitor.right - mi.rcMonitor.left);
-                winH = static_cast<UINT>(mi.rcMonitor.bottom - mi.rcMonitor.top);
+            RECT windowRect{};
+            if (GetDesktopMonitorWindowRect(hwnd, windowRect)) {
+                winW = static_cast<UINT>(windowRect.right - windowRect.left);
+                winH = static_cast<UINT>(windowRect.bottom - windowRect.top);
+                winX = windowRect.left;
+                winY = windowRect.top;
+                placeWindow = true;
             }
         }
         if (winW && winH) {
-            SetWindowPos(hwnd, nullptr, 0, 0, static_cast<int>(winW), static_cast<int>(winH),
-                         SWP_NOMOVE | SWP_NOZORDER);
-            Log("PluginBootstrap: capped window to %ux%u\n", winW, winH);
+            const UINT flags = SWP_NOZORDER | (placeWindow ? 0 : SWP_NOMOVE);
+            SetWindowPos(hwnd, nullptr, winX, winY, static_cast<int>(winW), static_cast<int>(winH), flags);
+            Log("PluginBootstrap: desktop outer window set to %ux%u\n", winW, winH);
         }
     }
 
@@ -892,22 +930,26 @@ HRESULT STDMETHODCALLTYPE DXGIFactoryWrapper::CreateSwapChainForHwnd(IUnknown* p
 
     UINT windowWidth = GetForcedWindowWidth();
     UINT windowHeight = GetForcedWindowHeight();
+    int windowX = 0;
+    int windowY = 0;
+    bool placeWindow = false;
     if (windowWidth == forcedWidth) {
         windowWidth = 0; // If they are the same as swapchain, user wants auto-cap
     }
     if (windowWidth == 0 && hWnd) {
-        HMONITOR monitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTOPRIMARY);
-        MONITORINFO mi = { sizeof(MONITORINFO) };
-        if (GetMonitorInfoA(monitor, &mi)) {
-            int monWidth = mi.rcMonitor.right - mi.rcMonitor.left;
-            int monHeight = mi.rcMonitor.bottom - mi.rcMonitor.top;
-            windowWidth = monWidth;
-            windowHeight = monHeight;
+        RECT windowRect{};
+        if (GetDesktopMonitorWindowRect(hWnd, windowRect)) {
+            windowWidth = static_cast<UINT>(windowRect.right - windowRect.left);
+            windowHeight = static_cast<UINT>(windowRect.bottom - windowRect.top);
+            windowX = windowRect.left;
+            windowY = windowRect.top;
+            placeWindow = true;
         }
     }
     if (windowWidth != 0 && windowHeight != 0 && hWnd) {
-        SetWindowPos(hWnd, nullptr, 0, 0, windowWidth, windowHeight, SWP_NOMOVE | SWP_NOZORDER);
-        Log("CreateSwapChainForHwnd: Capped window size to %ux%u\n", windowWidth, windowHeight);
+        const UINT flags = SWP_NOZORDER | (placeWindow ? 0 : SWP_NOMOVE);
+        SetWindowPos(hWnd, nullptr, windowX, windowY, windowWidth, windowHeight, flags);
+        Log("CreateSwapChainForHwnd: desktop outer window set to %ux%u\n", windowWidth, windowHeight);
     }
 
     ID3D12CommandQueue* pQueue = nullptr;
@@ -917,6 +959,7 @@ HRESULT STDMETHODCALLTYPE DXGIFactoryWrapper::CreateSwapChainForHwnd(IUnknown* p
             RememberDredDevice(d3dDevice);
             OpenXRManager::Get().InitGraphics(d3dDevice, pQueue);
             OverlaySetDeviceAndQueue(d3dDevice, pQueue);
+            DesktopMirrorSetDeviceAndQueue(d3dDevice, pQueue);
             InstallCommandQueueDiagHook(pQueue);
             InstallDepthCaptureHooks(d3dDevice);
             // The device here came from the queue the GAME passed, so it is the game-facing one --

@@ -22,6 +22,9 @@ using GetDisplayModeList1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGIOutput1*, DXGI_FO
 using GetDisplayModeListFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIOutput*, DXGI_FORMAT, UINT, UINT*, DXGI_MODE_DESC*);
 bool IsDeviceRemovedHr(HRESULT hr);
 bool PatchVtableMethod(void** vtable, size_t slot, void* hook);
+void FitRenderSizeInsideBounds(
+    UINT renderWidth, UINT renderHeight, UINT maxWidth, UINT maxHeight,
+    UINT& outWidth, UINT& outHeight);
 const char* DebugName(const char* ansiName, const wchar_t* wideName, char* buffer, size_t bufferSize);
 extern HWND g_gameHwnd;
 extern Microsoft::WRL::ComPtr<ID3D12Device> g_dredDevice;

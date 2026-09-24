@@ -38,6 +38,9 @@ VSOut VSMain(uint vid : SV_VertexID) {
 constexpr char kPsSource[] = R"(
 Texture2D<float4> g_color : register(t0);
 SamplerState g_linear : register(s0);
+cbuffer BlitParams : register(b0) {
+    float4 g_uvRect;
+};
 
 struct VSOut {
     float4 position : SV_Position;
@@ -45,7 +48,8 @@ struct VSOut {
 };
 
 float4 PSMain(VSOut input) : SV_Target {
-    float4 c = g_color.SampleLevel(g_linear, input.uv, 0.0);
+    float2 uv = lerp(g_uvRect.xy, g_uvRect.zw, input.uv);
+    float4 c = g_color.SampleLevel(g_linear, uv, 0.0);
     return float4(c.rgb, 1.0);
 }
 )";
@@ -447,11 +451,15 @@ bool ColorBlit::EnsureInitialized(ID3D12Device* device,
     srvRange.NumDescriptors = 1;
     srvRange.BaseShaderRegister = 0;
 
-    D3D12_ROOT_PARAMETER param{};
-    param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    param.DescriptorTable.NumDescriptorRanges = 1;
-    param.DescriptorTable.pDescriptorRanges = &srvRange;
-    param.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_ROOT_PARAMETER rootParams[2]{};
+    rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[0].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[0].DescriptorTable.pDescriptorRanges = &srvRange;
+    rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rootParams[1].Constants.ShaderRegister = 0;
+    rootParams[1].Constants.Num32BitValues = 4;
+    rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -461,8 +469,8 @@ bool ColorBlit::EnsureInitialized(ID3D12Device* device,
     sampler.MaxLOD = D3D12_FLOAT32_MAX;
 
     D3D12_ROOT_SIGNATURE_DESC rsDesc{};
-    rsDesc.NumParameters = 1;
-    rsDesc.pParameters = &param;
+    rsDesc.NumParameters = _countof(rootParams);
+    rsDesc.pParameters = rootParams;
     rsDesc.NumStaticSamplers = 1;
     rsDesc.pStaticSamplers = &sampler;
     rsDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
@@ -715,7 +723,8 @@ bool ColorBlit::RecordDot(ID3D12GraphicsCommandList* cmdList,
 
 bool ColorBlit::RecordBlit(ID3D12GraphicsCommandList* cmdList,
                            ID3D12Resource* srcColor,
-                           ID3D12Resource* dstColor) {
+                           ID3D12Resource* dstColor,
+                           float u0, float v0, float u1, float v1) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!cmdList || !srcColor || !dstColor || !m_pso) return false;
 
@@ -755,6 +764,8 @@ bool ColorBlit::RecordBlit(ID3D12GraphicsCommandList* cmdList,
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
     cmdList->SetDescriptorHeaps(1, heaps);
     cmdList->SetGraphicsRootDescriptorTable(0, srvGpu);
+    const float uvRect[4] = {u0, v0, u1, v1};
+    cmdList->SetGraphicsRoot32BitConstants(1, 4, uvRect, 0);
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     cmdList->DrawInstanced(4, 1, 0, 0);
     return true;
