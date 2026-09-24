@@ -56,6 +56,13 @@ extern volatile uintptr_t g_dlssResPtr;
 extern bool g_isAiming;
 extern bool g_hasWeaponEquipped;
 
+// Laser-dot presentation has a stricter meaning than g_hasWeaponEquipped: only a currently
+// confirmed ranged weapon qualifies. CET refreshes both fields from the WeaponRight slot every
+// update; the render thread also checks the timestamp so a paused/loading script cannot leave a
+// stale firearm qualification latched on screen.
+extern std::atomic<int> g_laserRangedWeaponActive;
+extern std::atomic<unsigned long long> g_laserRangedWeaponUpdatedMs;
+
 // The render size the launcher was told to use. The FOV hooks derive the vertical from the
 // horizontal through this aspect, so the two must be the SAME numbers the swapchain gets.
 extern int g_launcherWidth;

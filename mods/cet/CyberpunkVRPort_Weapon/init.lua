@@ -410,6 +410,7 @@ local CARRY_HOME_ZETA = 0.70
 -- most of a forearm, so the grip took the weapon back from a hand that was merely nearby.
 local CARRY_BACK_DIST = 0.18
 local SLOT_RIGHT      = 'AttachmentSlots.WeaponRight'
+local laserWeaponRightSlot = nil
 -- Ours, so its customOffset can be tuned without moving the cigarette that also lives in WeaponLeft.
 -- Falls back to the stock slot when the tweak has not been loaded yet (it needs a game launch).
 -- The STOCK slot, because what places the weapon is the entry in the player's ItemAttachmentSlots
@@ -1236,6 +1237,7 @@ local function updateBarrelRay(dt)
 end
 
 registerForEvent('onInit', function()
+    laserWeaponRightSlot = TweakDBID.new(SLOT_RIGHT)
     logf("weapon-aim init")
 end)
 
@@ -1275,6 +1277,20 @@ registerForEvent('onUpdate', function(dt)
         -- immediately. Isolation belongs in the OTHER direction: the muzzle keeps its place and the
         -- newcomer gets its own pcall.
         if wpn then updateMuzzle(wpn) end
+        -- Laser eligibility follows the actual right-hand attachment, not GetActiveWeapon(): the
+        -- latter is known to return nil for isolated frames even while a weapon is visibly held.
+        -- Publish false as well as true every update so holster/melee transitions clear immediately;
+        -- the native side adds a freshness timeout for loading screens where CET stops ticking.
+        pcall(function()
+            local ranged = false
+            local ts = pl and Game.GetTransactionSystem()
+            local rightWeapon = ts and laserWeaponRightSlot and
+                ts:GetItemInSlot(pl, laserWeaponRightSlot) or nil
+            if rightWeapon then ranged = rightWeapon:IsRanged() end
+            if type(SetVRLaserRangedWeaponState) == 'function' then
+                SetVRLaserRangedWeaponState(ranged and 1 or 0)
+            end
+        end)
         local isMeleeWeapon = false
         pcall(function()
             if wpn then isMeleeWeapon = WeaponObject.IsMelee(wpn:GetItemID()) end

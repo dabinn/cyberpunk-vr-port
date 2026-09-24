@@ -445,18 +445,31 @@ void DrawBarrelCrosshair() {
     if (laserDotMode < 0 || laserDotMode > 2) laserDotMode = 1;
     CyberpunkVR_BarrelDotWorld = laserDotMode;
 
-    const float enableLaser = OpenXRManager::Get().GetSharedSlot(144);   // weapon flag (was [126]: HMD-Z collision)
     const bool surfaceMode = laserDotMode == 2;
     const bool hideForAds = g_drawBarrelCross && g_liveControls.xrHideLaserDotAds != 0 && g_isAiming;
-    const bool drawLaser = g_drawBarrelCross && !hideForAds;
-    const bool raycastActive = drawLaser && surfaceMode && enableLaser >= 0.9f;
+    constexpr unsigned long long kLaserWeaponFreshMs = 250;
+    const unsigned long long nowMs = GetTickCount64();
+    const unsigned long long weaponUpdatedMs =
+        g_laserRangedWeaponUpdatedMs.load(std::memory_order_relaxed);
+    const bool rangedWeaponActive =
+        g_laserRangedWeaponActive.load(std::memory_order_relaxed) != 0 &&
+        weaponUpdatedMs != 0 && nowMs - weaponUpdatedMs <= kLaserWeaponFreshMs;
+    const bool worldMapOpen = OpenXRManager::Get().GetSharedSlot(81) != 0.0f;
+    const bool deviceScreenOpen =
+        OpenXRManager::Get().GetSharedSlot(vrshared::kDeviceScreenOpen) > 0.5f;
+    const bool gameUiActive =
+        g_menuModeValue != 0 || worldMapOpen ||
+        g_uiPopupOpen.load(std::memory_order_relaxed) != 0 || deviceScreenOpen;
+    const bool drawLaser =
+        g_drawBarrelCross && rangedWeaponActive && !gameUiActive && !hideForAds;
+    const bool raycastActive = drawLaser && surfaceMode;
     // CET owns every physics query. Publish the UI/mode gate before returning so disabling a dot
     // stops muzzle and visibility work rather than merely stopping the final draw.
     OpenXRManager::Get().SetSharedSlot(vrshared::kBarrelRayActive, raycastActive ? 1.0f : 0.0f);
     
     float rad = 3.0f;
     
-    if (!drawLaser || enableLaser < 0.9f){
+    if (!drawLaser){
         // Clear the legacy mirror publication immediately when the common UI/weapon gate closes;
         // the HMD's dedicated second-eye ImGui list is reset independently every frame.
         CyberpunkVR_BarrelDotTick = 0;

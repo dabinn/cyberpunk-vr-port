@@ -66,6 +66,7 @@
 #include "Anim/VrikHook.hpp"
 #include "Anim/WeaponAim.hpp"
 #include "Anim/AdsSightAim.hpp"
+#include "Core/VrCoreShared.hpp"
 #include "Natives/NativeState.hpp"
 #include "Natives/NativeHelpers.hpp"
 #include <MinHook.h>
@@ -1168,6 +1169,14 @@ void SetVRMeleeWeaponState(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, 
     int32_t v = 0; RED4ext::GetParameter(aFrame, &v); aFrame->code++;
     EnsureSharedMemory();
     if (g_pSharedHands) g_pSharedHands[vrshared::kMeleeWeaponFlag] = v ? 1.0f : 0.0f;
+}
+// Laser-dot eligibility is deliberately separate from the generic weapon flag. A melee weapon is
+// still a weapon for input, holsters and animation ownership, but it must never qualify a firearm
+// aiming aid. The timestamp makes the state fail closed when CET stops ticking during loading.
+void SetVRLaserRangedWeaponState(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t) {
+    int32_t v = 0; RED4ext::GetParameter(aFrame, &v); aFrame->code++;
+    g_laserRangedWeaponActive.store(v != 0 ? 1 : 0, std::memory_order_relaxed);
+    g_laserRangedWeaponUpdatedMs.store(GetTickCount64(), std::memory_order_relaxed);
 }
 // THE PORT'S SAY OVER THE RIGHT TRIGGER -> shared[161], read by the XInput merge in the stereo module.
 // 0 = pass it through, 1 = swallow it, 2 = press it fully. The physical reload uses both ends: a revolver with its

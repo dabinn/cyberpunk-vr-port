@@ -449,6 +449,8 @@ extern "C" float GetFovOverscan() {
     return 1.0f;
 }
 volatile int g_menuModeValue = 0;
+std::atomic<int> g_laserRangedWeaponActive{0};
+std::atomic<unsigned long long> g_laserRangedWeaponUpdatedMs{0};
 
 // Overscan factor: render (and submit) a FOV this much wider than the lens, so the
 // compositor's reprojection (ATW) on head turns has rendered pixels beyond the lens
