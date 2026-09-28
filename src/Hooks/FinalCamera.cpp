@@ -1,8 +1,10 @@
+#include "Utils/DebugGate.hpp"
 // FinalCamera -- one hook, one file.
 //
-// Reads back the quaternion the engine is about to render with and finds it in the write
-// ring, which identifies the frame's pose exactly -- no assumption about how far ahead the
-// engine renders. It is a LEAF, not part of the cycle: nothing the other two read is
+// Reads back the camera transform the engine is about to render with. On foot,
+// position, quaternion and eye identify its XR label in the completed-write
+// history; other camera routes retain the legacy quaternion lookup.
+// It is a LEAF, not part of the cycle: nothing the other two read is
 // written here. It sat in the knot only because the ring and the seqlock quaternion are not
 // plain loads, and those now live behind Camera/CameraLink.hpp.
 //
@@ -16,6 +18,7 @@
 // change; it is an unfalsifiable one, so the order is preserved.
 
 #include "Camera/CameraLink.hpp"
+#include "Camera/PoseIdentity.hpp"
 #include "Camera/CameraState.hpp"
 #include "Utils/LogThrottle.hpp"
 #include "Core/LiveControls.hpp"
@@ -32,6 +35,28 @@
 #include <cmath>
 #include <cstdint>
 #include <cstddef>
+
+namespace {
+bool MatchRenderedPose(float* camera, const float q[4], uint32_t view,
+                       OpenXRHeadPose* pose, uint32_t* age, uint32_t* ties) {
+    cvr::camera::PoseIdentity identity{};
+    if(cvr::camera::ReadCameraPoseIdentity(reinterpret_cast<uintptr_t>(camera),view,&identity)) {
+        *pose=identity.head;if(age)*age=0;if(ties)*ties=1;
+        CVR_DIAGNOSTIC(CyberpunkVR_PoseIdFinal[view-1].fetch_add(1,std::memory_order_relaxed));
+        return true;
+    }
+    CVR_DIAGNOSTIC(CyberpunkVR_PoseIdFinalMiss[view-1].fetch_add(1,std::memory_order_relaxed));
+    if (!cvr::camera::PlacedCameraPoseEnabled())
+        return cvr::camera::CamWriteRecordFind(q,pose,age,ties);
+    int32_t position[3]{};
+    for (int i=0;i<3;++i) {
+        uint32_t value{};
+        if (!ReadU32Safe(reinterpret_cast<uintptr_t>(camera)+i*4,&value)) return false;
+        position[i]=static_cast<int32_t>(value);
+    }
+    return cvr::camera::PlacedCameraPoseFind(view,q,position,pose,age,ties);
+}
+}
 
 extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
     g_finalCameraHits++;
@@ -69,6 +94,7 @@ extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
         const bool isVrcam = CyberpunkVR_IsVrcamViewActive() != 0;
         const bool isMain  = !isVrcam && CyberpunkVR_IsMainViewActive() != 0;
         if (isMain) {
+            OpenXRHeadPose matched{};
             float camq[4] = {};
             if (ReadFloatArraySafe(rsiPtr + 4, camq, 4) && IsPlausibleUnitQuaternion(camq)) {
                 // LATCHED, and for the reason the overlay already latched it on its own side: with
@@ -98,19 +124,20 @@ extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
                 }
 
                 if (CyberpunkVR_PoseReadBack) {
-                    OpenXRHeadPose matched{};
                     uint32_t age = 0, ties = 0;
-                    if (cvr::camera::CamWriteRecordFind(camq, &matched, &age, &ties)) {
+                    if (MatchRenderedPose(rsiPtr, camq, 1, &matched, &age, &ties)) {
                         CyberpunkVR_DebugFinalAge  = age;
                         CyberpunkVR_DebugFinalTies = ties;
-                        if (ties > 1) ++CyberpunkVR_DebugFinalTieHits;
-                        ++CyberpunkVR_DebugFinalMatch;
-                        OpenXRManager::Get().PushRenderedFramePose(matched);
+                        if (ties > 1) CVR_DIAGNOSTIC(++CyberpunkVR_DebugFinalTieHits);
+                        CVR_DIAGNOSTIC(++CyberpunkVR_DebugFinalMatch);
                     } else {
-                        ++CyberpunkVR_DebugFinalNoMatch;
+                        CVR_DIAGNOSTIC(++CyberpunkVR_DebugFinalNoMatch);
                     }
                 }
             }
+            // Keep an invalid slot on a miss, so a later success cannot label
+            // this frame by shifting the render/Present FIFO by one entry.
+            if (CyberpunkVR_PoseReadBack) OpenXRManager::Get().PushRenderedFramePose(matched);
         }
 
         // THE SECOND VIEW, IDENTIFIED THE SAME WAY, INTO ITS OWN QUEUE.
@@ -125,18 +152,18 @@ extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
         // The barrel packet above is NOT duplicated: that restriction exists to keep VRCAM from
         // overwriting MAIN's render camera, and it is unrelated to the pose.
         if (isVrcam && CyberpunkVR_PoseReadBack) {
+            OpenXRHeadPose matched{};
             float camq[4] = {};
             if (ReadFloatArraySafe(rsiPtr + 4, camq, 4) && IsPlausibleUnitQuaternion(camq)) {
-                OpenXRHeadPose matched{};
                 uint32_t age = 0, ties = 0;
-                if (cvr::camera::CamWriteRecordFind(camq, &matched, &age, &ties)) {
+                if (MatchRenderedPose(rsiPtr, camq, 2, &matched, &age, &ties)) {
                     CyberpunkVR_DebugVrcamFinalAge = age;
-                    ++CyberpunkVR_DebugVrcamFinalMatch;
-                    OpenXRManager::Get().PushVrcamRenderedFramePose(matched);
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugVrcamFinalMatch);
                 } else {
-                    ++CyberpunkVR_DebugVrcamFinalNoMatch;
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugVrcamFinalNoMatch);
                 }
             }
+            OpenXRManager::Get().PushVrcamRenderedFramePose(matched);
         }
     }
 
@@ -191,9 +218,9 @@ extern "C" void __fastcall OnFinalCameraCallback(float* rsiPtr) {
         // same instant, so they need the same orientation. Only the lateral IPD term is withheld
         // from them -- that one is per-eye, and a view whose eye we cannot name must not get it.
         if (isEye) {
-            if (isMain) ++CyberpunkVR_DebugViewCamMain; else ++CyberpunkVR_DebugViewCamVrcam;
+            if (isMain) CVR_DIAGNOSTIC(++CyberpunkVR_DebugViewCamMain); else CVR_DIAGNOSTIC(++CyberpunkVR_DebugViewCamVrcam);
         } else {
-            ++CyberpunkVR_DebugViewCamOther;
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugViewCamOther);
             if (CyberpunkVR_CamFinalViewScope == 0) return;
         }
 

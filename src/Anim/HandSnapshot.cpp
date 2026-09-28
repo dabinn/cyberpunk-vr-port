@@ -245,12 +245,17 @@ void RefreshHandsSnapshot() {
     // Contended out: keep the last good snapshot (never expose a torn frame).
 }
 
-// Pose-slot accessor: consistent latched value. Falls back to raw only before the
-// first complete frame is latched (and if the writer hasn't started the seqlock yet,
-// seq stays 0/even so the very first read still latches a coherent frame).
+// An unfinished first publication is no more readable than any later one.
 float SharedPose(int i) {
     if (g_handsStableValid) return g_handsStable[i];
-    return g_pSharedHands ? g_pSharedHands[i] : 0.0f;
+    return 0.0f;
+}
+
+void VRIK_HeadResidual(float fallbackConsumedRight,float fallbackConsumedForward,float out[3]) {
+    const bool paired=SharedPose(115)==2.0f;
+    out[0]=SharedPose(124)-(paired ? SharedPose(112) : fallbackConsumedRight);
+    out[1]=SharedPose(125);
+    out[2]=SharedPose(126)+(paired ? SharedPose(113) : fallbackConsumedForward);
 }
 // Constant per-hand wrist-orientation correction (hand-local), set live via
 // SetVRHandOffset(pitch,yaw,roll,hand). Applied as handRot = mapQuat * wristCorr.
@@ -519,6 +524,21 @@ bool VRIK_ResolveViewPos(float out[3]) {
 // ARM shoulder anchor so body + arms squat TOGETHER with no relative twitch on sprint/jump.
 // Single-TU header (writer & reader both live here).
 float s_vrSharedSquatDrop = 0.0f;
+
+bool VRIK_ResolveViewModelPos(const float* pairedCamModel,const float* pairedEntityQuat,float out[3]) {
+    const float flag=g_viewPktValid ? g_viewPkt[7] : SharedPose(111);
+    if(flag!=2.0f)return false;
+    const bool coherent=SharedPose(115)==1.0f;
+    float delta[3];
+    for(int k=0;k<3;++k)delta[k]=coherent ? SharedPose(112+k) :
+        (g_viewPktValid ? g_viewPkt[4+k] : SharedPose(108+k));
+    const float norm=VRIK_Dot3(delta,delta);
+    if(!std::isfinite(norm) || norm>2.25f)return false;
+    float inv[4],local[3];VRIK_QuatConj(pairedEntityQuat,inv);
+    VRIK_QuatRotateVec(inv,delta,local);
+    for(int k=0;k<3;++k)out[k]=pairedCamModel[k]+local[k];
+    return true;
+}
 // Diagnostics for the body placement (model space), surfaced via LogVRDiag.
 // Solve-side trace probes: hips MODEL-space yaw (detects locomotion root rotation
 // leaking through the local-space hips lock) + right IK shoulder model position.

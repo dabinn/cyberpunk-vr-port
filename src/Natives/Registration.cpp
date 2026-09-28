@@ -12,6 +12,28 @@
 RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     auto rtti = RED4ext::CRTTISystem::Get();
     RED4ext::CBaseFunction::Flags flags = {.isNative = true, .isStatic = true};
+    auto reflexTiming=RED4ext::CGlobalFunction::Create("VRReflexTiming","VRReflexTiming",&VRReflexTiming);
+    reflexTiming->flags=flags;reflexTiming->AddParam("Bool","request");reflexTiming->SetReturnType("String");rtti->RegisterFunction(reflexTiming);
+    auto mouseY=RED4ext::CGlobalFunction::Create("GetVRMouseYDisabled","GetVRMouseYDisabled",&GetVRMouseYDisabled);
+    mouseY->flags=flags;mouseY->SetReturnType("Bool");rtti->RegisterFunction(mouseY);
+    auto bodyScan=RED4ext::CGlobalFunction::Create("VRShouldScanBodyCapsules","VRShouldScanBodyCapsules",&VRShouldScanBodyCapsules);
+    bodyScan->flags=flags;bodyScan->AddParam("handle:entEntity","entity");bodyScan->SetReturnType("Bool");rtti->RegisterFunction(bodyScan);
+    auto wheelState=RED4ext::CGlobalFunction::Create("GetVRWheelControlState","GetVRWheelControlState",&GetVRWheelControlState);
+    wheelState->flags=flags;wheelState->SetReturnType("Int32");rtti->RegisterFunction(wheelState);
+    auto wheelProfile=RED4ext::CGlobalFunction::Create("SetVRWheelGamepadProfile","SetVRWheelGamepadProfile",&SetVRWheelGamepadProfile);
+    wheelProfile->flags=flags;wheelProfile->AddParam("Float","inner");wheelProfile->AddParam("Float","outer");
+    wheelProfile->SetReturnType("Bool");rtti->RegisterFunction(wheelProfile);
+    auto uiCommand=RED4ext::CGlobalFunction::Create("VROverlayCommand","VROverlayCommand",&VROverlayCommand);
+    uiCommand->flags=flags;uiCommand->SetReturnType("Int32");rtti->RegisterFunction(uiCommand);
+    auto uiMenu=RED4ext::CGlobalFunction::Create("VROverlayMenu","VROverlayMenu",&VROverlayMenu);
+    uiMenu->flags=flags;uiMenu->AddParam("Bool","ready");uiMenu->AddParam("Bool","inGame");uiMenu->AddParam("String","labels");uiMenu->SetReturnType("Bool");rtti->RegisterFunction(uiMenu);
+    auto uiToggle=RED4ext::CGlobalFunction::Create("VROverlayToggle","VROverlayToggle",&VROverlayToggle);
+    uiToggle->flags=flags;rtti->RegisterFunction(uiToggle);
+
+    auto fHudPanel=RED4ext::CGlobalFunction::Create("VRHudPanelUpdate","VRHudPanelUpdate",&VRHudPanelUpdate);
+    fHudPanel->flags=flags; fHudPanel->AddParam("handle:inkWidget","root");
+    fHudPanel->AddParam("Bool","lootVisible");
+    fHudPanel->SetReturnType("Int32"); rtti->RegisterFunction(fHudPanel);
 
     auto f1 = RED4ext::CGlobalFunction::Create("GetLeftVRHandValid", "GetLeftVRHandValid", &GetLeftVRHandValid);
     f1->flags = flags; f1->SetReturnType("Bool"); rtti->RegisterFunction(f1);
@@ -811,11 +833,42 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     fSprintActive->flags = flags; fSprintActive->SetReturnType("Int32");
     fSprintActive->AddParam("Int32", "active");
     rtti->RegisterFunction(fSprintActive);
+    auto fLadder=RED4ext::CGlobalFunction::Create("SetVRLadderState","SetVRLadderState",&SetVRLadderState);
+    fLadder->flags=flags;fLadder->SetReturnType("Int32");
+    fLadder->AddParam("handle:gameObject","player");fLadder->AddParam("Int32","detailed");
+    fLadder->AddParam("Int32","paused");fLadder->AddParam("handle:IScriptable","description");rtti->RegisterFunction(fLadder);
+    auto fLadderTop=RED4ext::CGlobalFunction::Create("SetVRLadderTopRails","SetVRLadderTopRails",&SetVRLadderTopRails);
+    fLadderTop->flags=flags;fLadderTop->SetReturnType("Int32");fLadderTop->AddParam("handle:gameObject","player");
+    for(const char* name:{"ladderPosition","origin","right","normal","up"})fLadderTop->AddParam("Vector4",name);
+    rtti->RegisterFunction(fLadderTop);
+    auto fLadderDebug=RED4ext::CGlobalFunction::Create("GetVRLadderDebug","GetVRLadderDebug",&GetVRLadderDebug);
+    fLadderDebug->flags=flags;fLadderDebug->SetReturnType("Float");fLadderDebug->AddParam("Int32","index");rtti->RegisterFunction(fLadderDebug);
+    auto fLadderTest=RED4ext::CGlobalFunction::Create("SetVRLadderTestGrip","SetVRLadderTestGrip",&SetVRLadderTestGrip);
+    fLadderTest->flags=flags;fLadderTest->SetReturnType("Int32");fLadderTest->AddParam("Float","left");
+    fLadderTest->AddParam("Float","right");fLadderTest->AddParam("Int32","milliseconds");rtti->RegisterFunction(fLadderTest);
+    auto fSwimState=RED4ext::CGlobalFunction::Create("SetVRSwimmingState","SetVRSwimmingState",&SetVRSwimmingState);
+    fSwimState->flags=flags;fSwimState->SetReturnType("Int32");
+    fSwimState->AddParam("handle:gameObject","player");
+    fSwimState->AddParam("Int32","state");fSwimState->AddParam("Int32","fast");
+    fSwimState->AddParam("Int32","paused");
+    fSwimState->AddParam("Int32","waterContext");
+    rtti->RegisterFunction(fSwimState);
+    auto fSwimDebug=RED4ext::CGlobalFunction::Create("GetVRSwimmingDebug","GetVRSwimmingDebug",&GetVRSwimmingDebug);
+    fSwimDebug->flags=flags;fSwimDebug->SetReturnType("Float");fSwimDebug->AddParam("Int32","index");
+    rtti->RegisterFunction(fSwimDebug);
     auto fLocoState = RED4ext::CGlobalFunction::Create(
         "SetVRLocomotionState", "SetVRLocomotionState", &SetVRLocomotionState);
     fLocoState->flags = flags; fLocoState->SetReturnType("Int32");
     fLocoState->AddParam("Int32", "state");
     rtti->RegisterFunction(fLocoState);
+    auto fStory=RED4ext::CGlobalFunction::Create("VRStoryAttentionUpdate","VRStoryAttentionUpdate",&VRStoryAttentionUpdate);
+    fStory->flags=flags;fStory->SetReturnType("Int32");fStory->AddParam("handle:gameObject","player");
+    for(const char* name:{"scanStarted","scanDone","locomotion","tier","workspot","vehicle","choices","paused"})
+        fStory->AddParam("Int32",name);
+    rtti->RegisterFunction(fStory);
+    auto fClue=RED4ext::CGlobalFunction::Create("VRManualClueUpdate","VRManualClueUpdate",&VRManualClueUpdate);
+    fClue->flags=flags;fClue->SetReturnType("Int32");fClue->AddParam("handle:gameObject","player");
+    fClue->AddParam("handle:gameObject","clue");rtti->RegisterFunction(fClue);
     auto fWeaponPoseState = RED4ext::CGlobalFunction::Create(
         "SetVRWeaponPoseState", "SetVRWeaponPoseState", &SetVRWeaponPoseState);
     fWeaponPoseState->flags = flags; fWeaponPoseState->SetReturnType("Int32");
@@ -895,6 +948,9 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
 
     auto fMenu = RED4ext::CGlobalFunction::Create("SetVRMenuOpen", "SetVRMenuOpen", &SetVRMenuOpen);
     auto fDevScr = RED4ext::CGlobalFunction::Create("SetVRDeviceScreen", "SetVRDeviceScreen", &SetVRDeviceScreen);
+    auto keypad = RED4ext::CGlobalFunction::Create("VRKeypadUpdate", "VRKeypadUpdate", &VRKeypadUpdate);
+    keypad->flags = flags; keypad->SetReturnType("Int32");
+    keypad->AddParam("handle:inkWidget", "root"); rtti->RegisterFunction(keypad);
     auto fSlG = RED4ext::CGlobalFunction::Create("VRScannerSlotGet", "VRScannerSlotGet", &VRScannerSlotGet);
     fSlG->flags = flags; fSlG->SetReturnType("Float");
     fSlG->AddParam("Int32", "idx"); fSlG->AddParam("Int32", "comp"); rtti->RegisterFunction(fSlG);
@@ -1006,4 +1062,3 @@ void CyberpunkVR_RegisterHandsNatives() {
     rtti->AddRegisterCallback(RegisterTypes);
     rtti->AddPostRegisterCallback(PostRegisterTypes);
 }
-

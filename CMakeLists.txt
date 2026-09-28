@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CyberpunkVRPort LANGUAGES CXX C)
+project(CyberpunkVRPort VERSION 0.1.7 LANGUAGES CXX C ASM_MASM)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -83,8 +83,18 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${CPVR_SOURCES})
 
 add_library(cyberpunkvrport_stereo SHARED
     ${CPVR_SOURCES}
+    src/Hooks/CameraPoseLeafThunks.asm
+    src/Hooks/SwimmingActionLeafThunk.asm
+    src/Hooks/WorldMarkerTextThunk.asm
+    src/Hooks/PhotoCaptureClampThunk.asm
+    src/Hooks/SurveillanceInputThunk.asm
+    src/Hooks/StoryAttentionThunk.asm
+    src/Hooks/RenderGraphCacheThunk.asm
     externals/im3d/im3d.cpp
 )
+include(cmake/WorldMarkerShaders.cmake)
+cvr_world_marker_shaders(cyberpunkvrport_stereo)
+include(cmake/NativeFramegen.cmake)
 target_compile_features(cyberpunkvrport_stereo PRIVATE cxx_std_20)
 target_compile_definitions(cyberpunkvrport_stereo PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX
@@ -101,12 +111,19 @@ target_link_libraries(cyberpunkvrport_stereo PRIVATE
     psapi
     RED4ext::SDK
 )
+# Use the JSON parser already selected for the statically linked OpenXR loader.
+if(BUILD_WITH_SYSTEM_JSONCPP)
+    target_link_libraries(cyberpunkvrport_stereo PRIVATE JsonCpp::JsonCpp)
+else()
+    target_include_directories(cyberpunkvrport_stereo PRIVATE ${openxr_SOURCE_DIR}/src/external/jsoncpp/include)
+endif()
 target_include_directories(cyberpunkvrport_stereo PRIVATE
     # ONE root for our own headers. Every internal include reads "Area/Name.hpp", so a header's
     # path states which area owns it -- which is the whole point of the layout. The old set of
     # eleven roots let any header be reached by its bare name from anywhere, and that is precisely
     # what let the monoliths grow: nothing about an include said where the thing belonged.
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/externals/streamline/include
     # --- third-party / vendored ---
     ${CMAKE_CURRENT_SOURCE_DIR}/externals/im3d
     ${CMAKE_CURRENT_SOURCE_DIR}/externals/minhook/include

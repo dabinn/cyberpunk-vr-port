@@ -39,6 +39,18 @@ inline constexpr int VRIK_TRANS_OFF = 0;   // Translation (Vector4)
 inline constexpr int VRIK_ROT_OFF   = 16;  // Rotation (Quaternion x,y,z,w)
 inline constexpr int VRIK_MAX_BONES = 800;  // was 256; raised so custom rig bones (WeaponRight1 ~767) fit
 
+// One player solve or rebind owns the shared bone indices, FK scratch and solve
+// cache. Weapon/cyberware changes can replace a768-bone meta-rig with a620-bone
+// rig; exposing new track pointers before its metadata is ready is unsafe.
+inline SRWLOCK g_PlayerPoseStateLock = SRWLOCK_INIT;
+// Last completed binding owns the camera's accumulated yaw during a rebind.
+// Its temporary boneCount=0 pauses new motion but must not reset the view offset.
+inline std::atomic<bool> g_PlayerPoseHeadingReady{false};
+inline bool VRIK_PlayerPoseFits(uint32_t slots,int bones,int fkCount) {
+    return bones>0 && bones<=VRIK_MAX_BONES && slots>=static_cast<uint32_t>(bones) &&
+        fkCount>=0 && fkCount<=bones;
+}
+
 // ---- the shared globals ----
 extern RED4ext::Vector4 g_CameraWorldPos; 
 extern int g_CalibrationBoneIndex;
@@ -289,13 +301,22 @@ struct VrikTransformSnapshot {
     float entityQuat[4];
     float cameraMinusEntity[3];   // filtered world-space pair from this same push
     uint32_t valid;
+    float bodyCameraMinusEntity[3]; // same packet's native camera base, before VR/bake/IPD
+    uint32_t unavailable; // missing centre/expired publication, distinct from a detached camera
 };
-// Returns true when a coherent publication (valid or explicitly invalid) was read.  Callers must
-// inspect `valid`: false means the current camera is detached/cinematic and the solve must stand down.
+// Returns true for a coherent publication. Inspect both valid and unavailable:
+// an expired/missing-centre packet may retain a recent solved pose; explicit
+// invalidation releases it instead of using a different coordinate frame.
 bool VRIK_ReadTransformSnapshot(VrikTransformSnapshot* out);
 // Native per-frame equivalent. LocateCamera publishes camera(N-1); the next player transform tick
 // pairs it with entity(N-1), avoiding both the Lua clock and the Lua pair slew limiter.
 bool VRIK_ReadNativeTransformSnapshot(VrikTransformSnapshot* out);
+// One completed MAIN component write and that camera owner's actual root
+// transform. No Present counter or delayed pairing participates in this packet.
+void VRIK_PublishNativeCameraPair(const int32_t* centre,const int32_t* bodyBase,
+    const int32_t* entity,const float* cameraQuat,const float* entityQuat,
+    uintptr_t owner,uint64_t origin,bool ownerStable);
+bool VRIK_ReadCurrentBodyFrame(float* worldPosition,float* worldRotation,float* trackingYaw);
 
 extern volatile float     g_VRUserArmLenR, g_VRUserArmLenL;
 extern volatile int       g_VRBodyUnderHMD;   // 1 = reposition upper body under the HMD
@@ -327,8 +348,8 @@ extern volatile int       g_VRRightUpperArmIdx;    // RightArm  (shoulder joint 
 extern volatile int       g_VRRightForeArmIdx;     // RightForeArm (elbow)
 extern volatile int       g_VRLeftUpperArmIdx;     // LeftArm
 extern volatile int       g_VRLeftForeArmIdx;      // LeftForeArm
-extern int                g_VRForeTwistR[3];       // r_forearmTwist01..03_JNT
-extern int                g_VRForeTwistL[3];       // l_forearmTwist01..03_JNT
+extern int                g_VRForeTwistR[3];       // resolved r_Wrist_0..2 / forearmTwist01..03
+extern int                g_VRForeTwistL[3];       // resolved l_Wrist_0..2 / forearmTwist01..03
 extern int                g_VRSpineIdx[8];         // Spine* torso chain
 extern volatile int       g_VRSpineCount;
 extern volatile float     g_VRIKDbgTarget[3];

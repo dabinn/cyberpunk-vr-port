@@ -1,3 +1,4 @@
+#include "Utils/DebugGate.hpp"
 // The weapon-aim path: the detours that keep the game's aiming, muzzle transform and projectile
 // spawn agreeing with where the VR hands actually are.
 //
@@ -7,6 +8,13 @@
 
 #include "Anim/WeaponAim.hpp"
 #include "Hooks/Hook.hpp"   // CVR_HOOK: this family installs at boot now, see below
+#include "Camera/PoseIdentity.hpp"
+#include "Camera/CameraState.hpp"
+#include "Camera/TakeoverTargeting.hpp"
+#include "Core/VrCoreShared.hpp"
+#include "Hooks/RoomscaleMove.hpp"
+#include "Overlay/VrOverlay.hpp"
+#include "Utils/MemorySafe.hpp"
 
 // EXPORTED MIRRORS of the two counters that decide where a missing shot signal is lost. The originals
 // are plain volatiles inside this module and a live probe cannot see them; without these the only way
@@ -215,7 +223,16 @@ extern "C" inline void* Hooked_WaXhUpd(void* rcx, void* rdx, void* r8, void* r9)
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
-    return OrigWaXhUpd(rcx, rdx, r8, r9);
+    void* result=OrigWaXhUpd(rcx, rdx, r8, r9);
+    if(g_remoteCamOn.load(std::memory_order_acquire) &&
+       g_takeoverEntityId.load(std::memory_order_acquire) && DeviceCamActive() &&
+       g_menuModeValue==0 && !cvr::vrui::CapturesInput() && OpenXRManager::Get().IsSessionRunning()) {
+        const auto player=cvr::roomscale::PlayerIdentity();
+        uint64_t entity{};
+        if(player && ReadU64Safe(player+0x48,&entity))
+            cvr::camera::RefreshTakeoverTargeting(rcx,player,entity);
+    }
+    return result;
 }
 
 // ============================================================================
@@ -286,7 +303,9 @@ extern "C" inline void Hooked_WaSFVW(void* a, int b, uint32_t c, void* d, void* 
 // distance(startPoint, published muzzle pos) so only the player's own shot is touched
 // (NPC projectiles originate far away). HOT fn -> work only when enabled; NO VirtualQuery.
 extern "C" inline void* Hooked_WaProj(void* rcx, void* rdx, void* r8, void* r9) {
+    const auto poseSource=cvr::camera::CapturePoseAddress(reinterpret_cast<uintptr_t>(rdx));
     void* result = OrigWaProj(rcx, rdx, r8, r9); // performs the copy; rcx = dest event
+    cvr::camera::TransferPoseAddress(poseSource,reinterpret_cast<uintptr_t>(rcx));
     ++g_waProjCalls;
     const uintptr_t ret = reinterpret_cast<uintptr_t>(_ReturnAddress());
     const uint32_t retRva = (g_waExeBase && ret >= g_waExeBase) ? static_cast<uint32_t>(ret - g_waExeBase) : 0;
@@ -752,13 +771,13 @@ inline uint8_t* s_waFireNormRelay = nullptr;
 extern "C" inline void* Hooked_WaNormShot(float* input, float* output) {
     void* result = s_waNormOrig ? s_waNormOrig(input, output) : reinterpret_cast<void*>(output);
     ++g_waNormShot;
-    ++CyberpunkVR_DebugWaNorm;
+    CVR_DIAGNOSTIC(++CyberpunkVR_DebugWaNorm);
     const uintptr_t ret = reinterpret_cast<uintptr_t>(_ReturnAddress());
     const uintptr_t base = g_waExeBase;
     const bool fromWeaponFire = (base && ret >= base && (ret - base) == (kWaFireNormCallsite + 5));
     if (fromWeaponFire) {
         ++g_waFireNormShot;
-        ++CyberpunkVR_DebugWaFireNorm;
+        CVR_DIAGNOSTIC(++CyberpunkVR_DebugWaFireNorm);
         // THE HAND RECOIL IS *NOT* FIRED HERE, and the counters above are why this is worth saying.
         //
         // An old dump made this callsite look like the per-round event -- normShot @0x46F0E5 and
@@ -1033,157 +1052,17 @@ extern "C" inline void Hooked_Ss(void* rcx, void* rdx, void* r8, void* r9) {
     }
 }
 
-// ============================================================================
-// FIRE-SHOT HOOK @0x4E4AFC -- the shot dispatcher.
-// This path handles hitscan AND projectile shots. The function takes (rcx, rdx, r8):
-// r8 (3rd arg) = the shot CONTEXT (mov rbx,r8). [r8+0x80] = a Vec3 aim DIRECTION (floats
-// @+0x80/+0x84/+0x88; the fn reads it, NEGATES via xorps, then atan2f's it to a heading ->
-// proves it is the direction). This is the lowest-level bullet-direction lever: rewrite it
-// here and the bullet flies that way for EVERY weapon, without touching the camera at all
-// (no feedback loop). g_fireMode: 0 dump-only, 1 bend-test (rotate by g_fireTestAng about
-// g_firePlane -> if the wall impact moves, +0x80 IS the lever), 2 controller-override
-// (write the dxgi-published controller forward [shared 60..62], sign per g_fireNeg).
-// ============================================================================
-// SCANNER MODEL: the bend test on [r8+0x80] did NOT move the bullet -> that field is the
-// recoil/spread auxiliary angle (read, negated, atan2'd to a heading index), NOT the ray.
-// The real aim direction is another field in the shot state. So this hook is now a live
-// SCANNER: dump a window of floats from a chosen source (r8 shot-ctx / rdx arg2 / deref of
-// [rdx] / deref of [rdx+0x10] transform) at a UI-settable byte offset, so we can SCRUB the
-// shot state in-game and find the triplet that reads ~camera-forward when firing at a wall.
-// Then override THAT field (g_fireOvrSrc/g_fireOvrOff) with the controller forward.
-// AUTO-SCAN results: every unit-length float-triple found in the shot struct (= a direction
-// basis vector). For each: byte offset, the xyz, and dot with the controller forward (hint:
-// the AIM/forward vector dots ~1 when you point the controller where you fire).
-typedef void (*FireFn)(void*, void*, void*, void*);
-inline FireFn OrigFire = nullptr;
-
-// src: 0=r8, 1=rdx, 2=*(rdx+0x10), 3=*(rdx), 4=rcx, 5=*(rcx). rcx matters because this path
-// loads xmm9=[rcx] right before the bullet raycast -> [rcx] likely holds origin/direction.
-static inline uint8_t* WaFireResolve(int src, void* rcx, void* rdx, void* r8) {
-    if (src == 0) return reinterpret_cast<uint8_t*>(r8);
-    if (src == 1) return reinterpret_cast<uint8_t*>(rdx);
-    if (src == 4) return reinterpret_cast<uint8_t*>(rcx);
-    void* base = (src == 5) ? rcx : rdx;
-    if (!base) return nullptr;
-    __try {
-        uintptr_t p = (src == 2) ? *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(base) + 0x10)
-                                 : *reinterpret_cast<uintptr_t*>(base);
-        if (p > 0x10000 && p < 0x7FFFFFFFFFFFull) return reinterpret_cast<uint8_t*>(p);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    return nullptr;
-}
-
-extern "C" inline void Hooked_Fire(void* rcx, void* rdx, void* r8, void* r9) {
-    ++g_fireCalls;
-    // Controller forward (the scan hint + the override value).
-    float cfx=0, cfy=0, cfz=1; bool haveCtrl=false;
-    if (g_pSharedHands) {
-        cfx=g_pSharedHands[60]; cfy=g_pSharedHands[61]; cfz=g_pSharedHands[62];
-        const float cl=cfx*cfx+cfy*cfy+cfz*cfz;
-        if (std::isfinite(cl) && cl>0.1f) { const float ci=1.0f/std::sqrt(cl); cfx*=ci; cfy*=ci; cfz*=ci; haveCtrl=true; }
-    }
-    // 1) AUTO-SCAN ALL sources (r8/rdx/*(rdx+0x10)/*(rdx)/rcx/*(rcx)) for unit-length float-triples
-    // (= direction basis vectors). For each hit record src, offset, xyz, dot-with-controller. The
-    // bullet aim vector dots ~1 with the controller. g_fireHitOff encodes src*0x10000 + offset.
-    int hits = 0;
-    const int range = (g_fireScanRange > 0 && g_fireScanRange < 0x8000) ? g_fireScanRange : 0x600;
-    for (int src = 0; src < 6 && hits < 24; ++src) {
-        uint8_t* base = WaFireResolve(src, rcx, rdx, r8);
-        if (!base) continue;
-        __try {
-            for (int off = 0; off + 12 <= range && hits < 24; off += 4) {
-                const float* d = reinterpret_cast<const float*>(base + off);
-                const float x=d[0], y=d[1], z=d[2];
-                if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
-                const float l = x*x + y*y + z*z;
-                if (l < 0.94f || l > 1.06f) continue;           // not unit length
-                if (x==0.0f && y==0.0f && z==0.0f) continue;
-                const float inv = 1.0f/std::sqrt(l);
-                const float nx=x*inv, ny=y*inv, nz=z*inv;
-                g_fireHitOff[hits] = src*0x10000 + off;          // encode source + offset
-                g_fireHitVec[hits*3+0]=nx; g_fireHitVec[hits*3+1]=ny; g_fireHitVec[hits*3+2]=nz;
-                g_fireHitDot[hits] = haveCtrl ? (nx*cfx + ny*cfy + nz*cfz) : 0.0f;
-                ++hits;
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    g_fireHitCount = hits;
-    // 1b) ★ TRANSFORM-ORIENTATION override: the raycast takes the shooter transform
-    // r9 = *(rdx+0x10); its world orientation is a QUATERNION @+0xF0 (and local @+0xD0) -- this is
-    // the actual shot direction (not a flat Vec3, so auto-scan missed it). Overwrite it with the
-    // controller aim quat (shared[53..56], game space). g_fireXform: 0 off, 1 write +0xF0, 2 write
-    // +0xD0, 3 write both. g_fireXformOff lets us scrub the quat offset if 0xF0 isn't it.
-    // SAFETY: writing into *(rdx+0x10) HUNG the game -> it is a live entity/component, not a private
-    // shot transform; mutating it corrupts physics/render. So this is now READ-ONLY: capture the quat
-    // at the chosen offset for inspection ONLY (no write). g_fireXform != 0 just selects capture.
-    if (g_fireXform && rdx) {
-        __try {
-            uintptr_t xf = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(rdx) + 0x10);
-            if (xf > 0x10000 && xf < 0x7FFFFFFFFFFFull) {
-                const float* cap = reinterpret_cast<const float*>(xf + g_fireXformOff);
-                g_fireDir[0]=cap[0]; g_fireDir[1]=cap[1]; g_fireDir[2]=cap[2]; g_fireDir[3]=cap[3];
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    // 2) Bend-test / controller-override at the chosen override offset.
-    uint8_t* ovrBase = WaFireResolve(g_fireOvrSrc, rcx, rdx, r8);
-    if (ovrBase && g_fireMode != 0) {
-        __try {
-            float* d = reinterpret_cast<float*>(ovrBase + g_fireOvrOff);
-            g_fireDir[0]=d[0]; g_fireDir[1]=d[1]; g_fireDir[2]=d[2]; g_fireDir[3]=d[3];
-            if (g_fireMode == 1 && g_fireTestAng != 0.0f) {
-                const float h = g_fireTestAng;
-                const float sn = std::sin(h), cs = std::cos(h);
-                const float x=d[0], y=d[1], z=d[2];
-                float nx=x, ny=y, nz=z;
-                if (g_firePlane == 0) { nx = x*cs - y*sn; ny = x*sn + y*cs; }
-                else if (g_firePlane == 1) { nx = x*cs + z*sn; nz = -x*sn + z*cs; }
-                else { ny = y*cs - z*sn; nz = y*sn + z*cs; }
-                d[0]=nx; d[1]=ny; d[2]=nz;
-                ++g_fireMutated;
-            } else if (g_fireMode == 2 && haveCtrl) {
-                const float sgn = g_fireNeg ? -1.0f : 1.0f;
-                d[0]=cfx*sgn; d[1]=cfy*sgn; d[2]=cfz*sgn;
-                ++g_fireMutated;
-            }
-            g_fireDirOut[0]=d[0]; g_fireDirOut[1]=d[1]; g_fireDirOut[2]=d[2]; g_fireDirOut[3]=d[3];
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    // ★ CAM-SNAP: the projectile launch (synchronous inside the shot) reads its direction from a
-    // crosshair ORIENTATION PROVIDER = the camera. So for the shot's duration, force the FPP camera
-    // WORLD orientation (g_ssCamPtr+0xF0) to the controller aim quat (shared[53..56]); the provider
-    // reads the controller -> the bullet launches down the controller. Restore right after so the
-    // VIEW only blips for the synchronous shot call (micro). g_fireCamSnap on.
-    bool snapped = false; float savedQ[4] = {0,0,0,1}; float* camQ = nullptr;
-    if (g_fireCamSnap && g_ssCamPtr && g_pSharedHands) {
-        __try {
-            const float qx=g_pSharedHands[53], qy=g_pSharedHands[54], qz=g_pSharedHands[55], qw=g_pSharedHands[56];
-            const float ql = qx*qx+qy*qy+qz*qz+qw*qw;
-            if (std::isfinite(ql) && ql > 0.25f) {
-                const float inv = 1.0f/std::sqrt(ql);
-                camQ = reinterpret_cast<float*>(g_ssCamPtr + g_fireCamSnapOff);
-                savedQ[0]=camQ[0]; savedQ[1]=camQ[1]; savedQ[2]=camQ[2]; savedQ[3]=camQ[3];
-                camQ[0]=qx*inv; camQ[1]=qy*inv; camQ[2]=qz*inv; camQ[3]=qw*inv;
-                snapped = true; ++g_fireMutated;
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) { snapped = false; camQ = nullptr; }
-    }
-    // Bracket the shot window (counter, nest-safe) so the trace-dispatcher hook can gate to the
-    // player bullet trace that fires synchronously inside the shot.
-    ++g_fireInShot;
-    if (OrigFire) OrigFire(rcx, rdx, r8, r9);
-    --g_fireInShot;
-    if (snapped && camQ) {
-        __try { camQ[0]=savedQ[0]; camQ[1]=savedQ[1]; camQ[2]=savedQ[2]; camQ[3]=savedQ[3]; } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-}
+// RVA 0x4E4AFC prepares a render view and its temporal camera state.
+// It is not a shot dispatcher: live writes to the camera's jitter fields and
+// its callers in GraphContextPrepare establish its rendering role. Never
+// bracket it as a shot or scan/mutate its arguments as weapon state.
 
 // ============================================================================
 // TRACE-DISPATCHER HOOK @0x1303EC -- the GENERIC physics-trace funnel (40+ callers: AI vision,
 // cover, physics, AND the player bullet). TargetHelper and related shot paths compute
 // dir = normalize(end - origin) then call this with a ray struct (arg5/rbx): [rbx+0x08] = origin,
 // [rbx+0x18] = end, [rbx+0x28..2A] = flags. Hooking it unconditionally would break the game, so we
-// GATE to the player-shot window (g_fireInShot, set by Hooked_Fire, AND
+// GATE to the player-shot window (g_fireInShot, set by Hooked_Ss, AND
 // g_shotInProgress from Hooked_Ss). During that window we (a) capture the return RVA (-> which of
 // the 40 callers IS the bullet trace) + dump the ray struct, and (b) optionally OVERRIDE the end
 // point = origin + controller_forward * dist, so the bullet flies down the controller. The ray
@@ -1418,6 +1297,7 @@ static bool WaPlayerOwnedWeapon(const void* aBlackboard) {
 // forward writes, and the missing two read as "two pellets flew unredirected". They had not --
 // the counter had. Diagnostics that can be wrong by a race are worse than no diagnostics.
 static inline void WaCount(unsigned long long& aCounter) {
+    if(!cvr::RuntimeDiagnosticsEnabled())return;
     InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&aCounter));
 }
 
@@ -1715,6 +1595,19 @@ inline bool InstallWeaponPhysicalRayHook() {
 // session -- so every hook in here was absent and the shot signal with it, which reads exactly like
 // "the feature does not work". The native stays (it is how the instrumentation is re-armed), and a
 // second call is harmless: MinHook refuses a duplicate and this code only enables what it created.
+bool EnsureCameraPoseCopyHook() {
+    if(!g_waExeBase)g_waExeBase=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    if(!g_waExeBase)return false;
+    const auto status=MH_Initialize();
+    if(status!=MH_OK && status!=MH_ERROR_ALREADY_INITIALIZED)return false;
+    void* target=reinterpret_cast<void*>(g_waExeBase+kWaProjOffset);
+    if(OrigWaProj) {
+        const auto enabled=MH_EnableHook(target);
+        return enabled==MH_OK || enabled==MH_ERROR_ENABLED;
+    }
+    if(MH_CreateHook(target,&Hooked_WaProj,reinterpret_cast<void**>(&OrigWaProj))!=MH_OK)return false;
+    return MH_EnableHook(target)==MH_OK;
+}
 namespace {
 bool InstallWeaponAimAtBoot() { return InstallWeaponAimHooks(); }
 
@@ -1740,10 +1633,6 @@ bool InstallWeaponAimHooks() {
     g_waExeBase = reinterpret_cast<uintptr_t>(h);
     MH_Initialize(); // no-op if already initialized by the VRIK hooks
 
-    // FIRE-SHOT direction lever: dump/bend/override [r8+0x80].
-    void* fire = reinterpret_cast<void*>(g_waExeBase + kFireOffset);
-    if (MH_CreateHook(fire, &Hooked_Fire, reinterpret_cast<void**>(&OrigFire)) == MH_OK) MH_EnableHook(fire);
-
     // TRACE-DISPATCHER funnel (gated to the player shot): capture caller + override end point.
     void* trace = reinterpret_cast<void*>(g_waExeBase + kTraceOffset);
     if (MH_CreateHook(trace, &Hooked_Trace, reinterpret_cast<void**>(&OrigTrace)) == MH_OK) MH_EnableHook(trace);
@@ -1761,13 +1650,10 @@ bool InstallWeaponAimHooks() {
     void* go = reinterpret_cast<void*>(g_waExeBase + kGoOffset);
     if (MH_CreateHook(go, &Hooked_Go, reinterpret_cast<void**>(&OrigGo)) == MH_OK) MH_EnableHook(go);
 
-    void* proj     = reinterpret_cast<void*>(g_waExeBase + kWaProjOffset);
     void* target   = reinterpret_cast<void*>(g_waExeBase + kWaTargetHelperOffset);
     void* classify = reinterpret_cast<void*>(g_waExeBase + kWaShotClassifyOffset);
 
-    bool ok = true;
-    if (MH_CreateHook(proj, &Hooked_WaProj, reinterpret_cast<void**>(&OrigWaProj)) != MH_OK) ok = false;
-    else if (MH_EnableHook(proj) != MH_OK) ok = false;
+    bool ok = EnsureCameraPoseCopyHook();
     if (MH_CreateHook(target, &Hooked_WaTarget, reinterpret_cast<void**>(&OrigWaTarget)) != MH_OK) ok = false;
     else if (MH_EnableHook(target) != MH_OK) ok = false;
     if (MH_CreateHook(classify, &Hooked_WaClassify, reinterpret_cast<void**>(&OrigWaClassify)) != MH_OK) ok = false;
@@ -1806,4 +1692,3 @@ bool InstallWeaponAimHooks() {
     CyberpunkVR_DebugWaInstalled = g_waInstalled;
     return ok;
 }
-

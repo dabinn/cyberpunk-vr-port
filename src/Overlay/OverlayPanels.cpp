@@ -10,6 +10,8 @@
 // of half-applied states, which is visible in the headset.
 
 #include "Anim/WheelGrab.hpp"
+#include "Runtimes/HybridBodyYaw.hpp"
+#include "Anim/VehiclePosePolicy.hpp"
 #include "Utils/SharedSlots.hpp"
 #include "Core/VrCoreShared.hpp"
 #include "Overlay/ImGuiOverlay.hpp"
@@ -26,7 +28,10 @@
 #include <imgui_impl_win32.h>
 #include "im3d.h"
 #include "Overlay/OverlayInternal.hpp"
+#include "Overlay/VrWidgets.hpp"
+#include "Utils/DebugGate.hpp"
 #include "Camera/CameraState.hpp"
+#include "Hooks/Reflex.hpp"
 
 extern volatile int g_verboseLog; // per-frame log spam toggle (default off)
 extern void Log(const char* fmt, ...);
@@ -91,7 +96,7 @@ bool CheckboxInt(const char* label, int* value) {
 
 bool SliderIntClamped(const char* label, int* value, int minValue, int maxValue) {
     int temp = *value;
-    const bool changed = ImGui::SliderInt(label, &temp, minValue, maxValue);
+    const bool changed = widgets::SliderInt(label, &temp, minValue, maxValue);
     if (changed) {
         *value = std::clamp(temp, minValue, maxValue);
     }
@@ -119,7 +124,7 @@ bool DrawFovControl(LiveControlsUiState& state) {
         ImGui::BeginDisabled();
     }
     float fov = state.xrForceFov <= 0.0f ? 112.0f : state.xrForceFov;
-    if (ImGui::SliderFloat("OpenXR projection layer FOV", &fov, 80.0f, 140.0f, "%.1f deg")) {
+    if (widgets::SliderFloat("OpenXR projection layer FOV", &fov, 80.0f, 140.0f, "%.1f deg")) {
         state.xrForceFov = fov;
         changed = true;
     }
@@ -154,26 +159,43 @@ void DrawVRHandsControls() {
     }
 
     ImGui::Separator();
-    // Physical body rotation (default OFF). Self-contained: read/flip/persist via the
-    // LiveControls bridge so it survives restarts (vrport.ini xr_physical_body_rotation).
+    // Select one body-yaw policy; persist the compatible INI flags together.
     {
         LiveControlsUiState st{};
         GetLiveControlsUiState(&st);
-        bool bodyRot = st.xrPhysicalBodyRotation != 0;
-        if (ImGui::Checkbox("Physical body rotation", &bodyRot)) {
-            st.xrPhysicalBodyRotation = bodyRot ? 1 : 0;
+        bool roomscale = st.xrRoomscaleMovement != 0;
+        if (ImGui::Checkbox("Roomscale movement", &roomscale)) {
+            st.xrRoomscaleMovement = roomscale ? 1 : 0;
             SetLiveControlsUiState(&st, 1);
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("OFF (default): classic VR heading -- turn with stick / snap-turn, the head only looks.\n"
-                              "ON: the character physically turns to follow your head, through the game's own\n"
-                              "heading -- so aim, movement and collision follow it. The view stays where you are\n"
-                              "looking and recentring is untouched. Vehicles are unaffected.");
+            ImGui::SetTooltip("Move the player capsule with physical horizontal head movement.\n"
+                              "Uses native collision/steps and preserves stick or WASD movement.\n"
+                              "Suspended in menus, vehicles and scripted movement.");
         }
+        using BodyMode=cvr::body::RotationMode;
+        int mode=static_cast<int>(cvr::body::RotationModeFromFlags(st.xrPhysicalBodyRotation,
+            st.xrTrackedBodyRotation,st.xrHybridBodyRotation));
+        static const char* bodyModes[]{"Stick / snap only","Head + free-look cone",
+            "HMD + controllers","Hybrid (default)"};
+        ImGui::SetNextItemWidth(410.0f);
+        if(widgets::Combo("Body rotation",&mode,bodyModes,4)){
+            st.xrPhysicalBodyRotation=mode==static_cast<int>(BodyMode::HeadCone);
+            st.xrTrackedBodyRotation=mode==static_cast<int>(BodyMode::Tracked);
+            st.xrHybridBodyRotation=mode==static_cast<int>(BodyMode::Hybrid);
+            SetLiveControlsUiState(&st,1);
+        }
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Hybrid: use the head cone while upright.\n"
+            "Looking down by 10 degrees or bending by 5 degrees uses HMD + controllers.\n"
+            "Return below 8 / 3 degrees; the current body heading is preserved at handover.\n"
+            "HMD + controllers always disables the body cones. Missing tracking holds heading.");
+        const bool trackedBody=mode==static_cast<int>(BodyMode::Tracked);
+        const bool hybridBody=mode==static_cast<int>(BodyMode::Hybrid);
+        const bool bodyRot=mode!=static_cast<int>(BodyMode::Off);
         // Cutscene VRIK suspend (PR #40). Picks the minimum scene tier at which the plugin fully
         // suspends the body+arm solve so the engine authored cinematic pose plays clean. Persisted
-        // through the LiveControls bridge (vrport.ini xr_cutscene_suspend_tier) and republished to
-        // shared[158] every tick, so a change here takes effect without a restart.
+        // through the LiveControls bridge (vrport.ini xr_cutscene_suspend_tier), read directly by
+        // AnimPose, so a change here takes effect without a restart.
         //
         // Combo index -> stored min-tier: Never(-1), Tier2+(1), Tier3+(2), Tier4+(3), Tier5(4).
         static const int kTierValues[] = { -1, 1, 2, 3, 4 };
@@ -184,37 +206,60 @@ void DrawVRHandsControls() {
             "Cinematics (Tier 4+)  [default]",
             "Full cinematics only (Tier 5)",
         };
-        int idx = 3;   // default Tier4+
-        for (int i = 0; i < 5; ++i) {
-            if (kTierValues[i] == st.xrCutsceneSuspendTier) { idx = i; break; }
-        }
-        ImGui::TextUnformatted("Suspend VRIK in cutscenes");
-        ImGui::SetNextItemWidth(280.0f);
-        if (ImGui::Combo("##cutsceneSuspend", &idx, kTierLabels, 5)) {
-            st.xrCutsceneSuspendTier = kTierValues[idx];
-            SetLiveControlsUiState(&st, 1);
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "During scripted scenes the game plays a full authored body+arm animation.\n"
-                "VRIK keeps solving on top of it, which looks wrong -- so above the chosen\n"
-                "scene tier the avatar is left entirely to the engine's cutscene pose.\n"
-                "'Cinematics (Tier 4+)' is the safe default; lower tiers also suspend during\n"
-                "lighter staged/walk-and-talk moments. Vehicles use their own arms-only path.");
-        }
-        // The one number the feature has. Everything else -- the rate, when it starts, when it stops --
-        // follows from it: whatever is outside the cone is asked for in the frame it appears.
-        float cone = CyberpunkVR_BodyYawFollowDeadDeg;
-        if (ImGui::SliderFloat("Free-look cone", &cone, 0.0f, 60.0f, "%.0f deg")) {
-            CyberpunkVR_BodyYawFollowDeadDeg = cone;
+        auto sceneSuspendControl=[&](const char* label,const char* id,int& tier,const char* help) {
+            int idx=tier==0 ? 0 : 3;
+            for(int i=0;i<5;++i)if(kTierValues[i]==tier) { idx=i;break; }
+            const std::string controlLabel=std::string(label)+id;
+            if(widgets::Combo(controlLabel.c_str(),&idx,kTierLabels,5)) {
+                tier=kTierValues[idx];SetLiveControlsUiState(&st,1);
+            }
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",help);
+        };
+        sceneSuspendControl("Suspend VRIK in cutscenes (on foot)","##cutsceneSuspend",
+            st.xrCutsceneSuspendTier,
+            "Applies only on foot. VRIK yields to the scene animation at or above this tier.\n"
+            "The vehicle threshold is configured separately below.");
+        sceneSuspendControl("Suspend VRIK in cutscenes (vehicle)","##cutsceneSuspendVehicle",
+            st.xrVehicleCutsceneSuspendTier,
+            "Applies in vehicles, including passenger window combat.\n"
+            "VRIK yields to the scene animation at or above this tier. Never keeps VRIK enabled.");
+        ImGui::BeginDisabled(!bodyRot || trackedBody);
+        float cone = st.xrBodyFreeLookDeg;
+        if (widgets::SliderFloat("Free-look cone", &cone, 0.0f, 60.0f, "%.0f deg")) {
+            st.xrBodyFreeLookDeg=cone;SetLiveControlsUiState(&st,1);
         }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("How far your head may turn before the body starts coming around.\n"
-                              "The body stops as soon as your head is back inside the cone.");
+                              "The body settles toward the centre, then restores the full free-look zone.\n"
+                              "Default: 10 degrees. Hybrid uses this value while looking ahead.");
         }
-        if (bodyRot) {
-            ImGui::Text("realign %+.1f deg | head-vs-body %+.1f deg",
-                        CyberpunkVR_DebugBodyFollowOffsetDeg, CyberpunkVR_DebugBodyFollowErrDeg);
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(mode!=static_cast<int>(BodyMode::HeadCone));
+        float downCone=st.xrBodyFreeLookDownDeg;
+        if(widgets::SliderFloat("Free-look cone when looking down",&downCone,0.0f,90.0f,"%.0f deg")) {
+            st.xrBodyFreeLookDownDeg=downCone;SetLiveControlsUiState(&st,1);
+        }
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Extra room to reach chest-mounted items.\n"
+            "Blends in from 10 to 30 degrees of downward head tilt.\n"
+            "Never narrows the normal cone; set the same value to disable widening.");
+        float swimCone=st.xrBodyFreeLookSwimDeg;
+        if(widgets::SliderFloat("Free-look cone in water",&swimCone,0.0f,90.0f,"%.0f deg")) {
+            st.xrBodyFreeLookSwimDeg=swimCone;SetLiveControlsUiState(&st,1);
+        }
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("One fixed cone on the surface and underwater.\n"
+            "Looking down and physical bending do not widen it. Default: 5 degrees.");
+        ImGui::EndDisabled();
+        if(trackedBody)ImGui::TextDisabled("Body free-look cones are disabled in HMD + controllers mode.");
+        if(hybridBody)ImGui::TextDisabled("Hybrid: head cone upright; HMD + controllers when looking down or bending.");
+        float radiusCm=st.xrBodyMoveRadius*100;
+        if(widgets::SliderFloat("Body movement free zone",&radiusCm,0.0f,15.0f,"%.1f cm")) {
+            st.xrBodyMoveRadius=radiusCm*.01f;SetLiveControlsUiState(&st,1);
+        }
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Small physical head movements leave the body in place.\n"
+            "Outside this zone the body follows smoothly; camera tracking remains immediate.");
+        if (bodyRot && !trackedBody && cvr::RuntimeDiagnosticsEnabled()) {
+            ImGui::Text("active cone %.1f deg | realign %+.1f deg | head-vs-body %+.1f deg",
+                        CyberpunkVR_BodyYawFollowDeadDeg,CyberpunkVR_DebugBodyFollowOffsetDeg,CyberpunkVR_DebugBodyFollowErrDeg);
         }
     }
 
@@ -243,23 +288,23 @@ void DrawVRHandsControls() {
     }
 
     bool calChanged = false;
-    calChanged |= ImGui::SliderFloat("Reach scale R", &scaleR, 0.80f, 1.30f, "%.3f");
-    calChanged |= ImGui::SliderFloat("Reach scale L", &scaleL, 0.80f, 1.30f, "%.3f");
-    calChanged |= ImGui::SliderFloat("Height R", &heightR, -0.20f, 0.50f, "%.3f m");
-    calChanged |= ImGui::SliderFloat("Height L", &heightL, -0.20f, 0.50f, "%.3f m");
-    calChanged |= ImGui::SliderFloat("Elbow swing R", &swingR, -3.0f, 3.0f, "%.2f");
-    calChanged |= ImGui::SliderFloat("Elbow swing L", &swingL, -3.0f, 3.0f, "%.2f");
-    calChanged |= ImGui::SliderFloat("Elbow pole R", &poleR, -180.0f, 180.0f, "%.1f deg");
-    calChanged |= ImGui::SliderFloat("Elbow pole L", &poleL, -180.0f, 180.0f, "%.1f deg");
+    calChanged |= widgets::SliderFloat("Reach scale R", &scaleR, 0.80f, 1.30f, "%.3f");
+    calChanged |= widgets::SliderFloat("Reach scale L", &scaleL, 0.80f, 1.30f, "%.3f");
+    calChanged |= widgets::SliderFloat("Height R", &heightR, -0.20f, 0.50f, "%.3f m");
+    calChanged |= widgets::SliderFloat("Height L", &heightL, -0.20f, 0.50f, "%.3f m");
+    calChanged |= widgets::SliderFloat("Elbow swing R", &swingR, -3.0f, 3.0f, "%.2f");
+    calChanged |= widgets::SliderFloat("Elbow swing L", &swingL, -3.0f, 3.0f, "%.2f");
+    calChanged |= widgets::SliderFloat("Elbow pole R", &poleR, -180.0f, 180.0f, "%.1f deg");
+    calChanged |= widgets::SliderFloat("Elbow pole L", &poleL, -180.0f, 180.0f, "%.1f deg");
 
     ImGui::Separator();
     ImGui::TextUnformatted("Wrist rotation offset (palm/finger alignment, deg)");
-    calChanged |= ImGui::SliderFloat("Wrist R pitch", &wRp, -180.0f, 180.0f, "%.1f");
-    calChanged |= ImGui::SliderFloat("Wrist R yaw",   &wRy, -180.0f, 180.0f, "%.1f");
-    calChanged |= ImGui::SliderFloat("Wrist R roll",  &wRr, -180.0f, 180.0f, "%.1f");
-    calChanged |= ImGui::SliderFloat("Wrist L pitch", &wLp, -180.0f, 180.0f, "%.1f");
-    calChanged |= ImGui::SliderFloat("Wrist L yaw",   &wLy, -180.0f, 180.0f, "%.1f");
-    calChanged |= ImGui::SliderFloat("Wrist L roll",  &wLr, -180.0f, 180.0f, "%.1f");
+    calChanged |= widgets::SliderFloat("Wrist R pitch", &wRp, -180.0f, 180.0f, "%.1f");
+    calChanged |= widgets::SliderFloat("Wrist R yaw",   &wRy, -180.0f, 180.0f, "%.1f");
+    calChanged |= widgets::SliderFloat("Wrist R roll",  &wRr, -180.0f, 180.0f, "%.1f");
+    calChanged |= widgets::SliderFloat("Wrist L pitch", &wLp, -180.0f, 180.0f, "%.1f");
+    calChanged |= widgets::SliderFloat("Wrist L yaw",   &wLy, -180.0f, 180.0f, "%.1f");
+    calChanged |= widgets::SliderFloat("Wrist L roll",  &wLr, -180.0f, 180.0f, "%.1f");
 
     ImGui::Separator();
     // Auto-calibration: T-pose sample from the same controller poses that draw the gizmo hands.
@@ -291,27 +336,23 @@ void DrawVRHandsControls() {
     }
 
     ImGui::Separator();
-    // CAMERA -> HEAD alignment. The FPP camera is mounted ~0.45 m ahead of the avatar's head, so
-    // the view sits in front of the body. Stand straight looking forward and press Bake: the
-    // (head - camera) offset is measured and baked, shifting the view back onto the head. The
-    // Tracking/Camera "Head" sliders then fine-tune ON TOP (they stay at 0).
+    // Neutral rig alignment is automatic; this button only clears optional trims.
     {
         float cb[3]; OpenXRManager::Get().GetCameraOffset(cb);
-        ImGui::TextUnformatted("Camera <-> Head alignment");
-        if (ImGui::Button("Bake camera onto head", ImVec2(180, 0))) {
+        ImGui::TextUnformatted("Camera: neck + 15 cm forward, eyes + 10 cm up");
+        if (ImGui::Button("Reset camera to neck", ImVec2(180, 0))) {
             OpenXRManager::Get().BakeCameraOffset();
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Start VR hand tracking, stand straight looking forward, then press.\n"
-                              "Measures the head-bone vs FPP-camera offset and moves the view back\n"
-                              "onto your avatar's head. Fine-tune with the Tracking/Camera Head sliders.");
+            ImGui::SetTooltip("Uses the neutral neck, 15 cm forward and 10 cm above reference eyes.\n"
+                              "Resets camera trims; no stance, head direction or Bake measurement is needed.");
         }
         ImGui::SameLine();
-        if (ImGui::Button("Clear##cambake", ImVec2(90, 0))) {
+        if (ImGui::Button("Clear trim##cambake", ImVec2(90, 0))) {
             OpenXRManager::Get().ClearCameraOffset();
             OpenXRManager::Get().SaveCalibrationToFile();
         }
-        ImGui::Text("baked offset: R %.3f  Fwd %.3f  Up %.3f", cb[0], cb[1], cb[2]);
+        ImGui::Text("camera mount: R %.3f  Fwd %.3f  Up %.3f", cb[0], cb[1], cb[2]);
     }
 
     ImGui::Separator();
@@ -421,11 +462,11 @@ void DrawStereoControls() {
     } else {
         ImGui::TextDisabled("Stereo submit off -> both eyes get MAIN (mono)");
     }
-    if (eyeEverProduced)
+    if (cvr::RuntimeDiagnosticsEnabled() && eyeEverProduced)
         ImGui::TextDisabled("vrcam eye age %u ms  (stale over %u)   eye submits %llu",
                             eyeAge, CyberpunkVR_StereoEyeMaxAgeMs,
                             static_cast<unsigned long long>(CyberpunkVR_DebugStereoEyeSubmits));
-    else
+    else if(cvr::RuntimeDiagnosticsEnabled())
         ImGui::TextDisabled("vrcam eye: never produced a frame");
     ImGui::Separator();
 
@@ -443,13 +484,13 @@ void DrawStereoControls() {
     // No separate capture switch: the submit path drives CyberpunkVR_StereoEyeCapture from the
     // checkbox above, so the per-frame snapshot cost appears and disappears with the feature
     // instead of being a second thing to remember to turn off.
-    ImGui::TextDisabled("snapshot copies %llu   skips %llu   vrcam RTV hits %llu",
+    if(cvr::RuntimeDiagnosticsEnabled())ImGui::TextDisabled("snapshot copies %llu   skips %llu   vrcam RTV hits %llu",
                         static_cast<unsigned long long>(CyberpunkVR_DebugStableCopies),
                         static_cast<unsigned long long>(CyberpunkVR_DebugStableSkips),
                         static_cast<unsigned long long>(CyberpunkVR_DebugMirrorRtvHits));
 
     int maxAge = static_cast<int>(CyberpunkVR_StereoEyeMaxAgeMs);
-    if (ImGui::SliderInt("Eye staleness limit (ms)", &maxAge, 33, 1000))
+    if (widgets::SliderInt("Eye staleness limit (ms)", &maxAge, 33, 1000))
         CyberpunkVR_StereoEyeMaxAgeMs = static_cast<uint32_t>(maxAge);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("How long the last VRCAM frame stays usable. Past this the %s\n"
@@ -480,7 +521,7 @@ void DrawStereoControls() {
         CyberpunkVR_SetVrcamEnabled(vrcamOn ? 1u : 0u);
     ImGui::TextDisabled("component %s   camera %s",
                         CyberpunkVR_VrcamComponentName(), CyberpunkVR_VrcamCameraName());
-    ImGui::TextDisabled("view nodes: main %llu   other %llu   vrcam %llu",
+    if(cvr::RuntimeDiagnosticsEnabled())ImGui::TextDisabled("view nodes: main %llu   other %llu   vrcam %llu",
                         static_cast<unsigned long long>(CyberpunkVR_DebugViewKeyMainNodes),
                         static_cast<unsigned long long>(CyberpunkVR_DebugViewKeyOtherNodes),
                         static_cast<unsigned long long>(CyberpunkVR_DebugVrcamNodeHits));
@@ -510,8 +551,8 @@ void DrawStereoControls() {
         }
         if (g_showCompactAdsTelemetry) {
             ImGui::Indent();
-            ImGui::SliderFloat("Telemetry X", &g_compactAdsTelemetryX, 0.10f, 0.90f, "%.2f");
-            ImGui::SliderFloat("Telemetry Y", &g_compactAdsTelemetryY, 0.10f, 0.90f, "%.2f");
+            widgets::SliderFloat("Telemetry X", &g_compactAdsTelemetryX, 0.10f, 0.90f, "%.2f");
+            widgets::SliderFloat("Telemetry Y", &g_compactAdsTelemetryY, 0.10f, 0.90f, "%.2f");
             ImGui::TextDisabled("Normalised position in the eye image");
             ImGui::Unindent();
         }
@@ -557,7 +598,205 @@ void DrawStereoControls() {
     }
 }
 
-bool DrawLiveControls(LiveControlsUiState& state) {
+static bool DrawDrivingControls(LiveControlsUiState& state) {
+    bool changed=false;
+            ImGui::Separator();
+            ImGui::TextUnformatted("Driving -- hands on the wheel");
+            changed |= CheckboxInt("Grab the wheel with the grips", &state.xrWheelGrab);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "While DRIVING, bring a hand to where the driving animation holds the\n"
+                    "wheel (or the handlebars) and squeeze that grip: the arm is handed back\n"
+                    "to the game's own animation -- hand on the wheel, fingers wrapped around\n"
+                    "it -- instead of following the controller. Release the grip and it goes\n"
+                    "back to your hand.\n\n"
+                    "Each hand is independent: hold the wheel with one and keep the other on\n"
+                    "a gun. While a hand is at the wheel that grip does nothing else (no\n"
+                    "holster equip, no magazine grab).");
+            }
+            {
+                float r = state.xrWheelRadius > 0.0f ? state.xrWheelRadius : 0.28f;
+                if (widgets::SliderFloat("Grab radius (m)", &r, 0.08f, 0.60f, "%.2f")) {
+                    state.xrWheelRadius = r;
+                    changed = true;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("How close your hand has to be to the animated hand before the\n"
+                                      "grip counts as grabbing the wheel. Bigger = easier to catch a\n"
+                                      "wheel you cannot see; too big and every grip in a car grabs.");
+                }
+                float m = state.xrWheelSteerMaxDeg > 0.0f ? state.xrWheelSteerMaxDeg : 90.0f;
+                if (widgets::SliderFloat("Full lock at (deg)", &m, 30.0f, 120.0f, "%.0f")) {
+                    state.xrWheelSteerMaxDeg = m;
+                    changed = true;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Wheel sensitivity: hand rotation from the grab position to full lock.\n"
+                                      "One hand uses a hub calibrated where you grab; two use their connecting line.\n"
+                                      "Adding or releasing a hand keeps the current turn.\n"
+                                      "90 = a quarter turn reaches full lock. Lower = more sensitive.\n"
+                                      "Travel beyond full lock keeps the same neutral position.");
+                }
+                float d = state.xrWheelSteerDeadDeg >= 0.0f ? state.xrWheelSteerDeadDeg : 1.5f;
+                if (widgets::SliderFloat("Steering deadzone (deg)", &d, 0.0f, 20.0f, "%.1f")) {
+                    state.xrWheelSteerDeadDeg = d;
+                    changed = true;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Tilt around centre that steers nothing at all.\n"
+                                      "Raise it if the car drifts while you hold the wheel straight;\n"
+                                      "every degree here is a degree of dead wheel off centre.\n"
+                                      "The full range still ends at 'Full lock at', so widening the\n"
+                                      "deadzone does not make the steering jump.");
+                }
+
+                changed |= CheckboxInt("Steering prediction", &state.xrWheelPrediction);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Gently anticipate a continuing turn from recent hand movement.\n"
+                                      "Limited to 8 ms and 0.5 degrees; neutral stays unchanged.\n"
+                                      "Prediction stops on a pause, reversal or grip change.\n"
+                                      "Off by default. It cannot anticipate the start of a turn.");
+                }
+                if (state.xrWheelPrediction) {
+                    changed |= widgets::SliderFloat("Prediction horizon (ms)", &state.xrWheelPredictionMs, 0.0f, 8.0f, "%.1f");
+                }
+                changed |= CheckboxInt("Horn -- hand on the wheel hub", &state.xrWheelHorn);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "While DRIVING, put a hand on the MIDDLE of the wheel -- where you would\n"
+                        "slap a real horn -- and the car honks for as long as it stays there.\n"
+                        "No grip needed; a hand that is GRABBING the wheel never honks.");
+                }
+                float hr = state.xrWheelHornRadius > 0.0f ? state.xrWheelHornRadius : 0.12f;
+                if (widgets::SliderFloat("Horn hub radius (m)", &hr, 0.04f, 0.30f, "%.2f")) {
+                    state.xrWheelHornRadius = hr;
+                    changed = true;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("How near the wheel centre the hand counts as on the hub.\n"
+                                      "Bigger = easier to find the horn without seeing it; too big\n"
+                                      "and it reaches the rim, so every grab honks.");
+                }
+
+                ImGui::Spacing();
+                changed |= CheckboxInt("Trigger fires the gun while driving", &state.xrVehicleGunTrigger);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Draw a weapon in the driver seat and the RIGHT TRIGGER stops being the\n"
+                        "throttle and becomes the gun: drive with the left hand on the wheel and\n"
+                        "shoot with the right.\n\n"
+                        "The throttle LATCHES at whatever it was when the weapon came out, so the\n"
+                        "car keeps rolling, and the LEFT STICK forward/back trims that speed while\n"
+                        "you shoot. Holster the weapon and the trigger is the throttle again.\n\n"
+                        "While the weapon is out the left stick's forward/back is taken by the\n"
+                        "trim: no lean / rock and no autodrive gesture until you holster.");
+                }
+                float tt = state.xrVehicleThrottleTrim > 0.0f ? state.xrVehicleThrottleTrim : 0.5f;
+                if (widgets::SliderFloat("Throttle trim rate (/s)", &tt, 0.05f, 3.0f, "%.2f")) {
+                    state.xrVehicleThrottleTrim = tt;
+                    changed = true;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("How much of the throttle's full travel the left stick adds or\n"
+                                      "removes per second while a weapon is out.\n"
+                                      "0.5 = two seconds held to go from idle to floored.");
+                }
+
+                // LIVE STATE, so "it did not grab" and "it steers the wrong way" are both answerable
+                // without a log: the armed mask is raised by proximity, the blends by the grab itself,
+                // and the angle is what the stick is being driven from.
+                if(cvr::RuntimeDiagnosticsEnabled()) {
+                    const int mask = static_cast<int>(
+                        OpenXRManager::Get().GetSharedSlot(vrshared::kWheelArmedMask));
+                    const int horn = cvr::anim::g_wheelHornMask.load(std::memory_order_relaxed);
+                    ImGui::Text("driving %d   at wheel  L %d R %d   hold  L %.2f R %.2f",
+                                g_isDriving.load(std::memory_order_relaxed) ? 1 : 0,
+                                (mask & vrshared::kWheelArmedLeftBit) ? 1 : 0,
+                                (mask & vrshared::kWheelArmedRightBit) ? 1 : 0,
+                                cvr::anim::g_wheelBlendLeft.load(std::memory_order_relaxed),
+                                cvr::anim::g_wheelBlendRight.load(std::memory_order_relaxed));
+                    ImGui::Text("steer  %+.1f deg  ->  stick %+.2f     horn  L %d R %d",
+                                cvr::anim::g_wheelSteerDeg.load(std::memory_order_relaxed),
+                                cvr::anim::g_wheelSteer.load(std::memory_order_relaxed),
+                                (horn & vrshared::kWheelArmedLeftBit) ? 1 : 0,
+                                (horn & vrshared::kWheelArmedRightBit) ? 1 : 0);
+                }
+            }
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("SEATED CAMERA OFFSET");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Head offsets in GENERAL are a standing calibration. Seated, the game's own\n"
+                "vehicle camera is already where it should be -- which is why the port drops\n"
+                "its two automatic bakes in a vehicle -- so a standing offset carries the view\n"
+                "off the seat instead of correcting it.\n\n"
+                "These three are added to the Head sliders while you are in a vehicle and\n"
+                "ignored the moment you step out, so the car and the street can be tuned\n"
+                "separately. Zero = the car keeps exactly the offset it has today.");
+        }
+        const bool passengerCombat=g_isInVehicle && cvr::anim::IsPassengerWindowCombat(
+            g_vehicleState.load(std::memory_order_relaxed));
+        ImGui::BeginDisabled(passengerCombat);
+        changed |= widgets::SliderFloat("Car Head X right", &state.xrVehHeadOffsetX, -0.50f, 0.50f, "%.3f m");
+        changed |= widgets::SliderFloat("Car Head Y forward", &state.xrVehHeadOffsetY, -0.50f, 0.50f, "%.3f m");
+        changed |= widgets::SliderFloat("Car Head Z up", &state.xrVehHeadOffsetZ, -0.50f, 0.50f, "%.3f m");
+        ImGui::EndDisabled();
+        {   // Live, so a slider that is doing nothing says so instead of being blamed.
+            ImGui::TextDisabled(passengerCombat ? "   (window combat: use GENERAL > Head offsets)"
+                               : g_isInVehicle ? "   (in a vehicle: these are live)"
+                                              : "   (on foot: these are ignored)");
+        }
+    return changed;
+}
+
+bool DrawFpsOverlayControls(LiveControlsUiState& state) {
+    bool changed=false;auto& fg=state.framegen;
+            changed|=ImGui::Checkbox("FPS overlay",&fg.overlay);
+            changed|=widgets::Combo("Overlay layout",&fg.overlayLayout,"Detailed\0Compact\0Minimal\0");
+            changed|=widgets::Combo("Overlay position",&fg.overlayCorner,"Top left\0Top right\0Bottom left\0Bottom right\0Top center\0Bottom center\0Left center\0Right center\0Center\0");
+            changed|=widgets::SliderFloat("Overlay size",&fg.overlayScale,.5f,2,"%.2fx");
+            changed|=widgets::SliderFloat("Overlay distance",&fg.overlayDistance,.5f,5,"%.2f m");
+            changed|=widgets::SliderFloat("Overlay horizontal offset",&fg.overlayX,-60,60,"%.1f deg");
+            changed|=widgets::SliderFloat("Overlay vertical offset",&fg.overlayY,-45,45,"%.1f deg");
+            changed|=CheckboxInt("Overlay free look",&fg.overlayFollow);
+            ImGui::BeginDisabled(!fg.overlayFollow);
+            changed|=widgets::SliderFloat("Overlay free-look cone",&fg.overlayCone,5,90,"%.1f deg");
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("Hold the panel heading inside this yaw range; catch up beyond it.");
+            ImGui::EndDisabled();
+            int history=fg.historySeconds==10?0:(fg.historySeconds==60?2:(fg.historySeconds==120?3:1));
+            if(widgets::Combo("History window",&history,"10 seconds\0 30 seconds\0 60 seconds\0 120 seconds\0")) {const int seconds[]={10,30,60,120};fg.historySeconds=seconds[history];changed=true;}
+            if(fg.overlay) {
+            if(ImGui::Button("Reset statistics"))cvr::framegen::ResetStatistics();
+            const auto stats=cvr::framegen::GetStatistics();
+            ImGui::Text("Real %.1f FPS   Framegen %.1f FPS   Output %.1f FPS",stats.realFps,stats.generatedFps,stats.outputFps);
+            ImGui::Text("Average %.1f FPS   Min %.1f   Max %.1f",stats.averageFps,stats.minimumFps,stats.maximumFps);
+            if(stats.low1Fps>0)ImGui::Text("1%% low %.1f FPS",stats.low1Fps);else ImGui::TextDisabled("1%% low: collecting 100 real frame intervals");
+            if(stats.low01Fps>0)ImGui::Text("0.1%% low %.1f FPS",stats.low01Fps);else ImGui::TextDisabled("0.1%% low: collecting 1000 real frame intervals");
+            const float graphMax=float(std::max(33.34,stats.budgetMs*2));
+            ImGui::PlotLines("CPU history (ms)",stats.cpuGraph.data(),int(stats.cpuGraph.size()),0,nullptr,0,graphMax,ImVec2(0,55));
+            ImGui::PlotLines("GPU history (ms)",stats.gpuGraph.data(),int(stats.gpuGraph.size()),0,nullptr,0,graphMax,ImVec2(0,55));
+            ImGui::Text("CPU frame %.2f ms   Peak %.2f ms",stats.cpuMs,stats.cpuPeakMs);
+            if(stats.gpuValid)ImGui::Text("GPU frame %.2f ms   Peak %.2f ms",stats.gpuMs,stats.gpuPeakMs);
+            else ImGui::TextDisabled("GPU frame timing: waiting for completed queries");
+            ImGui::Text("Generation %.2f ms   Tracked VRAM %.1f MiB",stats.generationMs,double(stats.vramBytes)/(1024*1024));
+            const auto& hw=stats.hardware;constexpr double gib=1024.0*1024*1024;
+            ImGui::Text("CPU: %s",hw.cpuName[0]?hw.cpuName:"--");
+            ImGui::Text("GPU: %s",hw.gpuName[0]?hw.gpuName:"--");
+            if(hw.cpuUsage>=0)ImGui::Text("CPU load %.1f%%   Busiest logical core %.1f%%",hw.cpuUsage,hw.coreMaximum);
+            if(hw.gpuUsage>=0)ImGui::Text("GPU load %.1f%%   Temperature %.0f C",hw.gpuUsage,hw.gpuTemperature);
+            if(hw.gpuMemoryValid)ImGui::Text("GPU memory %.2f / %.2f GiB",hw.gpuMemoryUsed/gib,hw.gpuMemoryTotal/gib);
+            if(hw.gpuProcessMemoryValid)ImGui::Text("Game GPU memory %.2f GiB   Budget %.2f GiB",hw.gpuProcessUsed/gib,hw.gpuProcessBudget/gib);
+            ImGui::Text("RAM %.2f / %.2f GiB   Game working set %.2f GiB",hw.ramUsed/gib,hw.ramTotal/gib,hw.appWorkingSet/gib);
+            ImGui::Text("Depth + motion: %s   Skipped %llu",stats.inputsReady?"both eyes observed":"waiting",stats.skipped);
+            ImGui::TextDisabled("CPU: captured frame cadence. GPU: graphics-queue frame interval. Peaks: last 2 seconds.");
+            ImGui::TextDisabled("Output FPS excludes repeated frames; it is not a headset scanout measurement.");
+            ImGui::TextDisabled("Lows use the mean of the slowest 1%% / 0.1%% of real-frame intervals. Hardware polling: 1 Hz.");
+            } else ImGui::TextDisabled("FPS overlay and statistics are off.");
+    return changed;
+}
+
+bool DrawLiveControls(LiveControlsUiState& state,int section) {
     bool changed = false;
 
     if (ImGui::Button("Recenter HMD (F7)")) {
@@ -568,55 +807,11 @@ bool DrawLiveControls(LiveControlsUiState& state) {
         SetLiveControlsUiState(&state, 1);
     }
 
-    if (ImGui::BeginTabBar("CyberpunkVRPortTabs")) {
-        if (ImGui::BeginTabItem("General")) {
-            if (ImGui::CollapsingHeader("View / Resolution", ImGuiTreeNodeFlags_DefaultOpen)) {
-                changed |= DrawFovControl(state);
+    if (section>=0 || ImGui::BeginTabBar("CyberpunkVRPortTabs")) {
+        if (section>=0 ? section==0 : ImGui::BeginTabItem("GENERAL")) {
+            if (ImGui::CollapsingHeader("GAME MENUS", ImGuiTreeNodeFlags_DefaultOpen)) {
                 changed |= CheckboxInt("VR menu quad", &state.xrMenuRect);
-                changed |= ImGui::SliderFloat("VR menu FOV", &state.xrMenuFov, 30.0f, 120.0f, "%.1f deg");
-            }
-
-            if (ImGui::CollapsingHeader("Stereo", ImGuiTreeNodeFlags_DefaultOpen)) {
-        changed |= ImGui::SliderFloat("Motion prediction (ms)", &state.xrMotionPredictMs, 0.0f, 60.0f, "%.1f ms");
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Forward-predicts the head pose by this many ms using head\n"
-                              "velocity, hiding render-to-photon latency. 0 = off.\n"
-                              "Tune up until motion feels responsive without overshoot.");
-        }
-        changed |= ImGui::SliderFloat("Stereo separation x", &state.xrStereoScale, 0.25f, 5.0f, "%.2fx");
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Personal fine-tune on the auto IPD. 1.0 = calibrated natural\n"
-                              "separation, auto-scaled to the headset's runtime IPD. Nudge\n"
-                              "0.8-1.2 for taste; crank to 3-5x to exaggerate depth and make\n"
-                              "the eye alternation obvious on the flat monitor for testing.");
-        }
-        // ── World scale + honest IPD ──
-        changed |= ImGui::SliderFloat("World scale", &state.xrWorldScale, 0.20f, 3.0f, "%.2f");
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Scales eye separation AND head translation together.\n"
-                              "Lower it (e.g. 0.8) to make the world look\n"
-                              "BIGGER / yourself smaller; raise to shrink the world. Use this if V\n"
-                              "and NPCs feel too large.");
-        }
-        changed |= ImGui::SliderFloat("IPD scale", &state.xrIpdScale, 0.50f, 2.0f, "%.2fx");
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Eye-separation multiplier on the runtime IPD. 1.0 = the neutral\n"
-                              "baseline (+-0.033 m on a typical headset).\n"
-                              "Affects stereo depth (diorama vs giant), NOT the monocular size.");
-        }
-        bool reuseLastFrame = state.xrReuseLastFrame != 0;
-        if (ImGui::Checkbox("Reuse last clean frame", &reuseLastFrame)) {
-            state.xrReuseLastFrame = reuseLastFrame ? 1 : 0;
-            changed = true;
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("On stale ticks, re-submit the last clean captured eye and let\n"
-                              "the compositor reproject it, instead of warping stale content\n"
-                              "again. May lower submit rate\n"
-                              "toward the capture rate. Off = always warp the stale eye.");
-        }
-        // The "Pose pair-lock" checkbox is gone: it toggled a freeze that only meant something
-        // under AER's one-camera eye alternation. The ini key still round-trips so old files load.
+                changed |= widgets::SliderFloat("VR menu FOV", &state.xrMenuFov, 30.0f, 120.0f, "%.1f deg");
             }
 
             if (ImGui::CollapsingHeader("Tracking / Camera")) {
@@ -631,29 +826,10 @@ bool DrawLiveControls(LiveControlsUiState& state) {
         // head translation -- it dropped these three offsets and the calibration bakes with it,
         // then hid the very sliders that were needed to put the view right. The offsets are
         // always live now, and they reach BOTH eyes.
-        changed |= ImGui::SliderFloat("Head X right", &state.xrHeadOffsetX, -0.50f, 0.50f, "%.3f m");
-        changed |= ImGui::SliderFloat("Head Y forward", &state.xrHeadOffsetY, -0.50f, 0.50f, "%.3f m");
-        changed |= ImGui::SliderFloat("Head Z up", &state.xrHeadOffsetZ, -0.50f, 0.50f, "%.3f m");
+        changed |= widgets::SliderFloat("Head X right", &state.xrHeadOffsetX, -0.50f, 0.50f, "%.3f m");
+        changed |= widgets::SliderFloat("Head Y forward", &state.xrHeadOffsetY, -0.50f, 0.50f, "%.3f m");
+        changed |= widgets::SliderFloat("Head Z up", &state.xrHeadOffsetZ, -0.50f, 0.50f, "%.3f m");
 
-        ImGui::Separator();
-        ImGui::TextUnformatted("In a vehicle only (added on top of the Head sliders)");
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "The three sliders above are a STANDING calibration. Seated, the game's own\n"
-                "vehicle camera is already where it should be -- which is why the port drops\n"
-                "its two automatic bakes in a vehicle -- so a standing offset carries the view\n"
-                "off the seat instead of correcting it.\n\n"
-                "These three are added to the Head sliders while you are in a vehicle and\n"
-                "ignored the moment you step out, so the car and the street can be tuned\n"
-                "separately. Zero = the car keeps exactly the offset it has today.");
-        }
-        changed |= ImGui::SliderFloat("Car Head X right", &state.xrVehHeadOffsetX, -0.50f, 0.50f, "%.3f m");
-        changed |= ImGui::SliderFloat("Car Head Y forward", &state.xrVehHeadOffsetY, -0.50f, 0.50f, "%.3f m");
-        changed |= ImGui::SliderFloat("Car Head Z up", &state.xrVehHeadOffsetZ, -0.50f, 0.50f, "%.3f m");
-        {   // Live, so a slider that is doing nothing says so instead of being blamed.
-            ImGui::TextDisabled(g_isInVehicle ? "   (in a vehicle: these are live)"
-                                              : "   (on foot: these are ignored)");
-        }
             }
 
             if (ImGui::CollapsingHeader("Debug Gizmos")) {
@@ -661,24 +837,91 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                 ImGui::Checkbox("Enable hand overlay", &g_drawHandLocator);
                 ImGui::Checkbox("Draw 3D hand proxy", &g_drawHandProxy3D);
                 ImGui::Checkbox("Draw debug wire/axes", &g_drawHandDebugAxes);
-                ImGui::SliderFloat("Locator scale", &g_handLocatorScale, 0.50f, 2.00f, "%.2f");
+                widgets::SliderFloat("Locator scale", &g_handLocatorScale, 0.50f, 2.00f, "%.2f");
             }
 
-            if (ImGui::CollapsingHeader("DLSS / Debug")) {
+            if (ImGui::CollapsingHeader("Diagnostics")) {
         { int vl = g_verboseLog; if (CheckboxInt("Verbose log (spammy diag)", &vl)) g_verboseLog = vl; }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Off by default for a clean cyberpunkvrport.log. Enable only\n"
                               "when capturing ClipCursor / depth / hook diagnostics.");
         }
             }
-            ImGui::EndTabItem();
+            if(section<0)ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Controls")) {
-            ImGui::TextWrapped("VR controller input is merged into XInput gamepad 0 so the game's "
-                               "native gamepad bindings apply (jump = A, dodge = B, reload = X, "
-                               "weapon swap = Y, fire = RT, aim = LT, grenade = RG, scanner = LG).");
+        if (section>=0 ? section==1 : ImGui::BeginTabItem("FRAMEGEN")) {
+            auto& fg=state.framegen;
+            changed|=ImGui::Checkbox("Enable frame generation",&fg.enabled);
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("Hand smoothing is automatically disabled while frame generation is enabled.");
+            int backend=int(fg.backend);
+            if(widgets::Combo("Frame generator",&backend,"FidelityFX\0NVIDIA OFA + FidelityFX\0")) {fg.backend=cvr::framegen::Backend(backend);changed=true;}
+            if(fg.backend==cvr::framegen::Backend::Nvidia)
+                changed|=widgets::Combo("NVIDIA quality",&fg.quality,"Fast (performance)\0Medium (balanced)\0Slow (best)\0");
+            int scale=fg.flowScale==100?2:(fg.flowScale==75?1:0);
+            if(widgets::Combo("Flow resolution",&scale,"50%\0 75%\0 100%\0")) {fg.flowScale=scale==2?100:(scale==1?75:50);changed=true;}
+            changed|=ImGui::Checkbox("Pace real frames at half headset refresh",&fg.autoPace);
+            ImGui::TextWrapped("Uses game motion vectors and depth in both eyes. Adds one intermediate frame between real frames.");
             ImGui::Separator();
+            const auto runtimeStatus=cvr::framegen::GetRuntimeStatus();
+            ImGui::TextWrapped("%s",runtimeStatus.text);
+            if(section<0)ImGui::EndTabItem();
+        }
+
+        if (section>=0 ? section==2 : ImGui::BeginTabItem("HUD")) {
+            changed |= CheckboxInt("Enable HUD panel", &state.xrHudPanel);
+            const char* followModes[] = {"Head / free-look cone", "Body rotation"};
+            changed |= widgets::Combo("Follow", &state.xrHudFollowMode, followModes, 2);
+            ImGui::BeginDisabled(state.xrHudFollowMode != 0);
+            changed |= widgets::SliderFloat("Free-look cone", &state.xrHudFollowDeg, 5.0f, 90.0f, "%.1f deg");
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("Catch up beyond the cone, or after 3 seconds at rest when the yaw offset is over 10 degrees inside it.");
+            ImGui::EndDisabled();
+            changed |= widgets::SliderFloat("HUD FOV", &state.xrHudFov, 30.0f, 120.0f, "%.1f deg");
+            changed |= CheckboxInt("Stereo depth", &state.xrHudStereoDepth);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Off: the HUD has the same direction in both eyes.\nOn: place it at the selected physical depth.");
+            ImGui::BeginDisabled(!state.xrHudStereoDepth);
+            changed |= widgets::SliderFloat("Depth", &state.xrHudDistance, 0.5f, 5.0f, "%.2f m");
+            ImGui::EndDisabled();
+            changed |= widgets::SliderFloat("Brightness", &state.xrHudBrightness, 0.25f, 3.0f, "%.2fx");
+            changed |= widgets::SliderFloat("Shadow / outline", &state.xrHudShadow, 0.0f, 2.0f, "%.2fx");
+            changed |= widgets::SliderFloat("Glow", &state.xrHudGlow, 0.0f, 2.0f, "%.2fx");
+            ImGui::Separator();
+            if(ImGui::CollapsingHeader("INTERACTIONS / DIALOGS",ImGuiTreeNodeFlags_DefaultOpen)){
+                changed |= CheckboxInt("World-space interactions / dialogs",&state.xrInteractionPanel);
+                changed |= widgets::SliderFloat("Interaction free-look cone",&state.xrInteractionFollowDeg,5.0f,90.0f,"%.1f deg");
+                changed |= widgets::SliderFloat("Loot free-look cone",&state.xrLootFollowDeg,5.0f,90.0f,"%.1f deg");
+                if(ImGui::IsItemHovered())ImGui::SetTooltip("Used while the loot panel and item description are visible. Default: 10 degrees.");
+                changed |= widgets::SliderFloat("Interaction distance",&state.xrInteractionDistance,.5f,5.0f,"%.2f m");
+                changed |= widgets::SliderFloat("Interaction FOV",&state.xrInteractionFov,30.0f,120.0f,"%.1f deg");
+                ImGui::TextWrapped("Interaction prompts and dialog choices share this panel. It follows only beyond the cone; no delayed catch-up at rest.");
+            }
+            ImGui::Separator();
+            static int element=10;
+            const char* elementLabels[cvr::hud::ElementCount];
+            for(size_t i=0;i<cvr::hud::ElementCount;++i)elementLabels[i]=cvr::hud::Elements[i].label;
+            widgets::Combo("Element",&element,elementLabels,int(cvr::hud::ElementCount));
+            const auto status=cvr::hud::GetLayoutStatus();
+            if(!status[element].available) ImGui::TextDisabled("Not currently visible in gameplay; settings are still saved.");
+            auto& transform=state.hudElements[element];
+            changed |= CheckboxInt("Show element", &transform.visible);
+            changed |= widgets::SliderFloat("Horizontal offset", &transform.x, -100.0f,100.0f,"%.1f %%");
+            changed |= widgets::SliderFloat("Vertical offset", &transform.y, -100.0f,100.0f,"%.1f %%");
+            changed |= widgets::SliderFloat("Size", &transform.scale,0.1f,3.0f,"%.2fx");
+            changed |= widgets::SliderFloat("Opacity", &transform.opacity,0.0f,1.0f,"%.2f");
+            if(ImGui::Button("Reset element")) {transform={};changed=true;}
+            ImGui::SameLine();
+            if(ImGui::Button("Reset all elements")) {state.hudElements={};changed=true;}
+            if(section<0)ImGui::EndTabItem();
+        }
+
+        if (section>=0 ? section==3 : ImGui::BeginTabItem("CONTROLS")) {
+            static int page=0;
+            static const char* pages[]={"GENERAL","DRIVING","BINDINGS"};
+            widgets::Tabs("controls-pages",page,pages,3);
+            if(page==1)changed|=DrawDrivingControls(state);
+            else if(page==2)widgets::DrawBindings();
+            else {
+            ImGui::TextWrapped("Movement, weapon aiming and physical interaction shortcuts.");
 
             // Weapon aim: bullets/projectiles fly down the WEAPON BARREL (controller-pointed) instead
             // of the camera crosshair. Hooks the projectile launch orientation provider and feeds it
@@ -724,124 +967,23 @@ bool DrawLiveControls(LiveControlsUiState& state) {
 
 
             ImGui::Separator();
-            ImGui::TextUnformatted("Driving -- hands on the wheel");
-            changed |= CheckboxInt("Grab the wheel with the grips", &state.xrWheelGrab);
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip(
-                    "While DRIVING, bring a hand to where the driving animation holds the\n"
-                    "wheel (or the handlebars) and squeeze that grip: the arm is handed back\n"
-                    "to the game's own animation -- hand on the wheel, fingers wrapped around\n"
-                    "it -- instead of following the controller. Release the grip and it goes\n"
-                    "back to your hand.\n\n"
-                    "Each hand is independent: hold the wheel with one and keep the other on\n"
-                    "a gun. While a hand is at the wheel that grip does nothing else (no\n"
-                    "holster equip, no magazine grab).");
-            }
-            {
-                float r = state.xrWheelRadius > 0.0f ? state.xrWheelRadius : 0.28f;
-                if (ImGui::SliderFloat("Grab radius (m)", &r, 0.08f, 0.60f, "%.2f")) {
-                    state.xrWheelRadius = r;
-                    changed = true;
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("How close your hand has to be to the animated hand before the\n"
-                                      "grip counts as grabbing the wheel. Bigger = easier to catch a\n"
-                                      "wheel you cannot see; too big and every grip in a car grabs.");
-                }
-                float m = state.xrWheelSteerMaxDeg > 0.0f ? state.xrWheelSteerMaxDeg : 90.0f;
-                if (ImGui::SliderFloat("Full lock at (deg)", &m, 30.0f, 120.0f, "%.0f")) {
-                    state.xrWheelSteerMaxDeg = m;
-                    changed = true;
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Wheel sensitivity: the controller tilt that means full stick.\n"
-                                      "Two hands = tilt of the line through the controllers, one hand\n"
-                                      "= tilt of that controller against the wheel centre.\n"
-                                      "90 = hands vertical is full lock (a real wheel, 1:1).\n"
-                                      "Lower = the same wrist movement steers more.");
-                }
-                float d = state.xrWheelSteerDeadDeg >= 0.0f ? state.xrWheelSteerDeadDeg : 1.5f;
-                if (ImGui::SliderFloat("Steering deadzone (deg)", &d, 0.0f, 20.0f, "%.1f")) {
-                    state.xrWheelSteerDeadDeg = d;
-                    changed = true;
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Tilt around centre that steers nothing at all.\n"
-                                      "Raise it if the car drifts while you hold the wheel straight;\n"
-                                      "every degree here is a degree of dead wheel off centre.\n"
-                                      "The full range still ends at 'Full lock at', so widening the\n"
-                                      "deadzone does not make the steering jump.");
-                }
-
-                changed |= CheckboxInt("Horn -- hand on the wheel hub", &state.xrWheelHorn);
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip(
-                        "While DRIVING, put a hand on the MIDDLE of the wheel -- where you would\n"
-                        "slap a real horn -- and the car honks for as long as it stays there.\n"
-                        "No grip needed; a hand that is GRABBING the wheel never honks.");
-                }
-                float hr = state.xrWheelHornRadius > 0.0f ? state.xrWheelHornRadius : 0.12f;
-                if (ImGui::SliderFloat("Horn hub radius (m)", &hr, 0.04f, 0.30f, "%.2f")) {
-                    state.xrWheelHornRadius = hr;
-                    changed = true;
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("How near the wheel centre the hand counts as on the hub.\n"
-                                      "Bigger = easier to find the horn without seeing it; too big\n"
-                                      "and it reaches the rim, so every grab honks.");
-                }
-
-                ImGui::Spacing();
-                changed |= CheckboxInt("Trigger fires the gun while driving", &state.xrVehicleGunTrigger);
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip(
-                        "Draw a weapon in the driver seat and the RIGHT TRIGGER stops being the\n"
-                        "throttle and becomes the gun: drive with the left hand on the wheel and\n"
-                        "shoot with the right.\n\n"
-                        "The throttle LATCHES at whatever it was when the weapon came out, so the\n"
-                        "car keeps rolling, and the LEFT STICK forward/back trims that speed while\n"
-                        "you shoot. Holster the weapon and the trigger is the throttle again.\n\n"
-                        "While the weapon is out the left stick's forward/back is taken by the\n"
-                        "trim: no lean / rock and no autodrive gesture until you holster.");
-                }
-                float tt = state.xrVehicleThrottleTrim > 0.0f ? state.xrVehicleThrottleTrim : 0.5f;
-                if (ImGui::SliderFloat("Throttle trim rate (/s)", &tt, 0.05f, 3.0f, "%.2f")) {
-                    state.xrVehicleThrottleTrim = tt;
-                    changed = true;
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("How much of the throttle's full travel the left stick adds or\n"
-                                      "removes per second while a weapon is out.\n"
-                                      "0.5 = two seconds held to go from idle to floored.");
-                }
-
-                // LIVE STATE, so "it did not grab" and "it steers the wrong way" are both answerable
-                // without a log: the armed mask is raised by proximity, the blends by the grab itself,
-                // and the angle is what the stick is being driven from.
-                {
-                    const int mask = static_cast<int>(
-                        OpenXRManager::Get().GetSharedSlot(vrshared::kWheelArmedMask));
-                    const int horn = cvr::anim::g_wheelHornMask.load(std::memory_order_relaxed);
-                    ImGui::Text("driving %d   at wheel  L %d R %d   hold  L %.2f R %.2f",
-                                g_isDriving.load(std::memory_order_relaxed) ? 1 : 0,
-                                (mask & vrshared::kWheelArmedLeftBit) ? 1 : 0,
-                                (mask & vrshared::kWheelArmedRightBit) ? 1 : 0,
-                                cvr::anim::g_wheelBlendLeft.load(std::memory_order_relaxed),
-                                cvr::anim::g_wheelBlendRight.load(std::memory_order_relaxed));
-                    ImGui::Text("steer  %+.1f deg  ->  stick %+.2f     horn  L %d R %d",
-                                cvr::anim::g_wheelSteerDeg.load(std::memory_order_relaxed),
-                                cvr::anim::g_wheelSteer.load(std::memory_order_relaxed),
-                                (horn & vrshared::kWheelArmedLeftBit) ? 1 : 0,
-                                (horn & vrshared::kWheelArmedRightBit) ? 1 : 0);
-                }
-            }
-
-            ImGui::Separator();
             ImGui::TextUnformatted("Locomotion direction");
+            bool analogMovement=state.xrMovementSpeedMode==1;
+            if(ImGui::Checkbox("Analog movement",&analogMovement)) {state.xrMovementSpeedMode=analogMovement?1:0;changed=true;}
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("On: speed follows left-stick travel. Off: the current fixed-speed movement (default).\nVehicle controls keep their existing response.");
+            ImGui::BeginDisabled(!analogMovement);
+            int leftDeadzone=int(state.xrLeftStickDeadzone*100+.5f);
+            int rightDeadzone=int(state.xrRightStickDeadzone*100+.5f);
+            int fullInput=int(state.xrMaxInputThreshold*100+.5f);
+            if(widgets::SliderInt("Left stick deadzone",&leftDeadzone,0,30,"%d%%")){state.xrLeftStickDeadzone=leftDeadzone*.01f;changed=true;}
+            if(widgets::SliderInt("Right stick deadzone",&rightDeadzone,0,30,"%d%%")){state.xrRightStickDeadzone=rightDeadzone*.01f;changed=true;}
+            if(widgets::SliderInt("Full input threshold",&fullInput,80,100,"%d%%")){state.xrMaxInputThreshold=fullInput*.01f;changed=true;}
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("Raw travel that produces full analog input and activates sprint, dash and crouch.\nThe usable travel between the deadzone and this threshold maps to 0-100%%.");
+            ImGui::EndDisabled();
             const char* moveSrcNames[] = { "Game (camera)", "HMD (head)", "Left hand", "Right hand" };
             int moveSrc = state.xrMovementSource;
             if (moveSrc < 0 || moveSrc > 3) moveSrc = state.xrMovementControl != 0 ? 1 : 0;
-            if (ImGui::Combo("Move source", &moveSrc, moveSrcNames, IM_ARRAYSIZE(moveSrcNames))) {
+            if (widgets::Combo("Move source", &moveSrc, moveSrcNames, IM_ARRAYSIZE(moveSrcNames))) {
                 state.xrMovementSource = moveSrc;
                 state.xrMovementControl = moveSrc != 0 ? 1 : 0;
                 changed = true;
@@ -854,6 +996,23 @@ bool DrawLiveControls(LiveControlsUiState& state) {
             }
 
             ImGui::Separator();
+            changed |= CheckboxInt("Breaststroke swimming", &state.xrBreaststrokeSwim);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("In water: reach forward with both hands, sweep out and pull back.\n"
+                                  "Movement begins during the pull. Gentle strokes swim normally; fast pulls boost.\n"
+                                  "Swim where the headset points, including up/down; no stick needed.\n"
+                                  "To rise, raise separated hands to chest level and push both down.\n"
+                                  "Repeat strokes to keep moving. Pull the left stick back to stop.");
+            }
+            ImGui::Separator();
+            changed |= CheckboxInt("Ladder grip climbing", &state.xrLadderGripClimb);
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("Grip a side rail or rung. Pull the hand down to climb up,\n"
+                "or move it up to climb down. Release to stop. Native pelvis and legs stay on the ladder.");
+            changed |= CheckboxInt("Auto finish near ladder top", &state.xrLadderAutoFinish);
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("After an upward pull near the top, finish climbing even when grips are released.\n"
+                "Move the stick or push a held hand upward to cancel.");
+            if(state.xrLadderAutoFinish)changed |= widgets::SliderFloat("Ladder finish distance", &state.xrLadderFinishDistance,.2f,1.2f,"%.2f m");
+            ImGui::Separator();
             ImGui::TextUnformatted("Turning (right stick)");
             changed |= CheckboxInt("Snap turn", &state.xrSnapTurn);
             if (ImGui::IsItemHovered()) {
@@ -861,68 +1020,78 @@ bool DrawLiveControls(LiveControlsUiState& state) {
                                   "instead of smooth rotation. Helps with motion sickness.");
             }
             if (state.xrSnapTurn != 0) {
-                changed |= ImGui::SliderFloat("Snap angle", &state.xrSnapTurnAngleDeg, 10.0f, 90.0f, "%.0f deg");
+                changed |= widgets::SliderFloat("Snap angle", &state.xrSnapTurnAngleDeg, 10.0f, 90.0f, "%.0f deg");
             }
 
-            ImGui::Separator();
-            ImGui::TextUnformatted("Current binding (on foot):");
-            ImGui::BulletText("Left stick    - walk / jog | FULL forward, HELD 0.2 s = sprint");
-            ImGui::BulletText("Right stick X - turn camera (Y = pitch unless Disable Mouse Y is on)");
-            ImGui::BulletText("Right stick FULL up   - DASH / dodge (once per push)");
-            ImGui::BulletText("Right stick FULL down - crouch (R3)");
-            ImGui::BulletText("Right thumb click - slide release: racks the weapon");
-            ImGui::BulletText("Right A       - JUMP");
-            ImGui::BulletText("Right B       - drop the magazine (weapon in hand)");
-            ImGui::BulletText("                holstered it is the game's B again -- close the phone, back out");
-            ImGui::BulletText("Left  X       - reload / interact");
-            ImGui::BulletText("Left  Y       - weapon switch");
-            ImGui::BulletText("Right trigger - fire | Left trigger - aim / melee block");
-            ImGui::BulletText("Right grip    - holster equip / unequip (reach to the holster first)");
-            ImGui::BulletText("Left  grip    - grab the magazine during a reload");
-            ImGui::BulletText("Left  grip at the LEFT EAR - scanner, TOGGLED: squeeze to open,");
-            ImGui::BulletText("                squeeze again to close. The hand is free in between");
-            ImGui::BulletText("Left  menu button - pause menu");
-            ImGui::Spacing();
-            ImGui::TextUnformatted("While the scanner is open, the same hand works it:");
-            ImGui::BulletText("Left stick UP / DOWN, to the stop - page the quickhack list");
-            ImGui::BulletText("                below the stop the stick still walks; only a full push pages");
-            ImGui::BulletText("Left  X       - apply the selected hack (a plain press)");
-            ImGui::BulletText("Right trigger - tag the target. It does NOT fire while the scanner is up");
-            ImGui::BulletText("Right stick click - change the scanner tab");
-            ImGui::BulletText("Left trigger + right stick - zoom in / out");
-            ImGui::Spacing();
-            ImGui::TextUnformatted("D-Pad, as a chord: HOLD the LEFT stick click, pick with the RIGHT stick");
-            ImGui::BulletText("Right stick UP / DOWN / LEFT / RIGHT -> D-Pad UP / DOWN / LEFT / RIGHT");
-            ImGui::BulletText("                to the stop, like every other gesture here -- a resting");
-            ImGui::BulletText("                thumb must not step a list");
-            ImGui::BulletText("Released with no direction = the vanilla left stick click (L3)");
-            ImGui::Spacing();
-            ImGui::TextUnformatted("In a vehicle (the gestures above do not apply):");
-            ImGui::BulletText("The camera is HELD IN FIRST PERSON: the perspective toggle does nothing,");
-            ImGui::BulletText("                and a car entered in third person is put back");
-            ImGui::BulletText("HOLD X        - get out. B is never the exit here, so no stray press ejects you");
-            ImGui::BulletText("Right A       - confirm a dialogue line (it is X on foot, and X is the");
-            ImGui::BulletText("                exit in here). The handbrake on A keeps working");
-            ImGui::BulletText("Left trigger  - brake | Right trigger - throttle (see the Vehicle section)");
-
-            ImGui::TextWrapped("Buttons follow each runtime's interaction profile (Touch / Index / "
-                               "Vive / WMR). Customize the actual key bindings in the game's "
-                               "in-engine \"Key Bindings -> Controller\" menu.");
-
-            ImGui::EndTabItem();
+            }
+            if(section<0)ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Stereo")) {
+        if (section>=0 ? section==4 : ImGui::BeginTabItem("STEREO")) {
+            if(ImGui::CollapsingHeader("PERFORMANCE",ImGuiTreeNodeFlags_DefaultOpen)) {
+                int reflex=state.nvidiaReflex+1;
+                if(widgets::Combo("NVIDIA Reflex",&reflex,"Game setting\0Off (higher FPS)\0On (lower latency)\0On + Boost\0")) {
+                    state.nvidiaReflex=reflex-1;changed=true;
+                }
+                ImGui::TextWrapped("Off can improve GPU utilization and FPS, but may increase input latency.");
+                const int applied=cvr::reflex::GetAppliedMode();
+                const char* appliedName=applied==0?"Off":applied==1?"On":applied==2?"On + Boost":"Waiting for renderer";
+                ImGui::TextDisabled("Applied: %s",appliedName);
+            }
+            if (ImGui::CollapsingHeader("STEREO VIEW", ImGuiTreeNodeFlags_DefaultOpen)) {
+                changed |= DrawFovControl(state);
+        changed |= widgets::SliderFloat("Motion prediction (ms)", &state.xrMotionPredictMs, 0.0f, 60.0f, "%.1f ms");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Forward-predicts the head pose by this many ms using head\n"
+                              "velocity, hiding render-to-photon latency. 0 = off.\n"
+                              "Tune up until motion feels responsive without overshoot.");
+        }
+        changed |= widgets::SliderFloat("Stereo separation x", &state.xrStereoScale, 0.25f, 5.0f, "%.2fx");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Personal fine-tune on the auto IPD. 1.0 = calibrated natural\n"
+                              "separation, auto-scaled to the headset's runtime IPD. Nudge\n"
+                              "0.8-1.2 for taste; crank to 3-5x to exaggerate depth and make\n"
+                              "the eye alternation obvious on the flat monitor for testing.");
+        }
+        // ── World scale + honest IPD ──
+        changed |= widgets::SliderFloat("World scale", &state.xrWorldScale, 0.20f, 3.0f, "%.2f");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Scales eye separation AND head translation together.\n"
+                              "Lower it (e.g. 0.8) to make the world look\n"
+                              "BIGGER / yourself smaller; raise to shrink the world. Use this if V\n"
+                              "and NPCs feel too large.");
+        }
+        changed |= widgets::SliderFloat("IPD scale", &state.xrIpdScale, 0.50f, 2.0f, "%.2fx");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Eye-separation multiplier on the runtime IPD. 1.0 = the neutral\n"
+                              "baseline (+-0.033 m on a typical headset).\n"
+                              "Affects stereo depth (diorama vs giant), NOT the monocular size.");
+        }
+        bool reuseLastFrame = state.xrReuseLastFrame != 0;
+        if (ImGui::Checkbox("Reuse last clean frame", &reuseLastFrame)) {
+            state.xrReuseLastFrame = reuseLastFrame ? 1 : 0;
+            changed = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("On stale ticks, re-submit the last clean captured eye and let\n"
+                              "the compositor reproject it, instead of warping stale content\n"
+                              "again. May lower submit rate\n"
+                              "toward the capture rate. Off = always warp the stale eye.");
+        }
+        // The "Pose pair-lock" checkbox is gone: it toggled a freeze that only meant something
+        // under AER's one-camera eye alternation. The ini key still round-trips so old files load.
+            }
+
             DrawStereoControls();
-            ImGui::EndTabItem();
+            if(section<0)ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("VRIK")) {
+        if (section>=0 ? section==5 : ImGui::BeginTabItem("AVATAR")) {
             DrawVRHandsControls();
-            ImGui::EndTabItem();
+            if(section<0)ImGui::EndTabItem();
         }
 
-        ImGui::EndTabBar();
+        if(section<0)ImGui::EndTabBar();
     }
 
     return changed;

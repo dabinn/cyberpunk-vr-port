@@ -1,5 +1,6 @@
 #pragma once
 
+
 // ================================================================================================
 // Every script-callable native, declared once.
 //
@@ -19,6 +20,11 @@
 #include <RED4ext/Scripting/Natives/Transform.hpp>
 
 #include <cstdint>
+
+void VRHudPanelUpdate(RED4ext::IScriptable*, RED4ext::CStackFrame*, int32_t*, int64_t);
+void VRReflexTiming(RED4ext::IScriptable*, RED4ext::CStackFrame*, RED4ext::CString*, int64_t);
+void GetVRMouseYDisabled(RED4ext::IScriptable*, RED4ext::CStackFrame*, bool*, int64_t);
+void VRShouldScanBodyCapsules(RED4ext::IScriptable*, RED4ext::CStackFrame*, bool*, int64_t);
 
 void ArmVRAnimPosePlayer(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t a4);
 void DumpAnimControllerComponents(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t a4);
@@ -116,7 +122,17 @@ void SetVRIKAnimInputTestMode(RED4ext::IScriptable* aContext, RED4ext::CStackFra
 void SetVRMeleeFire(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t);
 void SetVRReloadOwnedHand(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t);
 void SetVRSprintActive(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t);
+void SetVRSwimmingState(RED4ext::IScriptable*,RED4ext::CStackFrame*,int32_t*,int64_t);
+void GetVRSwimmingDebug(RED4ext::IScriptable*,RED4ext::CStackFrame*,float*,int64_t);
+void GetVRWheelControlState(RED4ext::IScriptable*,RED4ext::CStackFrame*,int32_t*,int64_t);
+void SetVRWheelGamepadProfile(RED4ext::IScriptable*,RED4ext::CStackFrame*,bool*,int64_t);
+void SetVRLadderState(RED4ext::IScriptable*,RED4ext::CStackFrame*,int32_t*,int64_t);
+void SetVRLadderTopRails(RED4ext::IScriptable*,RED4ext::CStackFrame*,int32_t*,int64_t);
+void GetVRLadderDebug(RED4ext::IScriptable*,RED4ext::CStackFrame*,float*,int64_t);
+void SetVRLadderTestGrip(RED4ext::IScriptable*,RED4ext::CStackFrame*,int32_t*,int64_t);
 void SetVRLocomotionState(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t);
+void VRStoryAttentionUpdate(RED4ext::IScriptable*, RED4ext::CStackFrame*, int32_t*, int64_t);
+void VRManualClueUpdate(RED4ext::IScriptable*, RED4ext::CStackFrame*, int32_t*, int64_t);
 void SetVRWeaponPoseState(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t);
 void SetVRWeaponRaiseTransition(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t);
 void SetVRMenuOpen(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t a4);
@@ -157,6 +173,7 @@ void VRScannerSlotSet(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, int32
 void VRScannerSlotSave(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t);
 // 1 while a device screen (computer, terminal) is up; lets the right stick's Y reach the game's UI.
 void SetVRDeviceScreen(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t a4);
+void VRKeypadUpdate(RED4ext::IScriptable*, RED4ext::CStackFrame*, int32_t*, int64_t);
 void SetVRMuzzlePos(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t);
 // The aim line's hit point and surface normal, from the weapon module's own raycast.
 void SetVRAimHit(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t);
@@ -310,3 +327,7 @@ void VRWeaponRigStatus(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFr
 void VRWeaponRigUse(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t a4);
 void VRWorldDirToModel(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, RED4ext::Vector4* aOut, int64_t a4);
 void VRWorldToModel(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, RED4ext::Vector4* aOut, int64_t a4);
+
+void VROverlayCommand(RED4ext::IScriptable*,RED4ext::CStackFrame*,int32_t*,int64_t);
+void VROverlayMenu(RED4ext::IScriptable*,RED4ext::CStackFrame*,bool*,int64_t);
+void VROverlayToggle(RED4ext::IScriptable*,RED4ext::CStackFrame*,void*,int64_t);

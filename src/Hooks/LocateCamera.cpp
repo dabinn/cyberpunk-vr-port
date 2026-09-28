@@ -1,3 +1,4 @@
+#include "Utils/DebugGate.hpp"
 // LocateCamera -- one hook, one file.
 //
 // Where the engine locates the camera. This composes the heading and publishes it, and it
@@ -16,13 +17,18 @@
 // change; it is an unfalsifiable one, so the order is preserved.
 
 #include "Camera/CameraLink.hpp"
+#include "Camera/PoseIdentity.hpp"
+#include "Camera/PlayerCameraState.hpp"
+#include "Camera/SceneCameraHeading.hpp"
 #include "Camera/CameraState.hpp"
 #include "Anim/CharacterRig.hpp"  // g_VrikFrameEpoch: exact camera/entity frame pairing
 #include "Utils/LogThrottle.hpp"
 #include "Core/LiveControls.hpp"
+#include "Anim/VehiclePosePolicy.hpp"
 #include "Core/Telemetry.hpp"
 #include "Core/VrCoreShared.hpp"
 #include "Hooks/Hook.hpp"
+#include "Hooks/RoomscaleMove.hpp"
 #include "Hooks/Trampoline.hpp"
 #include "Runtimes/OpenXRManager.hpp"
 #include "Utils/AobScanner.hpp"
@@ -110,7 +116,7 @@ static void SyncAdsWeaponZoomOneCamera(uintptr_t camObj, bool aiming, bool prevA
                 *savedValue = v;
                 *saved = true;
             } else {
-                ++CyberpunkVR_DebugAdsZoomRejects;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugAdsZoomRejects);
                 static bool s_toldZoomPair = false;
                 if (!s_toldZoomPair) {
                     s_toldZoomPair = true;
@@ -125,7 +131,7 @@ static void SyncAdsWeaponZoomOneCamera(uintptr_t camObj, bool aiming, bool prevA
         const float worldZoom = CyberpunkVR_MainAdsZoomFactor;
         if (*saved && std::isfinite(worldZoom) && worldZoom > 0.5f && worldZoom < 12.0f) {
             if (WriteFloatSafe(weightAddr, 1.0f) && WriteFloatSafe(valueAddr, worldZoom)) {
-                ++CyberpunkVR_DebugAdsZoomWrites;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugAdsZoomWrites);
             }
         }
     } else if (prevAiming && *saved && *savedCam == camObj) {
@@ -166,7 +172,8 @@ static void SyncAdsWeaponZoomToWorld() {
 float g_bdPushQuat[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
 void BdPushTransformOnce(uintptr_t comp, float qx, float qy, float qz, float qw,
-                                bool secondEye, const int32_t* base) {
+                                bool secondEye, const int32_t* base,
+                                const OpenXRHeadPose* pose,uint64_t poseId) {
     if (comp <= 0x10000) return;
     __try {
         uint8_t* c = reinterpret_cast<uint8_t*>(comp);
@@ -181,6 +188,7 @@ void BdPushTransformOnce(uintptr_t comp, float qx, float qy, float qz, float qw,
         const float sgn0 = secondEye ? +1.0f : -1.0f;
         const float sign = CyberpunkVR_MainIsRightEye ? -sgn0 : sgn0;
         int32_t* p = reinterpret_cast<int32_t*>(c + 0xE0);
+        cvr::camera::InvalidatePoseAddress(comp+0xE0);
         for (int i = 0; i < 3; ++i) {
             int32_t v = (CyberpunkVR_BdPushBase && base)
                             ? base[i]
@@ -191,6 +199,9 @@ void BdPushTransformOnce(uintptr_t comp, float qx, float qy, float qz, float qw,
         }
         float* q = reinterpret_cast<float*>(c + 0xF0);
         q[0] = hq[0]; q[1] = hq[1]; q[2] = hq[2]; q[3] = hq[3];
+        // Publish before notify: native RTT construction may read the component
+        // inside that call. This receipt belongs to these exact written pixels.
+        if(pose && poseId)cvr::camera::PublishComponentPose(comp,secondEye?2u:1u,poseId,*pose);
         // The engine's own "the transform changed" call: rcx = component, rdx = component+0x100,
         // exactly as exe+0x1D8AE4..AF1 issues it.
         const uintptr_t vt = *reinterpret_cast<uintptr_t*>(c);
@@ -199,10 +210,128 @@ void BdPushTransformOnce(uintptr_t comp, float qx, float qy, float qz, float qw,
         NotifyFn notify = *reinterpret_cast<NotifyFn*>(vt + 0x240);
         if (notify) {
             notify(c, c + 0x100);
-            if (secondEye) ++CyberpunkVR_DebugBdPushTransform;
-            else           ++CyberpunkVR_DebugBdPushMain;
+            if (secondEye) CVR_DIAGNOSTIC(++CyberpunkVR_DebugBdPushTransform);
+            else           CVR_DIAGNOSTIC(++CyberpunkVR_DebugBdPushMain);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+namespace {std::atomic<uintptr_t> s_mountedVehicleIdentity{};}
+uintptr_t CurrentMountedVehicleIdentity() {return s_mountedVehicleIdentity.load(std::memory_order_acquire);}
+
+void RefreshPlayerCameraState() {
+    static std::mutex refreshMutex;
+    std::unique_lock guard(refreshMutex,std::try_to_lock);
+    if(!guard.owns_lock())return;
+    // 1. Inizializza la cache RTTI solo al primissimo frame
+    if (!g_isRTTIInitialized) {
+        InitializeMountedVehicleCache();
+    }
+
+  
+    // 2. Player-state refresh (in-vehicle / aiming / weapon flags). PERF (audit,
+    // session 3): GetPlayer + 3 RTTI property reads used to run on EVERY locate
+    // call (2-3+ per frame). These are gameplay-rate flags, so refresh them once
+    // per entity tick (Lua push seq [99] bump), with an every-32nd-call fallback
+    // for sessions where the VRIK Lua entity push is not running.
+    {
+        static float s_lastEntSeqForPlayer = -1.0f;
+        static uint32_t refreshCalls=0;
+        bool refreshPlayer = ((refreshCalls++ & 31) == 0);
+        if (float* shSeq = GetShotShared()) {
+            const float seq = shSeq[99];
+            if (seq != s_lastEntSeqForPlayer) { s_lastEntSeqForPlayer = seq; refreshPlayer = true; }
+        }
+        if (refreshPlayer) {
+            RED4ext::ScriptGameInstance gameInstance;
+            RED4ext::Handle<RED4ext::IScriptable> playerHandle;
+            const bool playerQueried = RED4ext::ExecuteGlobalFunction("GetPlayer;GameInstance", &playerHandle, gameInstance);
+            if (playerQueried) cvr::roomscale::SetPlayer(reinterpret_cast<uintptr_t>(playerHandle.instance));
+
+            g_isInVehicle=false;
+            uintptr_t mountedIdentity=0;
+            if (playerHandle && g_mountedVehicleProp) {
+                auto mountedVehicle = g_mountedVehicleProp->GetValue<RED4ext::WeakHandle<RED4ext::IScriptable>>(playerHandle.instance);
+                const auto mounted=mountedVehicle.Lock();
+                mountedIdentity=reinterpret_cast<uintptr_t>(mounted.GetPtr());
+                g_isInVehicle = mountedIdentity!=0;
+            }
+            s_mountedVehicleIdentity.store(mountedIdentity,std::memory_order_release);
+
+            // PlayerPuppet::vehicleState mirrors PSM.Vehicle. Combat is passenger
+            // window combat; DriverCombat is a separate state. A missing IsDriver
+            // function must never classify every mounted passenger as the driver.
+            int vehicleState=-1;
+            if(playerHandle && g_vehicleStateProp)
+                vehicleState=static_cast<int>(g_vehicleStateProp->GetValue<RED4ext::game::PSMVehicle>(playerHandle.instance));
+            g_vehicleState.store(vehicleState,std::memory_order_relaxed);
+            bool driving = false;
+            if (g_isInVehicle) {
+                if(vehicleState>=0) {
+                    driving=cvr::anim::IsDrivingVehicleState(vehicleState);
+                } else if (g_isDriverFunc && playerHandle) {
+                    RED4ext::ScriptGameInstance gi;
+                    bool isDriver = false;
+                    RED4ext::StackArgs_t args;
+                    args.emplace_back(nullptr, &gi);
+                    args.emplace_back(nullptr, &playerHandle);
+                    // The cast picks the (void* instance) overload: a bare nullptr is ambiguous
+                    // against the (CClass* context) one, and a static function wants no instance.
+                    if (RED4ext::ExecuteFunction(static_cast<void*>(nullptr), g_isDriverFunc, &isDriver, args))
+                        driving = isDriver;
+                }
+            }
+            g_isDriving.store(driving, std::memory_order_relaxed);
+
+            if (playerHandle && g_isAimingProp) {
+                g_isAiming = g_isAimingProp->GetValue<bool>(playerHandle.instance);
+            }
+
+            if (playerHandle && g_equippedWeaponProp) {
+                auto equippedWeapon = g_equippedWeaponProp->GetValue<RED4ext::WeakHandle<RED4ext::IScriptable>>(playerHandle.instance);
+                g_hasWeaponEquipped = (equippedWeapon.instance != nullptr);
+            }
+
+            // Weapon flag lives in [144]. It used to be written to [126], COLLIDING with
+            // the OpenXR HMD position publish ([124..126] -- [126] is the HMD Z!) that
+            // VRIK reads as its head base and the overlay laser gate read as a weapon
+            // flag (audit find).
+            OpenXRManager::Get().SetSharedSlot(144, g_hasWeaponEquipped ? 1.0f : 0.0f);
+            // In-vehicle flag [31]: the VRIK hook disables the whole BODY chain
+            // (PlaceBodyUnderHMD / torso dampen / girdle pins / legs) while seated --
+            // the vehicle drives the puppet, body IK fights it and breaks the
+            // character/camera position. Arms-only in vehicles.
+            OpenXRManager::Get().SetSharedSlot(31, g_isInVehicle ? 1.0f : 0.0f);
+            // CUTSCENE SUSPEND, producer half (PR #40 in substance, RTTI instead of CET).
+            //
+            // The player's own scene tier, read as a property: PlayerPuppet carries
+            // `sceneTier : GameplayTier` (0 = Undefined, 1 = Tier1_FullGameplay,
+            // 4 = Tier4_FPPCinematic, 5 = Tier5_Cinematic). The upstream PR had
+            // the VRIK CET mod walk the PlayerStateMachine blackboard and push the number through a
+            // native; this reads it beside the three player flags above and needs no script tick.
+            //
+            // IT GOES IN A GLOBAL, NOT A SHARED SLOT, and that is the bug fix. Published first into
+            // slots [157]/[158] it measurably never arrived: XInput.cpp writes those same two slots
+            // every input tick with the right-B and left-Y pressed flags, so both the tier and the
+            // threshold were overwritten with 0 before the pose hook could read them. The slot map
+            // exists to cross to the CET mods; nothing that stays inside this DLL belongs in it.
+            // (An earlier note here blamed SetSharedSlot for writing a different pointer. That was
+            // wrong: the write landed, the button publish erased it.)
+            if (playerHandle && g_sceneTierProp) {
+                // GameplayTier is int32_t in the SDK, but read by the property own size so a future
+                // widening cannot silently read three bytes of something else.
+                const void* tp = g_sceneTierProp->GetValuePtr<void>(playerHandle.instance);
+                const uint32_t sz = g_sceneTierProp->type ? g_sceneTierProp->type->GetSize() : 4u;
+                int tier = 0;
+                if (tp) {
+                    if (sz == 1)      tier = *static_cast<const int8_t*>(tp);
+                    else if (sz == 2) tier = *static_cast<const int16_t*>(tp);
+                    else              tier = *static_cast<const int32_t*>(tp);
+                }
+                g_sceneTier.store(tier, std::memory_order_relaxed);
+            }
+        }
+    }
 }
 
 extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val) {
@@ -257,105 +386,9 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
 
     SyncAdsWeaponZoomToWorld();
 
-    // 1. Inizializza la cache RTTI solo al primissimo frame
-    if (!g_isRTTIInitialized) {
-        InitializeMountedVehicleCache();
-    }
+    RefreshPlayerCameraState();
 
-  
-    // 2. Player-state refresh (in-vehicle / aiming / weapon flags). PERF (audit,
-    // session 3): GetPlayer + 3 RTTI property reads used to run on EVERY locate
-    // call (2-3+ per frame). These are gameplay-rate flags, so refresh them once
-    // per entity tick (Lua push seq [99] bump), with an every-32nd-call fallback
-    // for sessions where the VRIK Lua entity push is not running.
-    {
-        static float s_lastEntSeqForPlayer = -1.0f;
-        bool refreshPlayer = ((g_locateCameraHits & 31) == 0);
-        if (float* shSeq = GetShotShared()) {
-            const float seq = shSeq[99];
-            if (seq != s_lastEntSeqForPlayer) { s_lastEntSeqForPlayer = seq; refreshPlayer = true; }
-        }
-        if (refreshPlayer) {
-            RED4ext::ScriptGameInstance gameInstance;
-            RED4ext::Handle<RED4ext::IScriptable> playerHandle;
-            RED4ext::ExecuteGlobalFunction("GetPlayer;GameInstance", &playerHandle, gameInstance);
-
-            if (playerHandle && g_mountedVehicleProp) {
-                auto mountedVehicle = g_mountedVehicleProp->GetValue<RED4ext::WeakHandle<RED4ext::IScriptable>>(playerHandle.instance);
-                g_isInVehicle = (mountedVehicle.instance != nullptr);
-            }
-
-            // DRIVER SEAT, not just mounted. Only the driver has a wheel (or handlebars) in front
-            // of them, and the wheel grab hands the arms back to the driving animation -- which is
-            // the wrong pose for every other seat. Static call, null instance.
-            bool driving = false;
-            if (g_isInVehicle) {
-                if (g_isDriverFunc && playerHandle) {
-                    RED4ext::ScriptGameInstance gi;
-                    bool isDriver = false;
-                    RED4ext::StackArgs_t args;
-                    args.emplace_back(nullptr, &gi);
-                    args.emplace_back(nullptr, &playerHandle);
-                    // The cast picks the (void* instance) overload: a bare nullptr is ambiguous
-                    // against the (CClass* context) one, and a static function wants no instance.
-                    if (RED4ext::ExecuteFunction(static_cast<void*>(nullptr), g_isDriverFunc, &isDriver, args))
-                        driving = isDriver;
-                } else {
-                    driving = true;   // no IsDriver -> any seat, see InitializeMountedVehicleCache
-                }
-            }
-            g_isDriving.store(driving, std::memory_order_relaxed);
-
-            if (playerHandle && g_isAimingProp) {
-                g_isAiming = g_isAimingProp->GetValue<bool>(playerHandle.instance);
-            }
-
-            if (playerHandle && g_equippedWeaponProp) {
-                auto equippedWeapon = g_equippedWeaponProp->GetValue<RED4ext::WeakHandle<RED4ext::IScriptable>>(playerHandle.instance);
-                g_hasWeaponEquipped = (equippedWeapon.instance != nullptr);
-            }
-
-            // Weapon flag lives in [144]. It used to be written to [126], COLLIDING with
-            // the OpenXR HMD position publish ([124..126] -- [126] is the HMD Z!) that
-            // VRIK reads as its head base and the overlay laser gate read as a weapon
-            // flag (audit find).
-            OpenXRManager::Get().SetSharedSlot(144, g_hasWeaponEquipped ? 1.0f : 0.0f);
-            // In-vehicle flag [31]: the VRIK hook disables the whole BODY chain
-            // (PlaceBodyUnderHMD / torso dampen / girdle pins / legs) while seated --
-            // the vehicle drives the puppet, body IK fights it and breaks the
-            // character/camera position. Arms-only in vehicles.
-            OpenXRManager::Get().SetSharedSlot(31, g_isInVehicle ? 1.0f : 0.0f);
-            // CUTSCENE SUSPEND, producer half (PR #40 in substance, RTTI instead of CET).
-            //
-            // The player's own scene tier, read as a property: PlayerPuppet carries
-            // `sceneTier : GameplayTier` (0 = Tier1_FullGameplay .. 3 = Tier4_FPPCinematic,
-            // 4 = Tier5_Cinematic), verified by RTTI dump rather than assumed. The upstream PR had
-            // the VRIK CET mod walk the PlayerStateMachine blackboard and push the number through a
-            // native; this reads it beside the three player flags above and needs no script tick.
-            //
-            // IT GOES IN A GLOBAL, NOT A SHARED SLOT, and that is the bug fix. Published first into
-            // slots [157]/[158] it measurably never arrived: XInput.cpp writes those same two slots
-            // every input tick with the right-B and left-Y pressed flags, so both the tier and the
-            // threshold were overwritten with 0 before the pose hook could read them. The slot map
-            // exists to cross to the CET mods; nothing that stays inside this DLL belongs in it.
-            // (An earlier note here blamed SetSharedSlot for writing a different pointer. That was
-            // wrong: the write landed, the button publish erased it.)
-            if (playerHandle && g_sceneTierProp) {
-                // GameplayTier is int32_t in the SDK, but read by the property own size so a future
-                // widening cannot silently read three bytes of something else.
-                const void* tp = g_sceneTierProp->GetValuePtr<void>(playerHandle.instance);
-                const uint32_t sz = g_sceneTierProp->type ? g_sceneTierProp->type->GetSize() : 4u;
-                int tier = 0;
-                if (tp) {
-                    if (sz == 1)      tier = *static_cast<const int8_t*>(tp);
-                    else if (sz == 2) tier = *static_cast<const int16_t*>(tp);
-                    else              tier = *static_cast<const int32_t*>(tp);
-                }
-                g_sceneTier.store(tier, std::memory_order_relaxed);
-            }
-        }
-    }
-    
+    const float bodyYawOffset=BodyYawFollowOffset();
 
     // SNAP HOLDBACK REMOVED. It held the view yaw one snap-delta back for the locates of a snap
     // tick, arming off a counter in shared[147] and reading [146]/[149]/[99] beside it. Two things
@@ -378,7 +411,7 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
     // Profile answers: magnitude, direction, duration, and whether dev RETURNS to
     // baseline (transient kick) or SETTLES at an offset (sprint lean) -- each implies
     // a different fix.
-    {
+    if(cvr::RuntimeDiagnosticsEnabled()) {
         float* shJ = GetShotShared();
         static float s_jkLastTick = -1.0f;
         static float s_jkPrevDev[3] = { 0.0f, 0.0f, 0.0f };
@@ -507,8 +540,8 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
     // published view carried +50.69 too, when the drawn view was at -42.00.
     //
     // Taking it out once, here, fixes every consumer at the source instead of one at a time.
-    if (CyberpunkVR_BodyYawRealignRad != 0.0f) {
-        const float ra = -CyberpunkVR_BodyYawRealignRad;
+    if (bodyYawOffset != 0.0f) {
+        const float ra = -bodyYawOffset;
         const float cr = cosf(ra), sr = sinf(ra);
         const float fx = bodyGameForwardX * cr - bodyGameForwardY * sr;
         const float fy = bodyGameForwardX * sr + bodyGameForwardY * cr;
@@ -524,6 +557,7 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
     // pose, so the engine's IK/skeleton stops rebuilding between the ~11 ms-apart
     // left/right renders (the body/hands jitter seen even on the flat mirror).
     OpenXRHeadPose xrPose{};
+    cvr::roomscale::Vec2 xrConsumed{};
     const int renderEye = OpenXRManager::Get().GetCurrentRenderEyeIndex();
     // POSE PAIR LOCKING: in AER, READ the frozen snapshot the engine ALREADY built
     // this pair's skeleton from (published in OnPresent at the pair boundary, before
@@ -545,10 +579,14 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
     // sat at a lagging, motion-dependent place while looking in the current direction -- and the
     // layer was labelled with a third sample again. One sample removes all three disagreements
     // at once. See AcquireFrameHeadSample.
+    uint64_t cameraPoseSequence{};
     const bool hasXR = CyberpunkVR_OneSamplePerFrame
-        ? OpenXRManager::Get().AcquireFrameHeadSample(&xrPose)
+        ? OpenXRManager::Get().AcquireCameraPoseFrame(&xrPose,&xrConsumed,&cameraPoseSequence)
         : OpenXRManager::Get().GetHeadPose(&xrPose);
     const bool composeAtWrite = (CyberpunkVR_CamWriteInPatch && CyberpunkVR_CamComposeAtWrite);
+    OpenXRHeadPose takeoverPose{};
+    uint64_t takeoverPoseId{};
+    bool takeoverLabelKnown=false;
     if (hasXR) {
         // Hand the EXACT sample this frame's camera is built from to the submit path, so
         // the image is labelled with the pose it was rendered from instead of whatever the
@@ -743,7 +781,7 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
                 if (l2 > 0.9f && l2 < 1.1f && !ours) {
                     headX = quat[0]; headY = quat[1]; headZ = quat[2]; headW = quat[3];
                     fromBuffer = true;
-                    ++CyberpunkVR_DebugBdQuatFromBuffer;
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugBdQuatFromBuffer);
                 }
             }
             if (!fromBuffer) {
@@ -755,13 +793,13 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
                     headY = bdEntryQuat[1];
                     headZ = bdEntryQuat[2];
                     headW = bdEntryQuat[3];
-                    ++CyberpunkVR_DebugBdBaseFromLocate;
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugBdBaseFromLocate);
                 } else {
                     headX = g_bdSceneQuat[0];
                     headY = g_bdSceneQuat[1];
                     headZ = g_bdSceneQuat[2];
                     headW = g_bdSceneQuat[3];
-                    ++CyberpunkVR_DebugBdBaseFromScript;
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugBdBaseFromScript);
                 }
             }
         }
@@ -775,6 +813,23 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         camera_qz = tmpZ;
         camera_qw = tmpW;
 
+        const bool sharedScene=CyberpunkVR_CamWriteInPatch && CyberpunkVR_CamComposeAtWrite &&
+            !g_isInVehicle && cvr::camera::UseNativeMainHeading(false,g_sceneTier.load(std::memory_order_relaxed),
+                DeviceCamActive(),g_bdActive.load(std::memory_order_relaxed));
+        bool matchedSceneWrite=false;
+        if(sharedScene && cameraPoseSequence) {
+            float written[4],yaw{};OpenXRHeadPose writtenHead{};uint64_t poseId{};
+            if(cvr::camera::CamWriteQuatRead(written,&writtenHead,nullptr,nullptr,&poseId) &&
+               poseId==cameraPoseSequence && writtenHead.originSerial==xrPose.originSerial) {
+                const float head[4]={writtenHead.oriX,writtenHead.oriY,writtenHead.oriZ,writtenHead.oriW};
+                if(cvr::camera::CompositionBaseYaw(written,head,&yaw)) {
+                    camera_qx=written[0];camera_qy=written[1];camera_qz=written[2];camera_qw=written[3];
+                    bodyGameForwardX=-std::sin(yaw);bodyGameForwardY=std::cos(yaw);
+                    matchedSceneWrite=true;
+                }
+            }
+        }
+
         // Publish the composed orientation for the PatchCamera writer.
         //
         // This is a DEDICATED global, deliberately not g_lastLocateQuat: that one mirrors the
@@ -782,11 +837,15 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         // starts reporting the engine's own value instead of ours -- which is how the camera
         // once stopped following the mouse. Published whenever we composed it, independent of
         // who ends up writing it.
-        g_headQuatComposed[0] = camera_qx;
-        g_headQuatComposed[1] = camera_qy;
-        g_headQuatComposed[2] = camera_qz;
-        g_headQuatComposed[3] = camera_qw;
-        g_headQuatValid = skipHmdOrientation ? 0u : 1u;
+        // In a scripted scene the component writer owns the shared answer.
+        // Do not overwrite it with a separately composed body/scene heading.
+        if(!sharedScene || matchedSceneWrite) {
+            g_headQuatComposed[0] = camera_qx;
+            g_headQuatComposed[1] = camera_qy;
+            g_headQuatComposed[2] = camera_qz;
+            g_headQuatComposed[3] = camera_qw;
+            g_headQuatValid = skipHmdOrientation ? 0u : 1u;
+        } else if(skipHmdOrientation)g_headQuatValid=0;
 
         // (An attempt to write both cameras directly from here, through the cached pointers,
         // is deliberately NOT present. It was tried to lift the orientation off the engine's
@@ -825,7 +884,7 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         // Same rule as the frame label two hundred lines up: whoever composes files the entry.
         if (BdPushOwnsComposition()) {
             const float qr[4] = { camera_qx, camera_qy, camera_qz, camera_qw };
-            cvr::camera::CamWriteQuatPublish(camera_qx, camera_qy, camera_qz, camera_qw);
+            cvr::camera::CamWriteQuatPublish(camera_qx, camera_qy, camera_qz, camera_qw, xrPose);
             cvr::camera::CamWriteRecordPush(qr, xrPose);
         }
         // Skip the HMD orientation write on the shot frame (or always, mode 1) so the game's
@@ -894,7 +953,7 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         // head turn. One composition, one head sample, one label.
         const bool bdUseWriteSite =
             (bdNow ? (CyberpunkVR_BdQuatFromWriteSite != 0) : takeoverNow) &&
-            cvr::camera::CamWriteQuatRead(bdWritten) &&
+            cvr::camera::CamWriteQuatRead(bdWritten,&takeoverPose,nullptr,nullptr,&takeoverPoseId) &&
             (bdWritten[0]*bdWritten[0] + bdWritten[1]*bdWritten[1] +
              bdWritten[2]*bdWritten[2] + bdWritten[3]*bdWritten[3]) > 0.9f;
         if (bdUseWriteSite) {
@@ -902,13 +961,17 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
             camera_qz = bdWritten[2]; camera_qw = bdWritten[3];
             g_headQuatComposed[0] = camera_qx; g_headQuatComposed[1] = camera_qy;
             g_headQuatComposed[2] = camera_qz; g_headQuatComposed[3] = camera_qw;
-            ++CyberpunkVR_DebugBdQuatFromWriteSite;
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugBdQuatFromWriteSite);
         }
         if (!skipHmdOrientation && (!CyberpunkVR_CamWriteInPatch || bdNow || takeoverNow)) {
             quat[0] = camera_qx;
             quat[1] = camera_qy;
             quat[2] = camera_qz;
             quat[3] = camera_qw;
+            takeoverLabelKnown=takeoverNow && bdUseWriteSite && takeoverPose.valid &&
+                takeoverPoseId && takeoverPoseId==cameraPoseSequence &&
+                takeoverPose.originSerial==xrPose.originSerial &&
+                cvr::camera::CurrentSerializedCameraComponent()==g_lensComp.load(std::memory_order_acquire);
         }
     }
 
@@ -945,9 +1008,10 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         // consistent with) sees one number and they cannot drift apart.
         float vehOff[3] = { 0.0f, 0.0f, 0.0f };
         if (allowGameCameraTranslation && g_isInVehicle) {
-            vehOff[0] = g_liveControls.xrVehHeadOffsetX;
-            vehOff[1] = g_liveControls.xrVehHeadOffsetY;
-            vehOff[2] = g_liveControls.xrVehHeadOffsetZ;
+            const auto active=cvr::camera::ActiveVehicleCameraOffset(
+                {g_liveControls.xrVehHeadOffsetX,g_liveControls.xrVehHeadOffsetY,g_liveControls.xrVehHeadOffsetZ},
+                cvr::anim::IsPassengerWindowCombat(g_vehicleState.load(std::memory_order_relaxed)));
+            vehOff[0]=active.x;vehOff[1]=active.y;vehOff[2]=active.z;
         }
         // EYE-VIEW offset ("bake to eyes"): view-only, no feedback into the body solve.
         float eyeBake[3] = { 0.0f, 0.0f, 0.0f };
@@ -964,11 +1028,11 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
                 shEye[123] = 0.0f;
             }
         }
-        const float localRight = xrPose.posX * posScale +
+        float localRight = xrPose.posX * posScale +
             (allowGameCameraTranslation
                  ? (g_liveControls.xrHeadOffsetX + camBake[0] + eyeBake[0] + vehOff[0])
                  : 0.0f);
-        const float localForward = -xrPose.posZ * posScale +
+        float localForward = -xrPose.posZ * posScale +
             (allowGameCameraTranslation
                  ? (g_liveControls.xrHeadOffsetY + camBake[1] + eyeBake[1] + vehOff[1])
                  : 0.0f);
@@ -996,7 +1060,8 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         if (CyberpunkVR_ViewYawFromEngine && CyberpunkVR_EngineBodyYawValid && !g_isInVehicle) {
             float wz = CyberpunkVR_EngineBodyYawZ, ww = CyberpunkVR_EngineBodyYawW;
             if (ww < 0.0f) { wz = -wz; ww = -ww; }
-            if (wz != 0.0f || ww != 0.0f) flatYaw = 2.0f * atan2f(wz, ww);
+            if (wz != 0.0f || ww != 0.0f)
+                flatYaw = cvr::roomscale::TrackingYaw(2.0f * atan2f(wz, ww), bodyYawOffset);
         }
         // MOUNTED, TAKE THE YAW THE VIEW WAS ACTUALLY COMPOSED WITH. The note above is explicit that this
         // matrix belongs in the VIEW's frame -- "two consumers, two headings, and they are no longer the
@@ -1014,19 +1079,24 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         // (The realign is already out of bodyGameForward at the top of this function, so this matrix
         // is the VIEW's heading -- which is what takes the room position into the world without
         // swinging the play space every time the body comes around.)
-        const float flatCy = cosf(flatYaw);
-        const float flatSy = sinf(flatYaw);
-        // Hand it to the hand publish so it can rebuild this same delta from ITS head sample.
-        g_anchorOff[0] = localRight   - xrPose.posX * posScale;
-        g_anchorOff[1] = localForward + xrPose.posZ * posScale;
-        g_anchorOff[2] = localUp      - xrPose.posY * posScale;
-        g_anchorCy = flatCy;
-        g_anchorSy = flatSy;
-        g_anchorScale = posScale;
-        g_anchorRecipeValid = 1;
-        const float worldDeltaX = flatCy * localRight - flatSy * localForward;
-        const float worldDeltaY = flatSy * localRight + flatCy * localForward;
-        const float worldDeltaZ = localUp;
+        // Manual camera alignment is a body-space calibration on foot too.
+        // PID25404: a 15-degree body turn with (-.012,.174) manual XY changed
+        // camera/head alignment by45.516mm, matching the wrong-basis prediction.
+        const auto anchor=cvr::camera::MakeAnchorRecipe(
+            {g_liveControls.xrHeadOffsetX,g_liveControls.xrHeadOffsetY,g_liveControls.xrHeadOffsetZ},
+            {vehOff[0],vehOff[1],vehOff[2]},
+            {camBake[0]+eyeBake[0],camBake[1]+eyeBake[1],camBake[2]+eyeBake[2]},
+            g_isInVehicle,posScale,flatYaw,cvr::camera::BodyAnchorYaw(flatYaw));
+        cvr::camera::AnchorRecipePublish(anchor);
+        // The recipe above contains calibration only. Every consumer subtracts
+        // the same native-physics ledger using its own sample's origin generation.
+        const auto consumed = CyberpunkVR_OneSamplePerFrame ? xrConsumed : cvr::roomscale::CameraConsumed(xrPose.originSerial);
+        localRight -= consumed.x * posScale;
+        localForward -= consumed.y * posScale;
+        const auto delta=cvr::camera::ComposeAnchorTranslation(
+            {(xrPose.posX-consumed.x)*posScale,(-xrPose.posZ-consumed.y)*posScale,xrPose.posY*posScale},
+            anchor.trackingOffset,anchor.modelOffset,anchor.trackingYaw,anchor.modelYaw);
+        const float worldDeltaX=delta.x, worldDeltaY=delta.y, worldDeltaZ=delta.z;
 
         // WorldPosition fixed-point is int32 * (2<<16) = 131072 (17 fractional bits) --
         // CONFIRMED against RED4ext SDK WorldPosition.hpp after the published absolute
@@ -1266,7 +1336,7 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         g_bdScenePoseValid.load(std::memory_order_acquire)) {
         for (int i = 0; i < 3; ++i)
             posFP[i] = g_bdScenePosFP[i].load(std::memory_order_relaxed);
-        ++CyberpunkVR_DebugBdMainPos;
+        CVR_DIAGNOSTIC(++CyberpunkVR_DebugBdMainPos);
     }
 
     // THE VIEWPOINT SLIDER FOR A TAKEN-OVER CAMERA, applied to the buffer itself.
@@ -1300,7 +1370,7 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
     // component there, which is why its half cannot go where the second eye's does.
     if (bdIpdShiftFP[0] || bdIpdShiftFP[1] || bdIpdShiftFP[2]) {
         for (int i = 0; i < 3; ++i) posFP[i] += bdIpdShiftFP[i];
-        ++CyberpunkVR_DebugBdIpdLocate;
+        CVR_DIAGNOSTIC(++CyberpunkVR_DebugBdIpdLocate);
     }
     // NOW the push, with MAIN's own head centre for this frame as the base. Not gated on the scene
     // pose any more: the editor has no scene pose, and that is exactly the case where the two eyes
@@ -1340,12 +1410,18 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         locatedIsLens = d2 <= 1.0f;
     }
     if (LocateOwnsTakeover() && g_headQuatValid && locatedIsLens) {
-        const float tq[4] = { g_headQuatComposed[0], g_headQuatComposed[1],
+        float tq[4] = { g_headQuatComposed[0], g_headQuatComposed[1],
                               g_headQuatComposed[2], g_headQuatComposed[3] };
+        if(takeoverLabelKnown) {
+            tq[0]=camera_qx;tq[1]=camera_qy;tq[2]=camera_qz;tq[3]=camera_qw;
+            cvr::camera::PublishCameraSetupPose(reinterpret_cast<uintptr_t>(rbxPtr),
+                cvr::camera::CurrentSerializedCameraComponent(),1,takeoverPoseId,takeoverPose);
+        }
         if (IsPlausibleUnitQuaternion(tq)) {
             BdPushTransformOnce(g_camObjVrcam.load(std::memory_order_relaxed),
-                                tq[0], tq[1], tq[2], tq[3], true, renderedPosFP);
-            ++CyberpunkVR_DebugTakeoverPush;
+                                tq[0], tq[1], tq[2], tq[3], true, renderedPosFP,
+                                takeoverLabelKnown?&takeoverPose:nullptr,takeoverPoseId);
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugTakeoverPush);
         }
     }
 
@@ -1393,9 +1469,19 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
     ++g_lastLocateSeq;
     {
         cvr::camera::LocatedCameraFrame frame{};
-        frame.worldPos[0] = static_cast<float>(renderedPosFP[0]) / 131072.0f;
-        frame.worldPos[1] = static_cast<float>(renderedPosFP[1]) / 131072.0f;
-        frame.worldPos[2] = static_cast<float>(renderedPosFP[2]) / 131072.0f;
+        int32_t bodyCentreFP[3] = {renderedPosFP[0], renderedPosFP[1], renderedPosFP[2]};
+        int32_t bodyBaseFP[3] = {renderedPosFP[0], renderedPosFP[1], renderedPosFP[2]};
+        bool bodyCentreKnown = true;
+        // SerializeSetup copies the patched component position verbatim. That
+        // position is MAIN's EYE when IPD is written in PatchCamera. Publishing
+        // it as the head centre made the hips orbit by half an IPD on HMD yaw.
+        // Leave the render buffer untouched; only the body reference is centred.
+        if ((CyberpunkVR_IpdInWorldPos || CyberpunkVR_HeadTranslationInPatch) && !DeviceCamActive() &&
+            !g_bdActive.load(std::memory_order_relaxed))
+            bodyCentreKnown = cvr::camera::MainEyeCentreRead(renderedPosFP, bodyCentreFP, bodyBaseFP);
+        frame.worldPos[0] = static_cast<float>(bodyCentreFP[0]) / 131072.0f;
+        frame.worldPos[1] = static_cast<float>(bodyCentreFP[1]) / 131072.0f;
+        frame.worldPos[2] = static_cast<float>(bodyCentreFP[2]) / 131072.0f;
         // Publish the quaternion this locate COMPOSED, not `quat`. In the active
         // CamWriteInPatch path this serialized buffer is intentionally left untouched and PatchCamera
         // writes the component later; `quat` is therefore only the pre-HMD engine base.
@@ -1403,6 +1489,8 @@ extern "C" void __fastcall OnLocateCameraCallback(float* rbxPtr, float xmm0_val)
         frame.worldQuat[2] = camera_qz; frame.worldQuat[3] = camera_qw;
         frame.sequence = g_lastLocateSeq;
         frame.frameEpoch = g_VrikFrameEpoch.load(std::memory_order_relaxed);
+        frame.bodyCentreKnown = bodyCentreKnown ? 1u : 0u;
+        for (int i=0;i<3;++i) frame.bodyBaseWorld[i]=float(bodyBaseFP[i])/131072.0f;
         cvr::camera::LocatedCameraFramePublish(frame);
     }
 

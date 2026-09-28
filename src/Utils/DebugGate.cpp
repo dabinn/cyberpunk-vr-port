@@ -25,6 +25,9 @@
 // measured). DEBUG is for diagnosis, not for playing.
 
 #include <cstdint>
+#include "Utils/DebugGate.hpp"
+
+extern "C" __declspec(dllexport) int CyberpunkVR_RuntimeDiagnostics = 0;
 
 extern void Log(const char* fmt, ...);
 extern "C" int GetLauncherDebug();
@@ -48,6 +51,7 @@ extern __declspec(dllexport) int  CyberpunkVR_XrRateLog;        // [xrrate]/[xrl
 extern __declspec(dllexport) int  CyberpunkVR_XrDeepDiag;       // the deep blocks inside those
 extern __declspec(dllexport) int  CyberpunkVR_VrikRateLog;      // [vrik]/[rebind]/[heading]/[bodyyaw]/[yawphase]
 extern __declspec(dllexport) int32_t CyberpunkVR_TemporalScan;  // [temporal]/[wide]
+extern __declspec(dllexport) int32_t CyberpunkVR_WideCensus;    // upload census and its temporal report
 extern __declspec(dllexport) int32_t CyberpunkVR_CascFitProbe;  // [cascfit]/[cascrec]
 extern __declspec(dllexport) int32_t CyberpunkVR_BlockDiffSize; // [blkwho]/[blkdiff]
 extern __declspec(dllexport) int32_t CyberpunkVR_StageProbe;
@@ -94,14 +98,8 @@ extern __declspec(dllexport) uint32_t CyberpunkVR_LodThreshOverrideEnable;   // 
 // openxr_present.cpp
 extern __declspec(dllexport) int CyberpunkVR_VrikRateLog;
 
-// OpenXRFrameLoop.cpp -- the deep frame diagnostics: [xrwarp], [xrsrc], [xrage], [xreye], [xrgap],
-// [xrcap], their printing AND the per-frame sampling behind them (a clock read per present and per
-// submit). Built for the second-eye hunt, which is closed.
-//
-// NOT to be confused with CyberpunkVR_XrRateLog, which is absent from this table ON PURPOSE and says
-// so where it is defined: [xrrate] and [xrloop] are the port's headline measurement and its
-// frame-loop contract, and have to be readable in an ordinary session.
-extern __declspec(dllexport) int CyberpunkVR_XrDeepDiag;
+// Both XR rate reports and deep sampling are registered below. RuntimeDiagnostics
+// additionally covers export-only counters, snapshots and diagnostic JSON.
 }
 
 namespace {
@@ -126,10 +124,12 @@ struct DebugFlag {
 //
 // The rule: a flag with its own live key does not belong in the launcher gate.
 const DebugFlag kFlags[] = {
+    { "RuntimeDiagnostics", &CyberpunkVR_RuntimeDiagnostics, 1, false },
     { "XrRateLog",          &CyberpunkVR_XrRateLog,          1, false },
     { "XrDeepDiag",         &CyberpunkVR_XrDeepDiag,         1, false },
     { "VrikRateLog",        &CyberpunkVR_VrikRateLog,        1, false },
     { "TemporalScan",       &CyberpunkVR_TemporalScan,       1, true  },
+    { "WideCensus",         &CyberpunkVR_WideCensus,         1, true  },
     { "CascFitProbe",       &CyberpunkVR_CascFitProbe,       1, true  },
     // 384 rather than 1: this one is a SIZE, the fog block's, and it is the value the interior
     // investigation used. Zero means "no block census", which is what DEBUG-off must give.
@@ -175,18 +175,6 @@ const DebugFlag kFlags[] = {
     // A countdown, not a switch: it prints this many lines and then stops on its own.
     { "DebugRtvPickLog",    &CyberpunkVR_DebugRtvPickLog,   48, true  },
     { "LodThreshOverride",  &CyberpunkVR_LodThreshOverrideEnable, 1, true },
-    // VrikRateLog LEFT THIS TABLE, for the same reason CyberpunkVR_XrRateLog was never in it: it is
-    // the headline measurement of the thing being worked on, and it has to be readable in an ORDINARY
-    // session. Ticking DEBUG to see it would arm thirty probes, and SightAxisProbe alone takes a mutex
-    // per CopyBufferRegion -- so the frame time under DEBUG is not the frame time whose lag is being
-    // judged. One line every two seconds, off plain counters, no shared block.
-    //   { "VrikRateLog",     &CyberpunkVR_VrikRateLog,        1, false },
-    // Gates SAMPLING as well as printing, which no other flag in this table does -- so with DEBUG
-    // unticked the six deep [xr*] lines cost nothing at all, not merely nothing in the log. What it
-    // does NOT gate is every counter that records a FAULT: the capture path's skip counters, the
-    // bounded fence wait, the unpaired-eye count. Those only cost anything when something is already
-    // wrong, and a fault counter reading zero because it was switched off is a diagnostic that lies.
-    { "XrDeepDiag",         &CyberpunkVR_XrDeepDiag,         1, false },
 };
 
 }  // namespace

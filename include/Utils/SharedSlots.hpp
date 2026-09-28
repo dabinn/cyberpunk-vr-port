@@ -105,7 +105,11 @@
 //              itself and a grip that was never released.
 //  [84]        reclaimed by [CAMWRITE] mode flag (was: never used)
 //  [100..103]  reclaimed by [CAMWRITE] desired quat (was: never used)
-//  [112..115]  old view stabilizer delta+valid (removed session 3)
+//  [112..115]  hand-frame metadata under seqlock127:
+//             flag115=1: legacy world anchor delta in112..114;
+//             flag115=2: native consumed tracking X/forward in112/113,
+//             belonging to the same HMD position124..126;114 is that pose's
+//             physical torso bend in radians (v1 still uses114 for anchor Z).
 //  [132..136]  entity velocity/timestamp extrapolation (writer exists in
 //              main.cpp, NO consumer; the snap-puppet-pre-rotation speed gate
 //              consumed [132..134] briefly -- removed after live test)

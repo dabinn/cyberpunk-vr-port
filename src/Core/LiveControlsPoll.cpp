@@ -13,6 +13,9 @@
 // hands it back, so a slider dragged in the headset survives a restart.
 
 #include "Overlay/ImGuiOverlay.hpp"   // OverlayArmLoadGuard
+#include "Hooks/AnalogStick.hpp"
+#include "Hooks/Reflex.hpp"
+#include "Hooks/ReflexOptions.hpp"
 #include <windows.h>
 #include <psapi.h>
 #include <xinput.h>
@@ -23,6 +26,7 @@
 #include <cstdarg>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 #include <share.h>
 #include "Utils/AobScanner.hpp"
 #include "Overlay/LiveControlsUi.hpp"
@@ -33,10 +37,6 @@
 #include <RED4ext/Scripting/Natives/ScriptGameInstance.hpp>
 #include <iostream>
 
-// Defined in src\Stereo\ViewReuse.cpp. Declared here rather than in a header because that
-// is how the stereo module already shares it (CommandListCensus.cpp does the same), and this
-// file only needs to hand it the value read out of vrport.ini.
-extern "C" __declspec(dllexport) extern int32_t CyberpunkVR_CascadeSaveMain;
 #include <MinHook.h>
 #include "Hooks/SwapChain.hpp"
 #include "Utils/LogThrottle.hpp"
@@ -44,6 +44,8 @@ extern "C" __declspec(dllexport) extern int32_t CyberpunkVR_CascadeSaveMain;
 #include "Utils/MemorySafe.hpp"
 #include "Core/Telemetry.hpp"
 #include "Core/LiveControls.hpp"
+#include "Runtimes/HybridBodyYaw.hpp"
+#include "Anim/ScenePolicy.hpp"
 #include "Core/VrCoreShared.hpp"
 #include "Core/CoreInternal.hpp"
 #include "Camera/CameraLink.hpp"
@@ -93,6 +95,15 @@ extern "C" __declspec(dllexport) extern uint32_t CyberpunkVR_GradeMirrorMask;
 // elements of stride 0x3A0 -- the shape of a blended area-params list, and hdrLut/ldrLut ride in one
 // of them. One bit per slot, 0 by default: refcounted handles, so a wrong one can kill the process.
 extern "C" __declspec(dllexport) extern uint32_t CyberpunkVR_EnvExtraMask;
+extern "C" __declspec(dllexport) extern uint32_t CyberpunkVR_WaterMirror;
+extern "C" __declspec(dllexport) extern uint32_t CyberpunkVR_WaterAssign;
+extern "C" __declspec(dllexport) extern int32_t  CyberpunkVR_ViewDataDiff;
+extern "C" __declspec(dllexport) extern uint32_t CyberpunkVR_LutSrcLend;
+extern "C" __declspec(dllexport) extern float CyberpunkVR_SceneStickYawDps;
+extern "C" __declspec(dllexport) extern int   CyberpunkVR_SceneStickYawTier;
+extern "C" __declspec(dllexport) extern int32_t  CyberpunkVR_BlockDiff;
+extern "C" __declspec(dllexport) extern uint32_t CyberpunkVR_BlockDiffNode;
+extern "C" __declspec(dllexport) extern uint32_t CyberpunkVR_BlockDiffSize;
 // Which render-mask categories the second view is granted, one bit per row of kRenderMasks in
 // src/Stereo/NodeDispatch.cpp. A category the view lacks makes the engine REFUSE whole nodes to it:
 // bit 10 ClearLighting is what CRenderNode_HistogramUpdate asks for, and without it the second
@@ -140,6 +151,27 @@ extern "C" __declspec(dllexport) extern int32_t CyberpunkVR_LensHeadWrite;
 extern "C" __declspec(dllexport) extern int32_t CyberpunkVR_InputDefaultInUi;
 extern "C" __declspec(dllexport) extern int32_t CyberpunkVR_PopupMagBlockMs;
 extern "C" __declspec(dllexport) extern int32_t CyberpunkVR_DevCamAnyName;
+// The node whose square dispatch draws the scanner outline, and the switch for replacing its shader.
+// Live in the ini because the candidates come from a measurement ([viscs] names them) and trying one
+// must not cost a rebuild: the node is read at every dispatch, so a change takes effect at once.
+extern "C" __declspec(dllexport) extern uint32_t CyberpunkVR_VisionCsNode;
+extern "C" __declspec(dllexport) extern int32_t  CyberpunkVR_VisionCsSwap;
+extern "C" __declspec(dllexport) extern int32_t  CyberpunkVR_VisionCsDim;
+extern "C" __declspec(dllexport) extern int32_t  CyberpunkVR_VisionCsOrd;
+// Sends EVERY draw item down the scene branch of the engine's plane router, so the first-person
+// plane is drawn with the scene's parameter block instead of its own. 0 by default -- see
+// src/Stereo/WeaponPlane.cpp for what the weapon plane buys and what giving it up costs.
+extern "C" __declspec(dllexport) extern int32_t  CyberpunkVR_WeaponPlaneAsScene;
+// Nops the per-object plane filter in the render gather, so an object on the first-person plane is
+// not dropped before its highlight can be drawn. 0 by default.
+extern "C" __declspec(dllexport) extern int32_t  CyberpunkVR_HighlightAnyPlane;
+// Sends EVERY draw item to the scene draw-list bucket, so the first-person plane stops being a
+// separate pile at all. 0 by default.
+extern "C" __declspec(dllexport) extern int32_t  CyberpunkVR_PlaneBucketScene;
+// Declared rather than included: this file has no other business with the stereo internals, and
+// the definition lives in src/Stereo/WeaponPlane.cpp.
+namespace cvr { namespace detail { void weapon_plane_sync(); void highlight_any_plane_sync();
+                                  void plane_bucket_scene_sync(); } }
 extern "C" __declspec(dllexport) extern float CyberpunkVR_DevCamTolM;
 // 1 = in a braindance MAIN's half-IPD goes into the located buffer instead of its camera
 // component, which renders nothing there. 0 restores the component write.
@@ -211,6 +243,11 @@ extern "C" __declspec(dllexport) extern int32_t  CyberpunkVR_FixLodEnable;
 // reaches that view through DrawComposition + CompositionPostProcess (xr_comp_lend_set), so this
 // path is a candidate for retirement and wants an A/B without a rebuild.
 extern "C" __declspec(dllexport) extern int      CyberpunkVR_HudToSecondEye;
+// The port's OWN copy of the vision/outline layer into the second eye. It exists from the time the
+// second view had no composition of its own and nothing drew the layer there; since the second view
+// builds its own frame the engine draws it, and this copy is a second pass over the same pixels.
+// Live so the two can be compared without a rebuild.
+extern "C" __declspec(dllexport) extern int      CyberpunkVR_VisionToSecondEye;
 extern "C" __declspec(dllexport) extern int      CyberpunkVR_HudInBraindance;
 // 1 = inject the composition group into the second view's RTT graph through the engine's own pass
 // adders. Needed because that view is built by SCENE_INCR, which contains neither the build-bit-82
@@ -272,7 +309,7 @@ extern "C" __declspec(dllexport) extern float CyberpunkVR_HandRecoilReturnPow;
 // back out of vrport.ini, and they ship because that ini is per-install and never enters the
 // repository: on a fresh install zeroes mean the vanilla layout and every tester hunting the same
 // numbers again. An existing ini still wins -- the poll below reads the file over these -- so nobody's
-// own layout is touched. Same trade the port already makes with HUDitor's persistency.json.
+// own layout is touched.
 // NEUTRAL, AND THAT IS THE CONFIGURATION THAT WAS ACTUALLY PLAYED.
 //
 // These used to carry tuned offsets -- frame -10.4, details -178.2/-57.4 at 0.4, hacks -75.4/1.8 at
@@ -329,23 +366,31 @@ void PollLiveControls() {
 
     g_lastLiveControlWrite = fileData.ftLastWriteTime;
 
-    // The eye offset this port is tested with, measured in the headset rather than assumed: a fresh
-    // install used to start at zero and every tester had to find these three by hand.
-    float xrHeadOffsetX = -0.006f;
-    float xrHeadOffsetY = -0.013f;
-    float xrHeadOffsetZ = -0.018f;
+    // Neutral-neck mounting supplies the anatomical offset. These are optional trims.
+    float xrHeadOffsetX = 0.0f;
+    float xrHeadOffsetY = 0.0f;
+    float xrHeadOffsetZ = 0.0f;
     int xrRecenter = 0;
     int xrMonoSubmit = 1;
     // Seeded from the live value, not from a constant: an ini without the key must leave the
     // current mode alone rather than reset it.
     int xrThreadedSubmit = CyberpunkVR_ThreadedMonoSubmit;
-    int xrCascadeSaveMain = CyberpunkVR_CascadeSaveMain;
     int xrWindowWidth = 0;
     int xrWindowHeight = 0;
     float xrForceFov = 0.0f;
     int xrMenuRect = 0;
     float xrMenuFov = 65.4f;
     float xrMenuFollowDeg = 60.0f;
+    int xrHudPanel=1;
+    float xrHudFollowDeg=60.0f, xrHudFov=65.4f, xrHudDistance=1.5f;
+    int xrInteractionPanel=1;float xrInteractionFollowDeg=90.0f,xrInteractionDistance=1.5f,xrInteractionFov=65.4f;
+    float xrLootFollowDeg=10.0f;
+    int xrHudFollowMode=0, xrHudStereoDepth=0;
+    float xrHudBrightness=1.0f, xrHudShadow=1.0f, xrHudGlow=1.0f;
+    cvr::hud::LayoutSettings hudElements{};
+    auto framegen=cvr::framegen::GetSettings();
+    int nvidiaReflex=cvr::reflex::DefaultMode;
+    auto overlay=cvr::vrui::GetSettings();
     float xrPitchSign = 1.0f;
     float xrPitchScale = 1.35f;
     int xrSyncSequential = 1;
@@ -379,6 +424,15 @@ void PollLiveControls() {
     float xrLerpMelee   = CyberpunkVR_HandLerpMelee;
     uint32_t xrGradeMirrorMask = CyberpunkVR_GradeMirrorMask;
     uint32_t xrEnvExtraMask = CyberpunkVR_EnvExtraMask;
+    uint32_t xrWaterMirror = CyberpunkVR_WaterMirror;
+    uint32_t xrWaterAssign = CyberpunkVR_WaterAssign;
+    int32_t  xrViewDataDiff = CyberpunkVR_ViewDataDiff;
+    uint32_t xrLutSrcLend    = CyberpunkVR_LutSrcLend;
+    float    xrSceneYawDps   = CyberpunkVR_SceneStickYawDps;
+    int      xrSceneYawTier  = CyberpunkVR_SceneStickYawTier;
+    int32_t  xrBlockDiff     = CyberpunkVR_BlockDiff;
+    uint32_t xrBlockDiffNode = CyberpunkVR_BlockDiffNode;
+    uint32_t xrBlockDiffSize = CyberpunkVR_BlockDiffSize;
     uint32_t xrRenderMaskGrant = CyberpunkVR_RenderMaskGrant;
     uint32_t xrViewDataFixMask = CyberpunkVR_ViewDataFixMask;
     uint32_t xrEnvMirrorMask = CyberpunkVR_EnvMirrorMask;
@@ -420,6 +474,7 @@ void PollLiveControls() {
     int xrLightContent = CyberpunkVR_LightContent;
     int32_t  xrFixLod = CyberpunkVR_FixLodEnable;
     int      xrHudTo2 = CyberpunkVR_HudToSecondEye;
+    int      xrVisionTo2 = CyberpunkVR_VisionToSecondEye;
     int      xrHudBd  = CyberpunkVR_HudInBraindance;
     uint32_t xrCompGroup = CyberpunkVR_VrcamCompositionGroup;
     float xrTwoHandRadius = CyberpunkVR_TwoHandRadius;
@@ -463,6 +518,8 @@ void PollLiveControls() {
     };
     float xrSnapTurnAngleDeg = g_liveControls.xrSnapTurnAngleDeg > 0.0f ? g_liveControls.xrSnapTurnAngleDeg : 30.0f;
     int xrMovementSource = g_liveControls.xrMovementSource;
+    int xrMovementSpeedMode=0;
+    float xrLeftStickDeadzone=.15f,xrRightStickDeadzone=.15f,xrMaxInputThreshold=.90f;
     int xrXInputInstall = g_liveControls.xrXInputInstall;
     int xrInputActions = g_liveControls.xrInputActions;
     int xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
@@ -471,7 +528,20 @@ void PollLiveControls() {
     int xrSnapTurnYawIndex = g_liveControls.xrSnapTurnYawIndex >= 0 && g_liveControls.xrSnapTurnYawIndex <= 3 ? g_liveControls.xrSnapTurnYawIndex : 1;
     int xrImmersiveHolsters = g_liveControls.xrImmersiveHolsters;
     int xrPhysicalBodyRotation = g_liveControls.xrPhysicalBodyRotation;
+    int xrTrackedBodyRotation = g_liveControls.xrTrackedBodyRotation;
+    int xrHybridBodyRotation = g_liveControls.xrHybridBodyRotation;
+    int xrRoomscaleMovement = g_liveControls.xrRoomscaleMovement;
+    int xrBreaststrokeSwim = g_liveControls.xrBreaststrokeSwim;
+    int xrLadderGripClimb = g_liveControls.xrLadderGripClimb;
+    int xrLadderAutoFinish = g_liveControls.xrLadderAutoFinish;
+    float xrLadderFinishDistance = g_liveControls.xrLadderFinishDistance;
+    float xrBodyFreeLookDeg = g_liveControls.xrBodyFreeLookDeg;
+    float xrBodyFreeLookDownDeg = g_liveControls.xrBodyFreeLookDownDeg;
+    float xrBodyFreeLookSwimDeg = g_liveControls.xrBodyFreeLookSwimDeg;
+    float xrBodyMoveRadius = g_liveControls.xrBodyMoveRadius;
     int xrCutsceneSuspendTier = g_liveControls.xrCutsceneSuspendTier;
+    int xrVehicleCutsceneSuspendTier = g_liveControls.xrVehicleCutsceneSuspendTier;
+    bool vehicleCutsceneTierConfigured = false;
     float xrVehHeadOffsetX = g_liveControls.xrVehHeadOffsetX;
     float xrVehHeadOffsetY = g_liveControls.xrVehHeadOffsetY;
     float xrVehHeadOffsetZ = g_liveControls.xrVehHeadOffsetZ;
@@ -479,6 +549,8 @@ void PollLiveControls() {
     float xrWheelRadius = g_liveControls.xrWheelRadius > 0.0f ? g_liveControls.xrWheelRadius : 0.28f;
     float xrWheelSteerMaxDeg = g_liveControls.xrWheelSteerMaxDeg > 0.0f ? g_liveControls.xrWheelSteerMaxDeg : 90.0f;
     float xrWheelSteerDeadDeg = g_liveControls.xrWheelSteerDeadDeg >= 0.0f ? g_liveControls.xrWheelSteerDeadDeg : 1.5f;
+    int xrWheelPrediction = g_liveControls.xrWheelPrediction;
+    float xrWheelPredictionMs = g_liveControls.xrWheelPredictionMs;
     int xrWheelHorn = g_liveControls.xrWheelHorn;
     float xrWheelHornRadius = g_liveControls.xrWheelHornRadius > 0.0f ? g_liveControls.xrWheelHornRadius : 0.12f;
     int xrVehicleGunTrigger = g_liveControls.xrVehicleGunTrigger;
@@ -523,12 +595,6 @@ void PollLiveControls() {
             xrThreadedSubmit = (intValue < 0) ? -1 : (intValue > 0 ? 1 : 0);
             continue;
         }
-        // 1 keeps the cascade SaveMain fix, 0 lets MAIN clear the shared shadow atlas again.
-        if (sscanf_s(line, "xr_cascade_save_main=%d", &intValue) == 1 ||
-            sscanf_s(line, "xr_cascade_save_main = %d", &intValue) == 1) {
-            xrCascadeSaveMain = intValue != 0 ? 1 : 0;
-            continue;
-        }
 
         if (sscanf_s(line, "xr_window_width=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_window_width = %d", &intValue) == 1) {
@@ -561,6 +627,24 @@ void PollLiveControls() {
             xrMenuFollowDeg = value;
             continue;
         }
+        if (cvr::hud::ParseLayoutSetting(line,hudElements)) continue;
+        if (cvr::framegen::ParseSetting(line,framegen)) continue;
+        if (tryParseIntKey(line,"xr_nvidia_reflex",&intValue)) {nvidiaReflex=cvr::reflex::NormalizeMode(intValue);continue;}
+        if (cvr::vrui::ParseSetting(line,overlay)) continue;
+        if (sscanf_s(line,"xr_hud_follow_mode = %d",&intValue)==1) { xrHudFollowMode=intValue;continue; }
+        if (sscanf_s(line,"xr_hud_stereo_depth = %d",&intValue)==1) { xrHudStereoDepth=intValue;continue; }
+        if (sscanf_s(line,"xr_hud_brightness = %f",&value)==1) { xrHudBrightness=value;continue; }
+        if (sscanf_s(line,"xr_hud_shadow = %f",&value)==1) { xrHudShadow=value;continue; }
+        if (sscanf_s(line,"xr_hud_glow = %f",&value)==1) { xrHudGlow=value;continue; }
+        if (sscanf_s(line, "xr_hud_panel = %d", &intValue) == 1) { xrHudPanel=intValue; continue; }
+        if (sscanf_s(line, "xr_hud_follow_deg = %f", &value) == 1) { xrHudFollowDeg=value; continue; }
+        if (sscanf_s(line, "xr_hud_fov = %f", &value) == 1) { xrHudFov=value; continue; }
+        if (sscanf_s(line, "xr_hud_distance = %f", &value) == 1) { xrHudDistance=value; continue; }
+        if (sscanf_s(line,"xr_interaction_panel = %d",&intValue)==1){xrInteractionPanel=intValue;continue;}
+        if (sscanf_s(line,"xr_interaction_follow_deg = %f",&value)==1){xrInteractionFollowDeg=value;continue;}
+        if (sscanf_s(line,"xr_loot_follow_deg = %f",&value)==1){xrLootFollowDeg=value;continue;}
+        if (sscanf_s(line,"xr_interaction_distance = %f",&value)==1){xrInteractionDistance=value;continue;}
+        if (sscanf_s(line,"xr_interaction_fov = %f",&value)==1){xrInteractionFov=value;continue;}
         if (sscanf_s(line, "xr_pitch_sign=%f", &value) == 1 ||
             sscanf_s(line, "xr_pitch_sign = %f", &value) == 1) {
             xrPitchSign = value < 0.0f ? -1.0f : 1.0f;
@@ -820,6 +904,49 @@ void PollLiveControls() {
             xrDevCamInLocate = intValue;
             continue;
         }
+        {
+            unsigned int visCsNode = 0;
+            if (sscanf_s(line, "xr_vision_cs_node=%x", &visCsNode) == 1 ||
+                sscanf_s(line, "xr_vision_cs_node = %x", &visCsNode) == 1) {
+                CyberpunkVR_VisionCsNode = visCsNode;
+                continue;
+            }
+        }
+        if (sscanf_s(line, "xr_vision_cs_ord=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_vision_cs_ord = %d", &intValue) == 1) {
+            CyberpunkVR_VisionCsOrd = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_vision_cs_dim=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_vision_cs_dim = %d", &intValue) == 1) {
+            CyberpunkVR_VisionCsDim = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_vision_cs_swap=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_vision_cs_swap = %d", &intValue) == 1) {
+            CyberpunkVR_VisionCsSwap = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_vision_to_second_eye=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_vision_to_second_eye = %d", &intValue) == 1) {
+            xrVisionTo2 = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_weapon_plane_as_scene=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_weapon_plane_as_scene = %d", &intValue) == 1) {
+            CyberpunkVR_WeaponPlaneAsScene = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_highlight_any_plane=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_highlight_any_plane = %d", &intValue) == 1) {
+            CyberpunkVR_HighlightAnyPlane = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_plane_bucket_scene=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_plane_bucket_scene = %d", &intValue) == 1) {
+            CyberpunkVR_PlaneBucketScene = intValue;
+            continue;
+        }
         if (sscanf_s(line, "xr_vrcam_pos_from_main=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_vrcam_pos_from_main = %d", &intValue) == 1) {
             xrVrcamPosFromMain = intValue;
@@ -895,13 +1022,57 @@ void PollLiveControls() {
             xrRenderMaskGrant = static_cast<uint32_t>(intValue < 0 ? 0 : intValue);
             continue;
         }
+        if (sscanf_s(line, "xr_water_mirror=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_water_mirror = %d", &intValue) == 1) {
+            xrWaterMirror = static_cast<uint32_t>(intValue < 0 ? 0 : intValue);
+        }
+        if (sscanf_s(line, "xr_water_assign=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_water_assign = %d", &intValue) == 1) {
+            xrWaterAssign = static_cast<uint32_t>(intValue < 0 ? 0 : (intValue > 1 ? 1 : intValue));
+        }
+        if (sscanf_s(line, "xr_viewdata_diff=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_viewdata_diff = %d", &intValue) == 1) {
+            xrViewDataDiff = intValue < 0 ? 0 : (intValue > 2 ? 2 : intValue);
+        }
+        // THE NODE IS HEX, because every RVA in this project is written and read as hex and a node
+        // key that silently took decimal would aim the diff at an address nobody meant.
+        if (sscanf_s(line, "xr_scene_stick_yaw_dps=%f", &value) == 1 ||
+            sscanf_s(line, "xr_scene_stick_yaw_dps = %f", &value) == 1) {
+            xrSceneYawDps = value < 0.0f ? 0.0f : (value > 360.0f ? 360.0f : value);
+            continue;
+        }
+        if (sscanf_s(line, "xr_scene_stick_yaw_tier=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_scene_stick_yaw_tier = %d", &intValue) == 1) {
+            xrSceneYawTier = intValue < 0 ? 0 : (intValue > 4 ? 4 : intValue);
+            continue;
+        }
+        if (sscanf_s(line, "xr_lut_src_lend=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_lut_src_lend = %d", &intValue) == 1) {
+            xrLutSrcLend = static_cast<uint32_t>(intValue < 0 ? 0 : (intValue > 1 ? 1 : intValue));
+        }
+        if (sscanf_s(line, "xr_block_diff=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_block_diff = %d", &intValue) == 1) {
+            xrBlockDiff = intValue < 0 ? 0 : (intValue > 2 ? 2 : intValue);
+        }
+        if (sscanf_s(line, "xr_block_diff_node=%x", &intValue) == 1 ||
+            sscanf_s(line, "xr_block_diff_node = %x", &intValue) == 1) {
+            xrBlockDiffNode = static_cast<uint32_t>(intValue);
+        }
+        if (sscanf_s(line, "xr_block_diff_size=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_block_diff_size = %d", &intValue) == 1) {
+            xrBlockDiffSize = static_cast<uint32_t>(intValue < 0 ? 0 : intValue);
+        }
         if (sscanf_s(line, "xr_env_extra_mask=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_env_extra_mask = %d", &intValue) == 1) {
             xrEnvExtraMask = static_cast<uint32_t>(intValue < 0 ? 0 : intValue);
             continue;
         }
-        if (sscanf_s(line, "xr_grade_mirror_mask=%d", &intValue) == 1 ||
-            sscanf_s(line, "xr_grade_mirror_mask = %d", &intValue) == 1) {
+        // HEX, LIKE ITS SIBLING xr_env_mirror_mask. It was %d while the value is a bit mask that
+        // everyone -- the table, the comments, this session -- writes in hex, so "7FE0003" parsed as
+        // 7 and stopped at the F. A measurement was reported on the strength of that, and the number
+        // that produced it was never the number in the file.
+        if (sscanf_s(line, "xr_grade_mirror_mask=%x", &intValue) == 1 ||
+            sscanf_s(line, "xr_grade_mirror_mask = %x", &intValue) == 1) {
             xrGradeMirrorMask = static_cast<uint32_t>(intValue < 0 ? 0 : intValue);
             continue;
         }
@@ -1066,11 +1237,39 @@ void PollLiveControls() {
             xrMovementSource = intValue;
             continue;
         }
+        if(sscanf_s(line,"xr_movement_speed_mode = %d",&intValue)==1){xrMovementSpeedMode=intValue;continue;}
+        if(sscanf_s(line,"xr_left_stick_deadzone = %f",&value)==1){xrLeftStickDeadzone=value;continue;}
+        if(sscanf_s(line,"xr_right_stick_deadzone = %f",&value)==1){xrRightStickDeadzone=value;continue;}
+        if(sscanf_s(line,"xr_max_input_threshold = %f",&value)==1){xrMaxInputThreshold=value;continue;}
         if (sscanf_s(line, "xr_cutscene_suspend_tier=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_cutscene_suspend_tier = %d", &intValue) == 1) {
             xrCutsceneSuspendTier = intValue;
             continue;
         }
+        if (sscanf_s(line, "xr_vehicle_cutscene_suspend_tier=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_vehicle_cutscene_suspend_tier = %d", &intValue) == 1) {
+            xrVehicleCutsceneSuspendTier = intValue;
+            vehicleCutsceneTierConfigured = true;
+            continue;
+        }
+        if (sscanf_s(line, "xr_body_free_look_deg=%f", &value) == 1) xrBodyFreeLookDeg=value;
+        if (sscanf_s(line, "xr_body_free_look_down_deg=%f", &value) == 1 ||
+            sscanf_s(line, "xr_body_free_look_down_deg = %f", &value) == 1) xrBodyFreeLookDownDeg=value;
+        if (sscanf_s(line, "xr_body_free_look_swim_deg=%f", &value) == 1) xrBodyFreeLookSwimDeg=value;
+        if (sscanf_s(line, "xr_body_move_radius=%f", &value) == 1) xrBodyMoveRadius=value;
+        if (sscanf_s(line, "xr_ladder_grip_climb=%d", &intValue) == 1) xrLadderGripClimb=intValue;
+        if (sscanf_s(line, "xr_ladder_auto_finish=%d", &intValue) == 1) xrLadderAutoFinish=intValue;
+        if (sscanf_s(line, "xr_ladder_finish_distance=%f", &value) == 1) xrLadderFinishDistance=value;
+        if (sscanf_s(line, "xr_breaststroke_swim=%d", &intValue) == 1) {
+            xrBreaststrokeSwim=intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_roomscale_movement=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_roomscale_movement = %d", &intValue) == 1) {
+            xrRoomscaleMovement = intValue;
+        }
+        if (sscanf_s(line, "xr_tracked_body_rotation = %d", &intValue) == 1) xrTrackedBodyRotation=intValue;
+        if (sscanf_s(line, "xr_hybrid_body_rotation = %d", &intValue) == 1) xrHybridBodyRotation=intValue;
         if (sscanf_s(line, "xr_physical_body_rotation=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_physical_body_rotation = %d", &intValue) == 1) {
             xrPhysicalBodyRotation = intValue;
@@ -1146,6 +1345,16 @@ void PollLiveControls() {
             xrWheelSteerDeadDeg = value;
             continue;
         }
+        if (sscanf_s(line, "xr_wheel_prediction=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_wheel_prediction = %d", &intValue) == 1) {
+            xrWheelPrediction = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_wheel_prediction_ms=%f", &value) == 1 ||
+            sscanf_s(line, "xr_wheel_prediction_ms = %f", &value) == 1) {
+            xrWheelPredictionMs = value;
+            continue;
+        }
         if (sscanf_s(line, "xr_wheel_horn=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_wheel_horn = %d", &intValue) == 1) {
             xrWheelHorn = intValue;
@@ -1181,6 +1390,10 @@ void PollLiveControls() {
         g_liveControls.xrMenuRect != xrMenuRect ||
         g_liveControls.xrMenuFov != xrMenuFov ||
         g_liveControls.xrMenuFollowDeg != xrMenuFollowDeg ||
+        g_liveControls.xrHudPanel != xrHudPanel ||
+        g_liveControls.xrHudFollowDeg != xrHudFollowDeg ||
+        g_liveControls.xrHudFov != xrHudFov ||
+        g_liveControls.xrHudDistance != xrHudDistance ||
         g_liveControls.xr3DofMovement != xr3DofMovement ||
         g_liveControls.xrFirstLaunch != xrFirstLaunch ||
         g_liveControls.xrMotionPredictMs != xrMotionPredictMs ||
@@ -1204,6 +1417,24 @@ void PollLiveControls() {
     g_liveControls.xrMenuRect = xrMenuRect;
     g_liveControls.xrMenuFov = xrMenuFov;
     g_liveControls.xrMenuFollowDeg = xrMenuFollowDeg;
+    cvr::framegen::SetSettings(framegen);
+    cvr::reflex::SetMode(nvidiaReflex);
+    cvr::vrui::SetSettings(overlay);
+    g_liveControls.xrHudPanel=xrHudPanel!=0;
+    g_liveControls.xrHudFollowMode=xrHudFollowMode==1;
+    g_liveControls.xrHudStereoDepth=xrHudStereoDepth!=0;
+    g_liveControls.xrHudBrightness=(xrHudBrightness>=0.25f && xrHudBrightness<=3) ? xrHudBrightness : 1;
+    g_liveControls.xrHudShadow=(xrHudShadow>=0 && xrHudShadow<=2) ? xrHudShadow : 1;
+    g_liveControls.xrHudGlow=(xrHudGlow>=0 && xrHudGlow<=2) ? xrHudGlow : 1;
+    cvr::hud::SetLayoutSettings(hudElements);
+    g_liveControls.xrHudFollowDeg=(xrHudFollowDeg>=5 && xrHudFollowDeg<=90) ? xrHudFollowDeg : 60.0f;
+    g_liveControls.xrInteractionPanel=xrInteractionPanel!=0;
+    g_liveControls.xrInteractionFollowDeg=(xrInteractionFollowDeg>=5 && xrInteractionFollowDeg<=90)?xrInteractionFollowDeg:90.0f;
+    g_liveControls.xrLootFollowDeg=(xrLootFollowDeg>=5 && xrLootFollowDeg<=90)?xrLootFollowDeg:10.0f;
+    g_liveControls.xrInteractionDistance=(xrInteractionDistance>=.5f && xrInteractionDistance<=5)?xrInteractionDistance:1.5f;
+    g_liveControls.xrInteractionFov=(xrInteractionFov>=30 && xrInteractionFov<=120)?xrInteractionFov:65.4f;
+    g_liveControls.xrHudFov=(xrHudFov>=30 && xrHudFov<=120) ? xrHudFov : 65.4f;
+    g_liveControls.xrHudDistance=(xrHudDistance>=0.5f && xrHudDistance<=5) ? xrHudDistance : 1.5f;
     g_liveControls.xr3DofMovement = xr3DofMovement;
     g_liveControls.xrFirstLaunch = xrFirstLaunch != 0 ? 1 : 0;
     g_liveControls.xrMotionPredictMs = xrMotionPredictMs >= 0.0f ? xrMotionPredictMs : 0.0f;
@@ -1223,10 +1454,29 @@ void PollLiveControls() {
     // means VR-driven so map to legacy 1).
     if (xrMovementSource < 0 || xrMovementSource > 3) xrMovementSource = xrMovementControl != 0 ? 1 : 0;
     g_liveControls.xrMovementSource = xrMovementSource;
+    g_liveControls.xrMovementSpeedMode=xrMovementSpeedMode==1;
+    g_liveControls.xrLeftStickDeadzone=cvr::input::StickDeadzone(xrLeftStickDeadzone);
+    g_liveControls.xrRightStickDeadzone=cvr::input::StickDeadzone(xrRightStickDeadzone);
+    g_liveControls.xrMaxInputThreshold=cvr::input::StickFullInput(xrMaxInputThreshold);
     g_liveControls.xrMovementControl = xrMovementSource != 0 ? 1 : 0;
     g_liveControls.xrPhysicalBodyRotation = xrPhysicalBodyRotation != 0 ? 1 : 0;
+    g_liveControls.xrTrackedBodyRotation = xrTrackedBodyRotation != 0 ? 1 : 0;
+    g_liveControls.xrHybridBodyRotation = xrHybridBodyRotation != 0 ? 1 : 0;
+    g_liveControls.xrBodyRotationMode=static_cast<int>(cvr::body::RotationModeFromFlags(
+        xrPhysicalBodyRotation,xrTrackedBodyRotation,xrHybridBodyRotation));
+    g_liveControls.xrRoomscaleMovement = xrRoomscaleMovement != 0 ? 1 : 0;
+    g_liveControls.xrBreaststrokeSwim = xrBreaststrokeSwim != 0 ? 1 : 0;
+    g_liveControls.xrLadderGripClimb = xrLadderGripClimb != 0 ? 1 : 0;
+    g_liveControls.xrLadderAutoFinish = xrLadderAutoFinish != 0 ? 1 : 0;
+    g_liveControls.xrLadderFinishDistance=std::clamp(std::isfinite(xrLadderFinishDistance) ? xrLadderFinishDistance:1.0f,.2f,1.2f);
+    g_liveControls.xrBodyFreeLookDeg=std::clamp(xrBodyFreeLookDeg,0.0f,60.0f);
+    g_liveControls.xrBodyFreeLookDownDeg=std::clamp(std::isfinite(xrBodyFreeLookDownDeg) ? xrBodyFreeLookDownDeg:30.0f,0.0f,90.0f);
+    g_liveControls.xrBodyFreeLookSwimDeg=std::clamp(std::isfinite(xrBodyFreeLookSwimDeg) ? xrBodyFreeLookSwimDeg:5.0f,0.0f,90.0f);
+    g_liveControls.xrBodyMoveRadius=std::clamp(xrBodyMoveRadius,0.0f,.30f);
     g_liveControls.xrCutsceneSuspendTier =
         (xrCutsceneSuspendTier < -1) ? -1 : (xrCutsceneSuspendTier > 4 ? 4 : xrCutsceneSuspendTier);
+    g_liveControls.xrVehicleCutsceneSuspendTier = cvr::anim::ResolveVehicleVrikSuspendTier(
+        xrCutsceneSuspendTier,xrVehicleCutsceneSuspendTier,vehicleCutsceneTierConfigured);
     g_liveControls.xrDisableMouseY = xrDisableMouseY != 0 ? 1 : 0;
     g_liveControls.xrXInputHook = xrXInputHook != 0 ? 1 : 0;
     g_liveControls.xrSnapTurn = xrSnapTurn != 0 ? 1 : 0;
@@ -1256,6 +1506,8 @@ void PollLiveControls() {
     // it would leave no range at all between "dead" and "full lock".
     g_liveControls.xrWheelSteerDeadDeg = (xrWheelSteerDeadDeg < 0.0f) ? 0.0f
                                        : (xrWheelSteerDeadDeg > 20.0f ? 20.0f : xrWheelSteerDeadDeg);
+    g_liveControls.xrWheelPrediction = xrWheelPrediction != 0 ? 1 : 0;
+    g_liveControls.xrWheelPredictionMs = std::isfinite(xrWheelPredictionMs) ? std::clamp(xrWheelPredictionMs,0.0f,8.0f):0.0f;
     g_liveControls.xrWheelHorn = xrWheelHorn != 0 ? 1 : 0;
     // Below 4 cm the hub is unhittable with a hand you cannot see; above 30 cm it swallows the rim,
     // and every reach for the wheel would honk.
@@ -1279,9 +1531,22 @@ void PollLiveControls() {
     // Seventeen candidate bits: 0-7 the original unidentified words, 8-14 the grading values that
     // carry the look, 15-16 the two small integers that are the LUT-selection candidates.
     // Anything above them is dropped rather than reinterpreted.
-    CyberpunkVR_GradeMirrorMask = xrGradeMirrorMask & 0x1FFFFu;
+    // 26 BITS, NOT 17, AND THE NUMBER COMES FROM THE TABLE. kGradeMirrorOff grew from seventeen
+    // entries to twenty-six and this clamp did not, so every new bit was cut off before it reached
+    // the mirror -- the mask read 3 while the file said 7FE0003, and the test that rested on it was
+    // void. Whenever that table grows again, this constant grows with it.
+    CyberpunkVR_GradeMirrorMask = xrGradeMirrorMask & 0x3FFFFFFu;
     // Nine slots exist; anything above them is dropped rather than reinterpreted.
     CyberpunkVR_EnvExtraMask = xrEnvExtraMask & 0x1FFFFFu;   // 21 measured object slots
+    CyberpunkVR_WaterMirror  = xrWaterMirror & 0xFu;         // 4 groups in kWaterMirror
+    CyberpunkVR_WaterAssign  = xrWaterAssign ? 1u : 0u;
+    CyberpunkVR_ViewDataDiff = xrViewDataDiff;
+    CyberpunkVR_LutSrcLend    = xrLutSrcLend;
+    CyberpunkVR_SceneStickYawDps  = xrSceneYawDps;
+    CyberpunkVR_SceneStickYawTier = xrSceneYawTier;
+    CyberpunkVR_BlockDiff     = xrBlockDiff;
+    CyberpunkVR_BlockDiffNode = xrBlockDiffNode;
+    CyberpunkVR_BlockDiffSize = xrBlockDiffSize;
     // 27 categories exist; anything above them is dropped rather than reinterpreted.
     CyberpunkVR_RenderMaskGrant = xrRenderMaskGrant & 0x07FFFFFFu;
     CyberpunkVR_ViewDataFixMask = xrViewDataFixMask;
@@ -1299,7 +1564,8 @@ void PollLiveControls() {
     CyberpunkVR_BdQuatFromWriteSite = xrBdQuatWriteSite;
     // Only the three modes exist; anything else is dropped rather than reinterpreted, which is the
     // clamp this project added after a mode key parsed as a boolean and silently became 1.
-    CyberpunkVR_DevCamInLocate = (xrDevCamInLocate != 0) ? 1 : 0;
+    // 0 = off, 1 = the turret's route for an UNCLAIMED camera only, 2 = that route for every takeover.
+    CyberpunkVR_DevCamInLocate = xrDevCamInLocate < 0 ? 0 : (xrDevCamInLocate > 2 ? 2 : xrDevCamInLocate);
     CyberpunkVR_LensHeadWrite = (xrLensHeadWrite != 0) ? 1 : 0;
     CyberpunkVR_InputDefaultInUi = (xrInputDefaultInUi != 0) ? 1 : 0;
     CyberpunkVR_PopupMagBlockMs =
@@ -1329,6 +1595,7 @@ void PollLiveControls() {
     CyberpunkVR_LightContent = xrLightContent;
     CyberpunkVR_FixLodEnable = xrFixLod;
     CyberpunkVR_HudToSecondEye = xrHudTo2;
+    CyberpunkVR_VisionToSecondEye = xrVisionTo2;
     CyberpunkVR_HudInBraindance = xrHudBd;
     CyberpunkVR_VrcamCompositionGroup = xrCompGroup;
     CyberpunkVR_TwoHandRadius = (xrTwoHandRadius < 0.02f) ? 0.02f
@@ -1395,12 +1662,12 @@ void PollLiveControls() {
             OpenXRManager::Get().UseThreadedSubmit() ? "submit thread" : "inline pump");
     }
 
-    if (CyberpunkVR_CascadeSaveMain != xrCascadeSaveMain) {
-        CyberpunkVR_CascadeSaveMain = xrCascadeSaveMain;
-        Log("Cascade shadows: xr_cascade_save_main=%d -> MAIN %s clear the shared atlas.\n",
-            xrCascadeSaveMain,
-            xrCascadeSaveMain ? "does NOT" : "does");
-    }
+    // Applies or reverts the plane-routing byte to match the key just parsed. A no-op unless it
+    // changed, so this costs one comparison per tick.
+    cvr::detail::weapon_plane_sync();
+    cvr::detail::highlight_any_plane_sync();
+    cvr::detail::plane_bucket_scene_sync();
+
 
 
     if (changed && g_verboseLog) {
@@ -1423,6 +1690,24 @@ LiveControlsUiState MakeLiveControlsUiState() {
     state.xrMenuRect = g_liveControls.xrMenuRect;
     state.xrMenuFov = g_liveControls.xrMenuFov;
     state.xrMenuFollowDeg = g_liveControls.xrMenuFollowDeg;
+    state.xrHudPanel=g_liveControls.xrHudPanel;
+    state.xrHudFollowDeg=g_liveControls.xrHudFollowDeg;
+    state.xrInteractionPanel=g_liveControls.xrInteractionPanel;
+    state.xrInteractionFollowDeg=g_liveControls.xrInteractionFollowDeg;
+    state.xrLootFollowDeg=g_liveControls.xrLootFollowDeg;
+    state.xrInteractionDistance=g_liveControls.xrInteractionDistance;
+    state.xrInteractionFov=g_liveControls.xrInteractionFov;
+    state.xrHudFov=g_liveControls.xrHudFov;
+    state.xrHudDistance=g_liveControls.xrHudDistance;
+    state.xrHudFollowMode=g_liveControls.xrHudFollowMode;
+    state.xrHudStereoDepth=g_liveControls.xrHudStereoDepth;
+    state.xrHudBrightness=g_liveControls.xrHudBrightness;
+    state.xrHudShadow=g_liveControls.xrHudShadow;
+    state.xrHudGlow=g_liveControls.xrHudGlow;
+    state.hudElements=cvr::hud::GetLayoutSettings();
+    state.framegen=cvr::framegen::GetSettings();
+    state.nvidiaReflex=cvr::reflex::GetMode();
+    state.overlay=cvr::vrui::GetSettings();
     state.xr3DofMovement = g_liveControls.xr3DofMovement;
     state.xrFirstLaunch = g_liveControls.xrFirstLaunch;
     state.xrMotionPredictMs = g_liveControls.xrMotionPredictMs;
@@ -1442,8 +1727,25 @@ LiveControlsUiState MakeLiveControlsUiState() {
     state.xrSnapTurn = g_liveControls.xrSnapTurn;
     state.xrSnapTurnAngleDeg = g_liveControls.xrSnapTurnAngleDeg;
     state.xrMovementSource = g_liveControls.xrMovementSource;
-    state.xrPhysicalBodyRotation = g_liveControls.xrPhysicalBodyRotation;
+    state.xrMovementSpeedMode=g_liveControls.xrMovementSpeedMode;
+    state.xrLeftStickDeadzone=g_liveControls.xrLeftStickDeadzone;
+    state.xrRightStickDeadzone=g_liveControls.xrRightStickDeadzone;
+    state.xrMaxInputThreshold=g_liveControls.xrMaxInputThreshold;
+    const auto bodyMode=static_cast<cvr::body::RotationMode>(g_liveControls.xrBodyRotationMode);
+    state.xrPhysicalBodyRotation = bodyMode==cvr::body::RotationMode::HeadCone;
+    state.xrTrackedBodyRotation = bodyMode==cvr::body::RotationMode::Tracked;
+    state.xrHybridBodyRotation = bodyMode==cvr::body::RotationMode::Hybrid;
+    state.xrRoomscaleMovement = g_liveControls.xrRoomscaleMovement;
+    state.xrBreaststrokeSwim = g_liveControls.xrBreaststrokeSwim;
+    state.xrLadderGripClimb = g_liveControls.xrLadderGripClimb;
+    state.xrLadderAutoFinish=g_liveControls.xrLadderAutoFinish;
+    state.xrLadderFinishDistance=g_liveControls.xrLadderFinishDistance;
+    state.xrBodyFreeLookDeg=g_liveControls.xrBodyFreeLookDeg;
+    state.xrBodyFreeLookDownDeg=g_liveControls.xrBodyFreeLookDownDeg;
+    state.xrBodyFreeLookSwimDeg=g_liveControls.xrBodyFreeLookSwimDeg;
+    state.xrBodyMoveRadius=g_liveControls.xrBodyMoveRadius;
     state.xrCutsceneSuspendTier = g_liveControls.xrCutsceneSuspendTier;
+    state.xrVehicleCutsceneSuspendTier = g_liveControls.xrVehicleCutsceneSuspendTier;
     state.xrXInputInstall = g_liveControls.xrXInputInstall;
     state.xrInputActions = g_liveControls.xrInputActions;
     state.xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
@@ -1457,6 +1759,8 @@ LiveControlsUiState MakeLiveControlsUiState() {
     state.xrWheelRadius = g_liveControls.xrWheelRadius;
     state.xrWheelSteerMaxDeg = g_liveControls.xrWheelSteerMaxDeg;
     state.xrWheelSteerDeadDeg = g_liveControls.xrWheelSteerDeadDeg;
+    state.xrWheelPrediction = g_liveControls.xrWheelPrediction;
+    state.xrWheelPredictionMs = g_liveControls.xrWheelPredictionMs;
     state.xrWheelHorn = g_liveControls.xrWheelHorn;
     state.xrWheelHornRadius = g_liveControls.xrWheelHornRadius;
     state.xrVehicleGunTrigger = g_liveControls.xrVehicleGunTrigger;
@@ -1478,11 +1782,18 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     // this function rewrites the whole file, and a key left out is a key deleted -- the
     // mistake that once ate xr_hand_predict.
     fprintf(file, "xr_threaded_submit=%d\n", CyberpunkVR_ThreadedMonoSubmit);
-    fprintf(file, "xr_cascade_save_main=%d\n", CyberpunkVR_CascadeSaveMain != 0 ? 1 : 0);
     fprintf(file, "xr_force_fov=%.3f\n", state.xrForceFov);
     fprintf(file, "xr_menu_rect=%d\n", state.xrMenuRect != 0 ? 1 : 0);
     fprintf(file, "xr_menu_fov=%.3f\n", state.xrMenuFov);
     fprintf(file, "xr_menu_follow_deg=%.3f\n", state.xrMenuFollowDeg >= 5.0f ? state.xrMenuFollowDeg : 60.0f);
+    cvr::framegen::WriteSettings(file,state.framegen);
+    fprintf(file,"xr_nvidia_reflex=%d\n",cvr::reflex::NormalizeMode(state.nvidiaReflex));
+    cvr::vrui::WriteSettings(file,state.overlay);
+    fprintf(file,"xr_hud_panel=%d\nxr_hud_follow_deg=%.3f\nxr_hud_fov=%.3f\nxr_hud_distance=%.3f\n",state.xrHudPanel,state.xrHudFollowDeg,state.xrHudFov,state.xrHudDistance);
+    fprintf(file,"xr_interaction_panel=%d\nxr_interaction_follow_deg=%.3f\nxr_interaction_distance=%.3f\nxr_interaction_fov=%.3f\n",state.xrInteractionPanel,state.xrInteractionFollowDeg,state.xrInteractionDistance,state.xrInteractionFov);
+    fprintf(file,"xr_loot_follow_deg=%.3f\n",state.xrLootFollowDeg);
+    fprintf(file,"xr_hud_follow_mode=%d\nxr_hud_stereo_depth=%d\nxr_hud_brightness=%.3f\nxr_hud_shadow=%.3f\nxr_hud_glow=%.3f\n",state.xrHudFollowMode,state.xrHudStereoDepth,state.xrHudBrightness,state.xrHudShadow,state.xrHudGlow);
+    cvr::hud::SaveLayoutSettings(file,state.hudElements);
     fprintf(file, "xr_3dof_movement=%d\n", state.xr3DofMovement != 0 ? 1 : 0);
     // Not a control, but it MUST be written back: this function rewrites the whole file, so
     // leaving the key out would drop it, and the next launch would read the default 1 and
@@ -1516,11 +1827,20 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     // own. 3 = the shipped pair (+0x230/+0x238). 16 = +0x258, the shader-permutation byte (0x12 vs
     // 0x16) and the best remaining candidate. 4 = +0x220. 8 = +0x248. 32/64/128 = the unidentified
     // ones, last and separately.
-    fprintf(file, "xr_grade_mirror_mask=%u\n", CyberpunkVR_GradeMirrorMask);
+    fprintf(file, "xr_grade_mirror_mask=%X\n", CyberpunkVR_GradeMirrorMask);
     // Which extra environment handles the second view takes from MAIN. Bits 0-2 are element 0
     // (0x1F0/0x220/0x380) and froze the mirror when tried; bits 3-5 are element 1 and bits 6-8
     // element 2, never tried. One bit at a time -- refcounted handles.
     fprintf(file, "xr_env_extra_mask=%u\n", CyberpunkVR_EnvExtraMask);
+    fprintf(file, "xr_water_mirror=%u\n", CyberpunkVR_WaterMirror);
+    fprintf(file, "xr_water_assign=%u\n", CyberpunkVR_WaterAssign);
+    fprintf(file, "xr_viewdata_diff=%d\n", CyberpunkVR_ViewDataDiff);
+    fprintf(file, "xr_lut_src_lend=%u\n", CyberpunkVR_LutSrcLend);
+    fprintf(file, "xr_scene_stick_yaw_dps=%.2f\n", CyberpunkVR_SceneStickYawDps);
+    fprintf(file, "xr_scene_stick_yaw_tier=%d\n", CyberpunkVR_SceneStickYawTier);
+    fprintf(file, "xr_block_diff=%d\n", CyberpunkVR_BlockDiff);
+    fprintf(file, "xr_block_diff_node=%X\n", CyberpunkVR_BlockDiffNode);
+    fprintf(file, "xr_block_diff_size=%u\n", CyberpunkVR_BlockDiffSize);
     // Render-mask categories granted to the second view, one bit per row of kRenderMasks. The
     // [rmask] log line prints the map and marks which view has what; [cap] lists the nodes the
     // engine still refuses. 1 = DistantLights, 2 = AutoGrass, 1024 = ClearLighting (what
@@ -1558,6 +1878,14 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_input_default_in_ui=%d\n", CyberpunkVR_InputDefaultInUi);
     fprintf(file, "xr_popup_mag_block_ms=%d\n", CyberpunkVR_PopupMagBlockMs);
     fprintf(file, "xr_vrcam_pos_from_main=%d\n", CyberpunkVR_VrcamPosFromMain);
+    // Hex, because the value is an RVA and it is read straight off a log line printed in hex.
+    fprintf(file, "xr_vision_cs_node=%X\n", CyberpunkVR_VisionCsNode);
+    fprintf(file, "xr_vision_cs_swap=%d\n", CyberpunkVR_VisionCsSwap);
+    fprintf(file, "xr_vision_cs_dim=%d\n", CyberpunkVR_VisionCsDim);
+    fprintf(file, "xr_vision_cs_ord=%d\n", CyberpunkVR_VisionCsOrd);
+    fprintf(file, "xr_weapon_plane_as_scene=%d\n", CyberpunkVR_WeaponPlaneAsScene);
+    fprintf(file, "xr_highlight_any_plane=%d\n", CyberpunkVR_HighlightAnyPlane);
+    fprintf(file, "xr_plane_bucket_scene=%d\n", CyberpunkVR_PlaneBucketScene);
     // 1 = MAIN's half of the eye separation goes into the located buffer in a braindance,
     // which is the descriptor the engine renders it through. 0 = back to the component.
     fprintf(file, "xr_bd_ipd_in_locate=%d\n", CyberpunkVR_BdIpdInLocate);
@@ -1612,6 +1940,7 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_fix_lod=%d\n", CyberpunkVR_FixLodEnable);
     // The port's own HUD composite into the second eye, and whether it applies in a braindance.
     fprintf(file, "xr_hud_to_second_eye=%d\n", CyberpunkVR_HudToSecondEye);
+    fprintf(file, "xr_vision_to_second_eye=%d\n", CyberpunkVR_VisionToSecondEye);
     fprintf(file, "xr_hud_in_braindance=%d\n", CyberpunkVR_HudInBraindance);
     // 1 = inject the composition group into the second view's graph via the engine's pass adders.
     fprintf(file, "xr_vrcam_composition=%u\n", CyberpunkVR_VrcamCompositionGroup);
@@ -1676,9 +2005,24 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_snap_turn=%d\n", state.xrSnapTurn != 0 ? 1 : 0);
     fprintf(file, "xr_snap_turn_angle_deg=%.2f\n", state.xrSnapTurnAngleDeg > 0.0f ? state.xrSnapTurnAngleDeg : 30.0f);
     fprintf(file, "xr_movement_source=%d\n", state.xrMovementSource < 0 ? 0 : (state.xrMovementSource > 3 ? 3 : state.xrMovementSource));
+    fprintf(file,"xr_movement_speed_mode=%d\nxr_left_stick_deadzone=%.3f\nxr_right_stick_deadzone=%.3f\nxr_max_input_threshold=%.3f\n",
+        state.xrMovementSpeedMode==1,cvr::input::StickDeadzone(state.xrLeftStickDeadzone),
+        cvr::input::StickDeadzone(state.xrRightStickDeadzone),cvr::input::StickFullInput(state.xrMaxInputThreshold));
     fprintf(file, "xr_physical_body_rotation=%d\n", state.xrPhysicalBodyRotation != 0 ? 1 : 0);
+    fprintf(file, "xr_tracked_body_rotation=%d\n", state.xrTrackedBodyRotation != 0 ? 1 : 0);
+    fprintf(file, "xr_hybrid_body_rotation=%d\n", state.xrHybridBodyRotation != 0 ? 1 : 0);
+    fprintf(file, "xr_roomscale_movement=%d\n", state.xrRoomscaleMovement != 0 ? 1 : 0);
+    fprintf(file, "xr_breaststroke_swim=%d\n", state.xrBreaststrokeSwim != 0 ? 1 : 0);
+    fprintf(file, "xr_ladder_grip_climb=%d\n", state.xrLadderGripClimb != 0 ? 1 : 0);
+    fprintf(file, "xr_ladder_auto_finish=%d\nxr_ladder_finish_distance=%.3f\n",state.xrLadderAutoFinish!=0 ? 1:0,state.xrLadderFinishDistance);
+    fprintf(file, "xr_body_free_look_deg=%.3f\n", state.xrBodyFreeLookDeg);
+    fprintf(file, "xr_body_free_look_down_deg=%.3f\n", state.xrBodyFreeLookDownDeg);
+    fprintf(file, "xr_body_free_look_swim_deg=%.3f\n", state.xrBodyFreeLookSwimDeg);
+    fprintf(file, "xr_body_move_radius=%.4f\n", state.xrBodyMoveRadius);
     fprintf(file, "xr_cutscene_suspend_tier=%d\n",
             state.xrCutsceneSuspendTier < -1 ? -1 : (state.xrCutsceneSuspendTier > 4 ? 4 : state.xrCutsceneSuspendTier));
+    fprintf(file, "xr_vehicle_cutscene_suspend_tier=%d\n",
+            cvr::anim::ResolveVehicleVrikSuspendTier(state.xrCutsceneSuspendTier,state.xrVehicleCutsceneSuspendTier,true));
     fprintf(file, "xr_xinput_install=%d\n", state.xrXInputInstall != 0 ? 1 : 0);
     fprintf(file, "xr_input_actions=%d\n", state.xrInputActions != 0 ? 1 : 0);
     fprintf(file, "xr_mono_xqueue_wait=%d\n", state.xrMonoXQueueWait != 0 ? 1 : 0);
@@ -1692,6 +2036,8 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_wheel_radius=%.3f\n", state.xrWheelRadius > 0.0f ? state.xrWheelRadius : 0.28f);
     fprintf(file, "xr_wheel_steer_max_deg=%.1f\n", state.xrWheelSteerMaxDeg > 0.0f ? state.xrWheelSteerMaxDeg : 90.0f);
     fprintf(file, "xr_wheel_steer_dead_deg=%.1f\n", state.xrWheelSteerDeadDeg >= 0.0f ? state.xrWheelSteerDeadDeg : 1.5f);
+    fprintf(file, "xr_wheel_prediction=%d\n", state.xrWheelPrediction != 0 ? 1 : 0);
+    fprintf(file, "xr_wheel_prediction_ms=%.1f\n", std::isfinite(state.xrWheelPredictionMs) ? std::clamp(state.xrWheelPredictionMs,0.0f,8.0f):0.0f);
     fprintf(file, "xr_wheel_horn=%d\n", state.xrWheelHorn != 0 ? 1 : 0);
     fprintf(file, "xr_wheel_horn_radius=%.3f\n", state.xrWheelHornRadius > 0.0f ? state.xrWheelHornRadius : 0.12f);
     fprintf(file, "xr_vehicle_gun_trigger=%d\n", state.xrVehicleGunTrigger != 0 ? 1 : 0);
@@ -1717,6 +2063,9 @@ extern "C" void RequestLiveControlsRecenter() {
 
 extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int persistToFile) {
     if (!state) return;
+    cvr::framegen::SetSettings(state->framegen);
+    cvr::reflex::SetMode(state->nvidiaReflex);
+    cvr::vrui::SetSettings(state->overlay);
 
     const int prevMono = g_liveControls.xrMonoSubmit;
 
@@ -1726,6 +2075,21 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
     g_liveControls.xrRecenter = 0;
     g_liveControls.xrMonoSubmit = state->xrMonoSubmit != 0 ? 1 : 0;
     g_liveControls.xrForceFov = state->xrForceFov > 0.0f ? state->xrForceFov : 0.0f;
+    g_liveControls.xrHudPanel=state->xrHudPanel!=0;
+    g_liveControls.xrHudFollowMode=state->xrHudFollowMode==1;
+    g_liveControls.xrHudStereoDepth=state->xrHudStereoDepth!=0;
+    g_liveControls.xrHudBrightness=(state->xrHudBrightness>=0.25f && state->xrHudBrightness<=3) ? state->xrHudBrightness : 1;
+    g_liveControls.xrHudShadow=(state->xrHudShadow>=0 && state->xrHudShadow<=2) ? state->xrHudShadow : 1;
+    g_liveControls.xrHudGlow=(state->xrHudGlow>=0 && state->xrHudGlow<=2) ? state->xrHudGlow : 1;
+    cvr::hud::SetLayoutSettings(state->hudElements);
+    g_liveControls.xrHudFollowDeg=(state->xrHudFollowDeg>=5 && state->xrHudFollowDeg<=90) ? state->xrHudFollowDeg : 60.0f;
+    g_liveControls.xrInteractionPanel=state->xrInteractionPanel!=0;
+    g_liveControls.xrInteractionFollowDeg=(state->xrInteractionFollowDeg>=5 && state->xrInteractionFollowDeg<=90)?state->xrInteractionFollowDeg:90.0f;
+    g_liveControls.xrLootFollowDeg=(state->xrLootFollowDeg>=5 && state->xrLootFollowDeg<=90)?state->xrLootFollowDeg:10.0f;
+    g_liveControls.xrInteractionDistance=(state->xrInteractionDistance>=.5f && state->xrInteractionDistance<=5)?state->xrInteractionDistance:1.5f;
+    g_liveControls.xrInteractionFov=(state->xrInteractionFov>=30 && state->xrInteractionFov<=120)?state->xrInteractionFov:65.4f;
+    g_liveControls.xrHudFov=(state->xrHudFov>=30 && state->xrHudFov<=120) ? state->xrHudFov : 65.4f;
+    g_liveControls.xrHudDistance=(state->xrHudDistance>=0.5f && state->xrHudDistance<=5) ? state->xrHudDistance : 1.5f;
     g_liveControls.xrMenuRect = state->xrMenuRect != 0 ? 1 : 0;
     g_liveControls.xrMenuFov = state->xrMenuFov > 1.0f ? state->xrMenuFov : 65.0f;
     g_liveControls.xrMenuFollowDeg = (state->xrMenuFollowDeg >= 5.0f && state->xrMenuFollowDeg <= 90.0f) ? state->xrMenuFollowDeg : 60.0f;
@@ -1749,9 +2113,28 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
         g_liveControls.xrMovementControl = src != 0 ? 1 : 0;
     }
     g_liveControls.xrPhysicalBodyRotation = state->xrPhysicalBodyRotation != 0 ? 1 : 0;
+    g_liveControls.xrMovementSpeedMode=state->xrMovementSpeedMode==1;
+    g_liveControls.xrLeftStickDeadzone=cvr::input::StickDeadzone(state->xrLeftStickDeadzone);
+    g_liveControls.xrRightStickDeadzone=cvr::input::StickDeadzone(state->xrRightStickDeadzone);
+    g_liveControls.xrMaxInputThreshold=cvr::input::StickFullInput(state->xrMaxInputThreshold);
+    g_liveControls.xrTrackedBodyRotation = state->xrTrackedBodyRotation != 0 ? 1 : 0;
+    g_liveControls.xrHybridBodyRotation = state->xrHybridBodyRotation != 0 ? 1 : 0;
+    g_liveControls.xrBodyRotationMode=static_cast<int>(cvr::body::RotationModeFromFlags(
+        state->xrPhysicalBodyRotation,state->xrTrackedBodyRotation,state->xrHybridBodyRotation));
+    g_liveControls.xrRoomscaleMovement = state->xrRoomscaleMovement != 0 ? 1 : 0;
+    g_liveControls.xrBreaststrokeSwim = state->xrBreaststrokeSwim != 0 ? 1 : 0;
+    g_liveControls.xrLadderGripClimb = state->xrLadderGripClimb != 0 ? 1 : 0;
+    g_liveControls.xrLadderAutoFinish=state->xrLadderAutoFinish!=0 ? 1:0;
+    g_liveControls.xrLadderFinishDistance=std::clamp(std::isfinite(state->xrLadderFinishDistance) ? state->xrLadderFinishDistance:1.0f,.2f,1.2f);
+    g_liveControls.xrBodyFreeLookDeg=std::clamp(state->xrBodyFreeLookDeg,0.0f,60.0f);
+    g_liveControls.xrBodyFreeLookDownDeg=std::clamp(std::isfinite(state->xrBodyFreeLookDownDeg) ? state->xrBodyFreeLookDownDeg:30.0f,0.0f,90.0f);
+    g_liveControls.xrBodyFreeLookSwimDeg=std::clamp(std::isfinite(state->xrBodyFreeLookSwimDeg) ? state->xrBodyFreeLookSwimDeg:5.0f,0.0f,90.0f);
+    g_liveControls.xrBodyMoveRadius=std::clamp(state->xrBodyMoveRadius,0.0f,.30f);
     g_liveControls.xrCutsceneSuspendTier =
         (state->xrCutsceneSuspendTier < -1) ? -1
                                            : (state->xrCutsceneSuspendTier > 4 ? 4 : state->xrCutsceneSuspendTier);
+    g_liveControls.xrVehicleCutsceneSuspendTier = cvr::anim::ResolveVehicleVrikSuspendTier(
+        state->xrCutsceneSuspendTier,state->xrVehicleCutsceneSuspendTier,true);
     g_liveControls.xrDisableMouseY = state->xrDisableMouseY != 0 ? 1 : 0;
     g_liveControls.xrXInputHook = state->xrXInputHook != 0 ? 1 : 0;
     g_liveControls.xrSnapTurn = state->xrSnapTurn != 0 ? 1 : 0;
@@ -1781,6 +2164,8 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
         g_liveControls.xrWheelSteerMaxDeg = (m < 30.0f) ? 30.0f : (m > 120.0f ? 120.0f : m);
         const float d = state->xrWheelSteerDeadDeg;
         g_liveControls.xrWheelSteerDeadDeg = (d < 0.0f) ? 0.0f : (d > 20.0f ? 20.0f : d);
+        g_liveControls.xrWheelPrediction = state->xrWheelPrediction != 0 ? 1 : 0;
+        g_liveControls.xrWheelPredictionMs = std::isfinite(state->xrWheelPredictionMs) ? std::clamp(state->xrWheelPredictionMs,0.0f,8.0f):0.0f;
         const float hr = state->xrWheelHornRadius;
         g_liveControls.xrWheelHornRadius = (hr < 0.04f) ? 0.04f : (hr > 0.30f ? 0.30f : hr);
         const float tt = state->xrVehicleThrottleTrim;

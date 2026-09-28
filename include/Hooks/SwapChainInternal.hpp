@@ -55,6 +55,7 @@ extern std::atomic<uint32_t> g_presentHeight;
 
 extern std::atomic<ID3D12CommandQueue*> g_sceneDepthWriterQueue;
 extern std::atomic<ID3D12Resource*> g_sceneDepthRes;
+extern std::mutex g_sceneDepthRefMutex;
 extern std::atomic<UINT> g_sceneDepthFmt;
 extern std::atomic<UINT> g_sceneDepthH;
 extern std::atomic<UINT> g_sceneDepthState;

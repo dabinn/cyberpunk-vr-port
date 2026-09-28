@@ -1,3 +1,4 @@
+#include "Utils/DebugGate.hpp"
 // LodFov -- the level-of-detail cone, and the one hook whose value is NOT the render FOV.
 //
 // The site reads the camera's vertical FOV and the engine squares its tangent to get the
@@ -145,6 +146,7 @@ static bool BdViewMatches(const uint8_t* p, float* qOut) {
 // it is written back into the field it was read from. If that field turns out to be a copy nobody else
 // reads, the counter below says the write happened and the picture will say it changed nothing.
 extern "C" __declspec(dllexport) int   CyberpunkVR_BdFovWrite = 1;
+extern "C" float CyberpunkVR_DebugVrcamWantFov;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugBdFovWrites = 0;
 // 1 = apply the LOD override to the caller whose incoming value falls in the window below (the
 // shipping behaviour); 0 = leave every caller on the engine's own value, both eyes alike.
@@ -196,17 +198,34 @@ extern "C" float __fastcall OnFixLoDCallback(float* rbxPtr, float originalVal) {
             // The published pose is a tick old and this pan outran it. The fov says it is the same view,
             // and the base for the head comes out of the struct itself.
             isBdView = BdReadQuat(p, qBase);
-            if (isBdView) ++CyberpunkVR_DebugBdViewByFov;
+            if (isBdView) CVR_DIAGNOSTIC(++CyberpunkVR_DebugBdViewByFov);
         }
 
         if (isBdView) {
-            ++CyberpunkVR_DebugBdViewSeen;
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugBdViewSeen);
+
+            // NOT ON THE SECOND EYE'S VIEW. The test above identifies the lens's view by POSITION,
+            // within half a metre -- which was sound while only MAIN sat there. With
+            // xr_dev_cam_in_locate=2 the takeover push puts the second eye at the lens as well, three
+            // centimetres away, so its view passes the same test and this write flattened its fov to
+            // the headset's. That is exactly what "при cam in locate = 2 не зумит, при 1 зумит" was:
+            // the camera's 4x zoom reached the second eye as a narrow fov (39.30 measured in its
+            // component, with main yy 2.80083 and ADS x4.000 on the panel) and was then overwritten
+            // with 110 right here.
+            //
+            // Position cannot separate them at three centimetres. The FOV can: the second eye's view
+            // carries the value the port computed for it this frame, and MAIN's view never does. When
+            // there is no zoom the two coincide -- and then `notOursYet` is already false, so this test
+            // only ever bites on the frames where they genuinely differ.
+            const float vrcamWant = CyberpunkVR_DebugVrcamWantFov;
+            const bool isSecondEyeView =
+                (vrcamWant > 1.0f && fabsf(originalVal - vrcamWant) < 0.05f);
 
             // THE FOV, as before -- this is the write that proved the struct reaches the picture.
-            if (CyberpunkVR_BdFovWrite && notOursYet &&
+            if (CyberpunkVR_BdFovWrite && notOursYet && !isSecondEyeView &&
                 originalVal > 1.0f && originalVal < 179.0f) {
                 WriteFloatSafe(reinterpret_cast<uintptr_t>(p) + kBdFov, want);
-                ++CyberpunkVR_DebugBdFovWrites;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugBdFovWrites);
                 result = want;
             }
 

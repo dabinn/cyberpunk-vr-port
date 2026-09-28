@@ -83,6 +83,8 @@ void InitRuntimePaths() {
     // 1.5 deg of deadzone: enough to swallow tremor, small enough that the wheel does not feel dead
     // off centre. Every degree here is a degree the car ignores.
     g_liveControls.xrWheelSteerDeadDeg = 1.5f;
+    g_liveControls.xrWheelPrediction = 0;
+    g_liveControls.xrWheelPredictionMs = 8.0f;
     // Horn ON: a hand on the middle of the wheel honks, as it would in a real car. 12 cm is the hub
     // pad, comfortably inside the ~17 cm the animation holds the rim at.
     // OFF: the horn gesture has no button left. Vehicle_Horn is X, and X is the exit now -- see
@@ -98,6 +100,7 @@ void InitRuntimePaths() {
     // Default: suspend VRIK during true cinematics (Tier4_FPPCinematic and up). The avatar is
     // driven by the engine authored scene animation there, and VRIK fighting it looks wrong.
     g_liveControls.xrCutsceneSuspendTier = 3;
+    g_liveControls.xrVehicleCutsceneSuspendTier = 3;
 
     // Default ON: VR controller -> XInput gamepad pipeline. Both the entry-point
     // detour (xrXInputInstall) and the gameplay action set (xrInputActions) are
@@ -107,6 +110,10 @@ void InitRuntimePaths() {
     // the binding/entry-point patch keeps the game from reaching its main menu.
     g_liveControls.xrXInputInstall = 1;
     g_liveControls.xrInputActions = 1;
+    g_liveControls.xrMovementSpeedMode=0;
+    g_liveControls.xrLeftStickDeadzone=.15f;
+    g_liveControls.xrRightStickDeadzone=.15f;
+    g_liveControls.xrMaxInputThreshold=.90f;
 
     // Capture the recenter-request baseline NOW (before CET could write), so the
     // first OnGameAttached this session is seen as a change and triggers a recenter,
@@ -144,14 +151,21 @@ void EnsureLiveControlFileExists() {
     // Who owns the XR frame loop: -1 auto (submit thread on SteamVR, inline pump on Virtual
     // Desktop), 0 force inline, 1 force the thread.
     fprintf(file, "xr_threaded_submit=-1\n");
-    // 1 keeps the cascade SaveMain fix (MAIN samples the depth the second view wrote); 0 lets
-    // MAIN clear the shared shadow atlas again. Revert to 0 if sun shadows go wrong in one eye.
-    fprintf(file, "xr_cascade_save_main=1\n");
     fprintf(file, "xr_force_fov=0\n");
     fprintf(file, "xr_menu_rect=0\n");
     fprintf(file, "xr_menu_fov=65.0\n");
     fprintf(file, "xr_menu_follow_deg=60.0\n");
     fprintf(file, "xr_3dof_movement=0\n");
+    fprintf(file, "xr_roomscale_movement=1\n");
+    fprintf(file, "xr_tracked_body_rotation=0\n");
+    fprintf(file, "xr_hybrid_body_rotation=1\n");
+    fprintf(file, "xr_body_free_look_deg=10.0\n");
+    fprintf(file, "xr_body_free_look_down_deg=30.0\n");
+    fprintf(file, "xr_body_move_radius=0.10\n");
+    fprintf(file, "xr_breaststroke_swim=1\n");
+    fprintf(file, "xr_ladder_grip_climb=1\n");
+    fprintf(file, "xr_ladder_auto_finish=1\nxr_ladder_finish_distance=1.0\n");
+    fprintf(file, "xr_body_free_look_swim_deg=5\n");
     fprintf(file, "first_launch=1\n");
     fprintf(file, "xr_motion_predict_ms=0.0\n");
     fprintf(file, "xr_stereo_scale=1.0\n");
@@ -172,6 +186,8 @@ void EnsureLiveControlFileExists() {
     fprintf(file, "xr_render_pose_submit=1\n");
     fprintf(file, "xr_pose_lag=1\n");
     fprintf(file, "xr_runtime=0\n");
+    fprintf(file, "xr_nvidia_reflex=%d\n", cvr::reflex::DefaultMode);
+    fprintf(file, "xr_local_shadow_reuse=0\n");
     // Default ON: now safe via cross-queue Signal hook (CyberpunkVRPort_
     // WaitOnAllGameSignals) that GPU-Waits on every tracked game queue
     // before our depth copy. Lets the compositor do depth-aware reprojection
@@ -184,6 +200,7 @@ void EnsureLiveControlFileExists() {
     fprintf(file, "xr_snap_turn=0\n");
     fprintf(file, "xr_snap_turn_angle_deg=30\n");
     fprintf(file, "xr_movement_source=0\n");
+    fprintf(file,"xr_movement_speed_mode=0\nxr_left_stick_deadzone=0.15\nxr_right_stick_deadzone=0.15\nxr_max_input_threshold=0.90\n");
     // Default ON for the gameplay-input pipeline: both flags are required for the
     // VR controller to reach CP2077 as an XInput pad (otherwise the game detects no
     // controller and shows keyboard glyphs). Set either to 0 in vrport.ini if a
@@ -203,6 +220,8 @@ void LoadLauncherConfig() {
     g_launcherHeight = 2048;
     g_launcherHmdType = 0;
     g_launcherDebug = 0;
+    g_launcherShow = 1;
+    g_launcherDelayMs = 1000;
 
     FILE* file = _fsopen(g_launcherConfigPath, "r", _SH_DENYNO);
     if (!file) return;
@@ -210,6 +229,16 @@ void LoadLauncherConfig() {
     char line[128];
     while (fgets(line, sizeof(line), file)) {
         int intValue = 0;
+        if (sscanf_s(line, "launcher_delay_ms=%d", &intValue) == 1 ||
+            sscanf_s(line, "launcher_delay_ms = %d", &intValue) == 1) {
+            g_launcherDelayMs = intValue < 0 ? 0 : intValue > 10000 ? 10000 : intValue;
+            continue;
+        }
+        if (sscanf_s(line, "show_launcher=%d", &intValue) == 1 ||
+            sscanf_s(line, "show_launcher = %d", &intValue) == 1) {
+            g_launcherShow = intValue != 0 ? 1 : 0;
+            continue;
+        }
         if (sscanf_s(line, "width=%d", &intValue) == 1 ||
             sscanf_s(line, "width = %d", &intValue) == 1) {
             g_launcherWidth = intValue > 0 ? intValue : g_launcherWidth;
@@ -246,6 +275,8 @@ void SaveLauncherConfig(int width, int height) {
     fprintf(file, "height=%d\n", g_launcherHeight);
     fprintf(file, "hmd_type=%d\n", g_launcherHmdType);
     fprintf(file, "debug=%d\n", g_launcherDebug);
+    fprintf(file, "show_launcher=%d\n", g_launcherShow);
+    fprintf(file, "launcher_delay_ms=%d\n", g_launcherDelayMs);
     fclose(file);
 }
 

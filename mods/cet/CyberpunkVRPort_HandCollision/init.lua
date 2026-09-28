@@ -104,47 +104,10 @@ local RELEASE_MARGIN = 0.006   -- m of clearance before a contact lets go; witho
 local stick = { [0] = {}, [1] = {} }
 local fade  = { [0] = 0.0, [1] = 0.0 }
 
--- THE BODY CAPSULES MUST NOT ANSWER QUERIES EITHER, and not on a lazy timer. A character controller moves by
--- sweeping scene queries, and every VRPortBody_ capsule overlaps its 0.25 m cylinder -- hands by 0.036 m, the torso
--- by 0.34 -- so a queryable capsule is the controller standing inside geometry, which the engine answers by pushing
--- the player UP. That is the twitch on jump and landing: the capsules re-register on a state change and come back
--- queryable, and a half-second window of that is a shove.
---
--- Every frame, then, not every 0.5 s, and from THIS module so it does not depend on the basketball mod being on.
--- Sixteen guarded calls a frame cost nothing measurable next to the solve.
-local bqBodies, bqScanAt = nil, -1.0
-
-local function bodyQueriesOff(now)
-    if not bqBodies or now - bqScanAt > 5.0 then
-        local pl = Game.GetPlayer()
-        if not pl then return end
-        local found = {}
-        local ok = pcall(function()
-            local cs = pl:GetComponents()
-            for i = 1, #cs do
-                if string.find(tostring(cs[i]:GetName()), 'VRPortBody_') then
-                    local b = cs[i]:CreatePhysicalBodyInterface(0)
-                    if b then found[#found + 1] = b end
-                end
-            end
-        end)
-        -- SAY what the scan found. "Still twitches" means nothing until it is known whether these bodies exist,
-        -- whether they answer, and whether the call is accepted -- the weapon's pass looked identical and turned out
-        -- to be finding zero bodies.
-        if dbgOn() then
-            pcall(function() spdlog.info(string.format('[BodyQuery] %d capsule bodies found', #found)) end)
-        end
-        if not ok or #found == 0 then return end
-        bqBodies, bqScanAt = found, now
-    end
-    for i = 1, #bqBodies do
-        if not pcall(function() bqBodies[i]:SetIsQueryable(false) end) then
-            pcall(function() spdlog.info('[BodyQuery] SetIsQueryable REJECTED on capsule ' .. i) end)
-            bqBodies = nil                 -- stale handles after a reload: rescan next tick
-            return
-        end
-    end
-end
+-- Do not obtain or retain entPhysicalBodyInterface handles here. The 2026-09-09
+-- crash reached UpdateHitProxyID through SetIsQueryable after the component had
+-- invalidated its hit-proxy handle. pcall cannot catch a native access violation.
+-- Body capsules are disabled as components below instead.
 
 -- A CAR IS GEOMETRY THE PLAYER SITS INSIDE, AND THE CAPSULES GO IN WITH THEM.
 --
@@ -182,6 +145,7 @@ local function bodyCapsulesForVehicle(now)
         pcall(function()
             local pl = Game.GetPlayer()
             if not pl then return end
+            if type(VRShouldScanBodyCapsules)=='function' and not VRShouldScanBodyCapsules(pl) then return end
             local cs = pl:GetComponents()
             for i = 1, #cs do
                 if string.find(tostring(cs[i]:GetName()), 'VRPortBody_') then found[#found + 1] = cs[i] end
@@ -192,69 +156,14 @@ local function bodyCapsulesForVehicle(now)
     end
     for i = 1, #vbComps do pcall(function() vbComps[i]:Toggle(want) end) end
     vbWanted = want
-    bqBodies = nil
     pcall(function() spdlog.info(string.format('[BodyCaps] %s (%d capsules)',
         want and 'ON' or 'OFF -- mounted', #vbComps)) end)
     return inCar
 end
 
--- THE WEAPON MUST NOT ANSWER SCENE QUERIES. Its parts were made physical so they push props, and that also put them
--- in front of the player as something the MOVEMENT system can see: a character controller moves by sweeping queries,
--- so a gun held at chest height is a wall to walk into and a ledge to mantle over ("упирается при ходьбе, при прыжке
--- перелезает"). Queries off keeps the simulation contacts -- props still bounce off the gun -- and hides it from
--- movement. The same fix already stopped the player climbing over the basketball and the body capsules.
---
--- On a timer, not once: a weapon that is drawn, holstered or swapped comes back queryable, and one queryable frame at
--- chest depth is a shove.
-local wqBodies, wqKey, wqAt = nil, nil, -1.0
-
-local function weaponQueriesOff(weapon, now)
-    if not weapon then wqBodies, wqKey = nil, nil; return end
-    local okK, key = pcall(function() return tostring(weapon:GetEntityID().hash) end)
-    if not okK then return end
-    -- wqKey == key with no list means "asked already, this weapon has none" -- see the cache note below.
-    if wqKey == key and not wqBodies then return end
-    if wqKey ~= key or not wqBodies then
-        local found = {}
-        local ok = pcall(function()
-            local cs = weapon:GetComponents()
-            for i = 1, #cs do
-                if string.find(tostring(cs[i]:GetClassName()), 'Physical') then
-                    local b = cs[i]:CreatePhysicalBodyInterface(0)
-                    if b then found[#found + 1] = b end
-                end
-            end
-        end)
-        -- SAY how many bodies answered. "Queries off did not help" has two very different causes -- the call not
-        -- landing at all, or landing and not being what blocks the player -- and only this tells them apart.
-        if dbgOn() then
-            pcall(function()
-                spdlog.info(string.format('[WeaponQuery] weapon %s: %d physical bodies found', key, #found))
-            end)
-        end
-        if not ok or #found == 0 then
-            -- REMEMBER THE NEGATIVE ANSWER. Returning without caching meant this whole scan ran again
-            -- next frame, and logged again: 34126 lines in one session, and a component walk per frame
-            -- for a weapon that will never have physical bodies. The key is stored with an empty list,
-            -- so the scan happens once per weapon and the retry comes with the next weapon.
-            wqBodies, wqKey = nil, key
-            if dbgOn() then
-                pcall(function() spdlog.info('[WeaponQuery] NO physical bodies on this weapon') end)
-            end
-            return
-        end
-        wqBodies, wqKey, wqAt = found, key, -1.0
-    end
-    if now - wqAt < 0.5 then return end
-    wqAt = now
-    for i = 1, #wqBodies do
-        if not pcall(function() wqBodies[i]:SetIsQueryable(false) end) then
-            pcall(function() spdlog.info('[WeaponQuery] SetIsQueryable REJECTED on body ' .. i) end)
-            wqBodies, wqKey = nil, nil     -- stale handles after a redraw: rescan next tick
-            return
-        end
-    end
-end
+-- Weapon query filtering through entPhysicalBodyInterface was removed for the same
+-- reason. Collision is currently disabled, so keeping a crash-prone physical-body
+-- cache alive only to mutate hit proxies has no valid runtime purpose.
 
 local SMOOTH_TAU = 0.040
 local smooth   = { [0] = nil, [1] = nil }
@@ -892,11 +801,7 @@ registerForEvent('onUpdate', function(dt)
         end
         if ownRel ~= 0 then pcall(function() VRHandStopModel(0, false, Vector4.new(0, 0, 0, 0)) end) end
         if ownRel ~= 1 then pcall(function() VRHandStopModel(1, false, Vector4.new(0, 0, 0, 0)) end) end
-        -- ALSO WITH THE COLLISION SOLVE OFF. The gun is physical because of its ASSET, not because of this module,
-        -- so it blocks the player whether or not the hand clamp is running -- and the log proved the pass never fired
-        -- for exactly that reason: it sat past this early exit, and `collOn=false` takes it every frame.
-        weaponQueriesOff(lastW, os.clock())
-        if not bodyCapsulesForVehicle(os.clock()) then bodyQueriesOff(os.clock()) end
+        bodyCapsulesForVehicle(os.clock())
         return
     end
 
@@ -1023,10 +928,9 @@ registerForEvent('onUpdate', function(dt)
 
     local offL, offR = send(0), send(1)
 
-    -- the gun is physical for props, invisible to the movement system (see weaponQueriesOff)
-    weaponQueriesOff(lastW, os.clock())
-    -- and the body capsules are switched off entirely while mounted -- see bodyCapsulesForVehicle
-    if not bodyCapsulesForVehicle(os.clock()) then bodyQueriesOff(os.clock()) end
+    -- Body capsules are switched at the component level; no physical-body handles
+    -- survive across a registration or player-state change.
+    bodyCapsulesForVehicle(os.clock())
 
     if t0 then
         local ms = (os.clock() - t0) * 1000.0

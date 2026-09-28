@@ -1,3 +1,4 @@
+#include "Utils/DebugGate.hpp"
 #include <windows.h>
 #include "Stereo/VrcamConfig.hpp"   // cname_hash, for the device camera name
 #include <psapi.h>
@@ -32,6 +33,7 @@
 #include "Core/CoreInternal.hpp"
 #include "Camera/CameraLink.hpp"
 #include "Hooks/Hook.hpp"
+#include "Hooks/RoomscaleMove.hpp"
 #include <string>
 
 FILE* g_logFile = nullptr;
@@ -72,6 +74,9 @@ int g_launcherHmdType = 0;
 // master switch for every probe, census and dump in the mod -- see ApplyLauncherDebugGate
 // in debug_gate.cpp for why the gating happens once at startup rather than per read.
 int g_launcherDebug = 0;
+// Persisted startup switch. Automated runs use the saved selection when disabled.
+int g_launcherShow = 1;
+int g_launcherDelayMs = 1000;
 
 // Moved to src/Core/LauncherConfig.cpp: paths and the launcher ini.
 
@@ -97,7 +102,12 @@ extern "C" void PrepareStartupLiveControls() {
 
     if (!g_dialogShown) {
         g_dialogShown = true;
-        ShowLauncherDialog();
+        if (g_launcherShow) ShowLauncherDialog();
+        else {
+            Log("Launcher skipped (show_launcher=0): %dx%d, HMD type %d; startup wait %d ms\n",
+                g_launcherWidth, g_launcherHeight, g_launcherHmdType, g_launcherDelayMs);
+            WaitForLauncherStartup(static_cast<unsigned int>(g_launcherDelayMs));
+        }
     }
 }
 
@@ -711,6 +721,20 @@ bool LocateOwnsTakeover() {
     //
     // The claim is the discriminator, so each case picks its route from a fact rather than from a key:
     // claimed means "drive it where the engine hands it to us", unclaimed means "drive the buffer".
+    //
+    // MODE 2 OVERRIDES THAT, and it exists because the fact turned out not to decide the question.
+    // On a `SurveillanceCamera` in a story mission the claim lands -- 32177 stamps in one sitting --
+    // so this returned false, the turret route stayed off (`DebugTakeoverPush` read 0 with the key
+    // on) and the camera was driven through its own camera state. On that route the picture SPINS:
+    // the head turn yanks the view back to the lens and then the whole view rotates steadily, which
+    // is what a composition fed its own output looks like. The base for kind 3 is re-read from the
+    // component's +0xF0 every frame and that read bypasses the freshness test the state path has.
+    //
+    // Rather than adding a second freshness test to a route that has to guess whose write it is
+    // looking at, mode 2 sends a claimed camera down the SAME path as the turret, where there is
+    // exactly one writer by construction: LocateCamera composes once, writes MAIN's buffer, and
+    // pushes the second eye from the same call.
+    if (CyberpunkVR_DevCamInLocate >= 2) return true;
     return !DeviceCamClaimed();
 }
 
@@ -1022,7 +1046,7 @@ extern "C" __declspec(dllexport) int CyberpunkVR_HeadTranslationInPatch = 1;
 extern "C" __declspec(dllexport) int CyberpunkVR_HeadingFromPreWrite = 1;
 
 // 1 = rebuild the head translation from the frame's OWN head sample using the recipe
-// LocateCamera publishes (g_anchorOff / g_anchorCy / g_anchorSy / g_anchorScale), instead of
+// LocateCamera publishes a framed AnchorRecipe through CameraLink, instead of
 // reading g_headDeltaFP -- which LocateCamera computes AFTER this write and therefore belongs
 // to the previous frame. Same class of defect as the stale heading, same remedy.
 extern "C" __declspec(dllexport) int CyberpunkVR_DeltaFromFreshSample = 1;
@@ -1072,6 +1096,37 @@ extern "C" __declspec(dllexport) int CyberpunkVR_VrikYawFromEngine = 1;
 // body-follow offset. This is what makes "the body turns, the camera does not" possible at all --
 // see the use site in PatchCamera. It also drops a frame of age from the heading.
 extern "C" __declspec(dllexport) int CyberpunkVR_ViewYawFromEngine = 1;
+
+// THE VIEW'S OWN YAW FOR SCENES THAT TURN NOTHING.
+//
+// Measured 2026-09-05 in a Tier 3 dialogue on foot, with the stick held and the head still: the
+// camera component's world forward came back BIT-IDENTICAL (0.12880, 0.96511, -0.22798 twice) while
+// its position moved 4.5 cm, and the body quaternion did not move either (0, 0, 0.08655, 0.99625
+// both samples). The base this composition uses is the engine's own pre-write value
+// (HeadingFromPreWrite), so a base that does not move means the engine did not turn the camera at
+// all -- the stick went into a head-look ANIMATION, which is why the position moved and nothing
+// else did. There is nothing to follow, so the yaw has to come from here.
+//
+// Deliberately NOT armed everywhere: in ordinary play and in a vehicle the game turns the view
+// itself -- the user reports the same kind of scene works in a car -- and a second source would
+// simply double every turn. So it is gated on the scene tier AND on being on foot, and the
+// accumulator is dropped the moment the gate closes, which puts the view back exactly where the
+// game's own yaw has it.
+//
+// Degrees per second at full deflection; 0 disables the whole thing, which is the default until it
+// has been seen on the picture.
+extern "C" __declspec(dllexport) float CyberpunkVR_SceneStickYawDps = 0.0f;
+extern "C" __declspec(dllexport) int   CyberpunkVR_SceneStickYawTier = 3;
+extern "C" __declspec(dllexport) float CyberpunkVR_DebugSceneStickYawDeg = 0.0f;
+
+// ONE GATE, NAMED ONCE. The camera composition integrates the scene yaw and the input merge has to
+// stand its snap turn down for exactly the same frames -- two copies of this condition would drift
+// apart the first time either was touched.
+bool SceneStickYawArmed() {
+    return CyberpunkVR_SceneStickYawDps > 0.0f &&
+           g_sceneTier.load(std::memory_order_relaxed) >= CyberpunkVR_SceneStickYawTier &&
+           !g_isInVehicle;
+}
 // Use a coherent relative camera/entity snapshot for the model-space anchor and the same latched XR
 // head sample as PatchCamera for its orientation.  See VRIK_ComputeCamModel; g_lastLocate* is too
 // late in the frame to pair with the entity transform consumed by animation.
@@ -1113,15 +1168,11 @@ extern "C" __declspec(dllexport) int CyberpunkVR_VehicleAnchorFromViewYaw = 1;
 // headingResetOnlyWhenMoving, normalizeYaw and the yaw/pitch rubber band -- and
 // headingResetOnlyWhenMoving alone explains why a parked car is clean.
 extern "C" __declspec(dllexport) int CyberpunkVR_CamWriteOrientInVehicle = 1;
-// The yaw PatchCamera actually composed the view with, published at the instant it is used. Read by
-// LocateCamera in the same frame: PatchCamera writes the camera, LocateCamera runs downstream of it inside
-// the blender, so this is never a cached value.
-// 1 = a frame that did not claim the aim epoch still gets THIS frame's world yaw, by turning the
-// published composition through the yaw it missed. Measured need: 4-12% of rendered frames share an
-// epoch with the previous one and were writing that frame's orientation -- correct for the head,
-// stale for the world. 0 restores the previous behaviour.
-extern "C" __declspec(dllexport) int CyberpunkVR_YawCatchUpOnSharedEpoch = 1;
+// Retain the exports for diagnostic compatibility. Per-eye yaw catch-up was
+// removed: vehicle MAIN and VRCAM have different native attachment headings.
+extern "C" __declspec(dllexport) int CyberpunkVR_YawCatchUpOnSharedEpoch = 0;
 extern "C" __declspec(dllexport) unsigned long long CyberpunkVR_DebugYawCaughtUp = 0;
+// Shared view yaw selected by PatchCamera, consumed downstream by LocateCamera.
 volatile float g_viewYawUsedRad = 0.0f;
 volatile int   g_viewYawUsedValid = 0;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugVrikNativePairUsed = 0;
@@ -1214,7 +1265,13 @@ extern "C" __declspec(dllexport) int32_t CyberpunkVR_VrcamPosFromMain = 0;
 // What it does NOT reuse is the scene POSE: during a takeover the scene camera is somewhere else
 // entirely, and taking MAIN's position from it is what made MAIN teleport for a frame. The position stays
 // the buffer's own -- the lens the engine is rendering through -- and only the eye split is added.
-extern "C" __declspec(dllexport) int32_t CyberpunkVR_DevCamInLocate = 1;
+// DEFAULT 2 SINCE 2026-09-05, CONFIRMED ON THE PICTURE. On a story `SurveillanceCamera` mode 1 left
+// the camera on its own state route, where turning the head yanked the view back to the lens and then
+// span it steadily; on this route it is steady. Mode 2 is a superset of 1 -- an unclaimed camera (the
+// turret) behaves identically -- so the only behaviour it changes is that of CLAIMED cameras, which
+// is exactly the case that was broken. Drop it to 1 to get the old split back if some other device
+// camera ever regresses.
+extern "C" __declspec(dllexport) int32_t CyberpunkVR_DevCamInLocate = 2;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugTakeoverPush = 0;
 
 // THE NAME IS NOT THE IDENTITY -- the header of VRRemoteCamera says so in as many words, and then the
@@ -1419,6 +1476,7 @@ float* GetShotShared() {
 // VARIABILI GLOBALI PER LA CACHE
 // ============================================
 RED4ext::CProperty* g_mountedVehicleProp = nullptr;
+RED4ext::CProperty* g_vehicleStateProp = nullptr;
 RED4ext::CProperty* g_isAimingProp = nullptr;
 RED4ext::CProperty* g_equippedWeaponProp = nullptr;
 RED4ext::CProperty* g_sceneTierProp = nullptr;
@@ -1438,6 +1496,7 @@ void InitializeMountedVehicleCache() {
     
     if (playerPuppetCls) {
         g_mountedVehicleProp = playerPuppetCls->GetProperty("mountedVehicle");
+        g_vehicleStateProp = playerPuppetCls->GetProperty("vehicleState");
         g_isAimingProp = playerPuppetCls->GetProperty("isAiming");
         g_equippedWeaponProp = playerPuppetCls->GetProperty("equippedRightHandWeapon");
         // The cutscene tier, verified by RTTI dump rather than assumed: PlayerPuppet has
@@ -1469,7 +1528,7 @@ void InitializeMountedVehicleCache() {
     }
     if (g_verboseLog) Log("[VR] VehicleComponent::IsDriver %s -- wheel grab is %s\n",
         g_isDriverFunc ? "resolved" : "NOT FOUND",
-        g_isDriverFunc ? "driver-seat only" : "allowed in any seat (fallback)");
+        g_isDriverFunc ? "driver-seat only" : "requires vehicleState confirmation");
 
     g_isRTTIInitialized = true;
 }
@@ -1478,7 +1537,9 @@ void InitializeMountedVehicleCache() {
 uint64_t g_locateCameraHits = 0;
 bool g_isInVehicle = false;
 std::atomic<bool> g_isDriving{false};
+std::atomic<int> g_vehicleState{-1};
 std::atomic<int> g_sceneTier{0};
+std::atomic<float> g_lookStickX{0.0f};
 bool g_isAiming = false;
 bool g_hasWeaponEquipped = false;
 // [dx-win]/[jerk] diag: ENGINE located camera captured at callback entry (pre-overwrite).
@@ -1693,7 +1754,7 @@ void PushLensHeadTransform(const float* quat) {
     }
 
     BdPushTransformOnce(comp, quat[0], quat[1], quat[2], quat[3], false, base);
-    ++CyberpunkVR_DebugLensHeadWrites;
+    CVR_DIAGNOSTIC(++CyberpunkVR_DebugLensHeadWrites);
 
     // Remember what is actually in the component now, rather than what we meant to put there: the write
     // goes through the same fixed-point rounding and IPD split, and the comparison has to be exact.
@@ -2148,7 +2209,7 @@ bool BraindanceCameraMatch(uintptr_t obj, const float* quat) {
         g_devCamBaseValid.store(0, std::memory_order_relaxed);   // a different camera: re-latch its aim
         g_devCamPosValid.store(0, std::memory_order_relaxed);
     }
-    ++CyberpunkVR_DebugBdCandidates;
+    CVR_DIAGNOSTIC(++CyberpunkVR_DebugBdCandidates);
     g_bdCamFound.store(1, std::memory_order_release);
     StampDeviceCam();
     return true;
@@ -2222,6 +2283,14 @@ static void patch_fast_note(int kind) {
 static thread_local int s_vrcamMismatch = 0;
 static thread_local int s_mainMismatch = 0;
 
+static bool MainCameraOwnerMatches(uintptr_t camera) {
+    const auto player=cvr::roomscale::PlayerIdentity();
+    if(!player)return true; // Preserve name-based bootstrap before GetPlayer is available.
+    uint64_t owner{};
+    // SDK IComponent::owner; this is the same identity used by the native VRIK pair.
+    return ReadU64Safe(camera+0x50,&owner) && owner==player;
+}
+
 int ClassifyPatchCameraOwner(void* ownerState) {
     const uintptr_t obj = reinterpret_cast<uintptr_t>(ownerState);
     if (!obj || obj < 0x10000) return 0;
@@ -2231,22 +2300,23 @@ int ClassifyPatchCameraOwner(void* ownerState) {
     // braindance keeps whichever candidate was latched first for the whole scene, and the slow path
     // below -- where both identities are actually tested -- is never reached again.
     if (obj == g_camObjMain.load(std::memory_order_relaxed)) {
-        if (!g_bdActive.load(std::memory_order_relaxed) ||
+        if (MainCameraOwnerMatches(obj) &&
+            (!g_bdActive.load(std::memory_order_relaxed) ||
             !g_playerCamOn.load(std::memory_order_relaxed) ||
-            CamNameStillMain(obj)) {
-            ++CyberpunkVR_DebugPatchCamMain;
+            CamNameStillMain(obj))) {
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamMain);
             patch_fast_note(1);
             return 1;
         }
         g_camObjMain.store(0, std::memory_order_relaxed);
         PatchFastDisarm();   // the latch is gone: the slow path has to find the camera again
-        ++CyberpunkVR_DebugMainCamRejects;
+        CVR_DIAGNOSTIC(++CyberpunkVR_DebugMainCamRejects);
     }
     if (obj == g_camObjVrcam.load(std::memory_order_relaxed)) {
         const uintptr_t rtt = static_cast<uintptr_t>(CyberpunkVR_DebugRttComp);
         if (!rtt || obj == rtt) {
             s_vrcamMismatch = 0;
-            ++CyberpunkVR_DebugPatchCamVrcam;
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamVrcam);
             patch_fast_note(2);
             return 2;
         }
@@ -2257,17 +2327,17 @@ int ClassifyPatchCameraOwner(void* ownerState) {
         // which is what the second eye was jerking on. A real replacement persists, so it still gets
         // noticed within a few passes.
         if (++s_vrcamMismatch < 4) {
-            ++CyberpunkVR_DebugPatchCamVrcam;
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamVrcam);
             patch_fast_note(2);
             return 2;
         }
         s_vrcamMismatch = 0;
         g_camObjVrcam.store(0, std::memory_order_relaxed);
         PatchFastDisarm();
-        ++CyberpunkVR_DebugVrcamCamRejects;
+        CVR_DIAGNOSTIC(++CyberpunkVR_DebugVrcamCamRejects);
     }
     if (CyberpunkVR_DeviceCamFollow && obj == g_camObjDevice.load(std::memory_order_relaxed)) {
-        ++CyberpunkVR_DebugPatchCamDevice;
+        CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamDevice);
         StampDeviceCam();
         return 3;
     }
@@ -2296,6 +2366,13 @@ int ClassifyPatchCameraOwner(void* ownerState) {
     uint64_t name = 0;
     if (!ReadU64Safe(obj + off, &name) || name == 0) return 0;
     if (name == kCamNameMain) {
+        // Other puppets can keep updating a component named "camera". Their
+        // activity cannot prove that the latched camera belongs to GetPlayer.
+        if(!MainCameraOwnerMatches(obj)) {
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugMainCamRejects);
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamOther);
+            return 0;
+        }
         // TWO OBJECTS ANSWER TO THIS NAME IN A BRAINDANCE -- the player's camera and the replacer's --
         // so inside one the position script publishes for the LIVE player's camera decides. Outside a
         // braindance nothing is published and nothing is rejected, which is the old behaviour exactly.
@@ -2310,8 +2387,8 @@ int ClassifyPatchCameraOwner(void* ownerState) {
             !PlayerCamPositionMatches(obj)) {
             if (++s_mainMismatch >= 4) {
                 s_mainMismatch = 0;
-                ++CyberpunkVR_DebugMainCamRejects;
-                ++CyberpunkVR_DebugPatchCamOther;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugMainCamRejects);
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamOther);
                 return 0;
             }
         } else {
@@ -2324,8 +2401,8 @@ int ClassifyPatchCameraOwner(void* ownerState) {
                     reinterpret_cast<void*>(obj), reinterpret_cast<void*>(prev));
         }
         g_camObjMain.store(obj, std::memory_order_relaxed);   // latch for the fast path
-        ++CyberpunkVR_DebugCamRebinds;
-        ++CyberpunkVR_DebugPatchCamMain;
+        CVR_DIAGNOSTIC(++CyberpunkVR_DebugCamRebinds);
+        CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamMain);
         patch_fast_note(1);
         return 1;
     }
@@ -2343,8 +2420,8 @@ int ClassifyPatchCameraOwner(void* ownerState) {
         // the name still stands in.
         const uintptr_t rtt = static_cast<uintptr_t>(CyberpunkVR_DebugRttComp);
         if (rtt && obj != rtt) {
-            ++CyberpunkVR_DebugVrcamCamRejects;
-            ++CyberpunkVR_DebugPatchCamOther;
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugVrcamCamRejects);
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamOther);
             return 0;
         }
         {
@@ -2355,8 +2432,8 @@ int ClassifyPatchCameraOwner(void* ownerState) {
                     static_cast<unsigned long long>(name), reinterpret_cast<void*>(rtt));
         }
         g_camObjVrcam.store(obj, std::memory_order_relaxed);
-        ++CyberpunkVR_DebugCamRebinds;
-        ++CyberpunkVR_DebugPatchCamVrcam;
+        CVR_DIAGNOSTIC(++CyberpunkVR_DebugCamRebinds);
+        CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamVrcam);
         return 2;
     }
     if (CyberpunkVR_DeviceCamFollow && g_remoteCamOn.load(std::memory_order_relaxed)) {
@@ -2379,11 +2456,11 @@ int ClassifyPatchCameraOwner(void* ownerState) {
             const uintptr_t cur = g_camObjDevice.load(std::memory_order_relaxed);
             if (cur != 0) {
                 if (obj != cur) {
-                    ++CyberpunkVR_DebugPatchCamOther;
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamOther);
                     return 0;
                 }
                 // The camera we hold: keep the lens pose fresh, do not re-claim.
-                ++CyberpunkVR_DebugPatchCamDevice;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamDevice);
                 StampDeviceCam();
                 return 3;
             }
@@ -2425,8 +2502,8 @@ int ClassifyPatchCameraOwner(void* ownerState) {
                     reinterpret_cast<void*>(obj), reinterpret_cast<void*>(prev),
                     CyberpunkVR_DebugPatchCamDevice);
             }
-            ++CyberpunkVR_DebugCamRebinds;
-            ++CyberpunkVR_DebugPatchCamDevice;
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugCamRebinds);
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamDevice);
             g_devCamBaseValid.store(0, std::memory_order_relaxed);   // a different camera: re-latch
             g_devCamPosValid.store(0, std::memory_order_relaxed);
             StampDeviceCam();
@@ -2454,9 +2531,9 @@ int ClassifyPatchCameraOwner(void* ownerState) {
                             static_cast<unsigned long long>(name), camFov,
                             static_cast<double>(wantMilli) * 0.001);
                     }
-                    ++CyberpunkVR_DebugBdCamHits;
-                    ++CyberpunkVR_DebugCamRebinds;
-                    ++CyberpunkVR_DebugPatchCamDevice;
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugBdCamHits);
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugCamRebinds);
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamDevice);
                     g_devCamBaseValid.store(0, std::memory_order_relaxed);
                     g_devCamPosValid.store(0, std::memory_order_relaxed);
                     StampDeviceCam();
@@ -2466,7 +2543,7 @@ int ClassifyPatchCameraOwner(void* ownerState) {
         }
     }
 
-    ++CyberpunkVR_DebugPatchCamOther;
+    CVR_DIAGNOSTIC(++CyberpunkVR_DebugPatchCamOther);
     return 0;
 }
 
@@ -2672,5 +2749,3 @@ void InitStereoOnce() {
 __declspec(dllexport) void CyberpunkVRPort_InitStereo() { InitStereoOnce(); }
 
 }
-
-

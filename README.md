@@ -5,20 +5,12 @@ A 6-DoF **VR mod for Cyberpunk 2077**, built as a **RED4ext plugin** -
 tracking, real stereo, the in-headset overlay and the **full-body VR avatar with
 motion-controlled hands** that used to live in a second DLL; and a set of CET / redscript mods add VR
 weapon aiming, the physical reload, motion melee, hand-to-holster equipping and more. Everything is
-configured from an in-headset **F10** overlay.
+configured from an in-headset overlay opened by **holding L3+R3** or pressing **F10**.
 
 Repository: <https://github.com/dariulone/cyberpunk-vr-port>
 
 > ⚠️ Experimental community mod. Not affiliated with CD PROJEKT RED. Use at your
 > own risk and keep backups of your saves.
-
-## Credits
-
-- **[iPowerTech](https://github.com/iPowerTech)** — **VR driving.** Grabbing the
-  wheel with your own hands, the steering geometry, the deadzone and lock-angle
-  controls, the horn on the wheel hub, and shooting while you drive are all his
-  work, from [his fork](https://github.com/iPowerTech/cyberpunk-vr-port).
-  
 
 ## Features
 
@@ -31,10 +23,13 @@ Repository: <https://github.com/dariulone/cyberpunk-vr-port>
   plus world-scale / IPD controls. Off-axis lenses (Quest 3 and family) get a
   frustum sized to COVER the panel rather than match its span, so there is no
   black band down the outer edge.
-- **The game HUD in both eyes** — the engine's own HUD composite is ported
-  shader-for-shader for the second eye. By default it is pasted at the same
-  PIXEL in both eyes so markers land in the same place; the finite-distance
-  placement is still there behind one setting, because wide-FOV headsets want it.
+- **Native VR HUD panels** with per-element placement, size and visibility,
+  adjustable free-look cones, and separate interaction/dialogue and loot panels.
+  Scanner, CCTV, Basilisk and sniper displays have dedicated head-following channels.
+  World markers retain their native depth and are projected separately for each eye.
+- **Native VR frame generation** with game motion vectors and depth, FidelityFX
+  and NVIDIA optical-flow backends, half-rate pacing and a performance overlay.
+  Ray-tracing motion formats and live RT changes are supported.
 - **The F10 overlay in both eyes**, so a settings panel no longer costs you
   stereo the way a full-screen game menu does.
 - **The two views agree.** Sun cascade shadows, the shader clock, the foliage
@@ -71,6 +66,14 @@ Repository: <https://github.com/dariulone/cyberpunk-vr-port>
   and elbows hang off the BODY rather than the head, and the solve is clocked by
   the engine's own animation batch. VRIK suspends itself during cutscenes so the
   avatar does not fight an authored scene.
+- **Roomscale movement, bending and hybrid body rotation** with paired headset,
+  camera and avatar poses, anatomical shoulder reach and preserved foot contacts.
+- **Gesture swimming and grip-based ladder climbing**, including water-aware
+  body posture, stroke-dependent propulsion and authored ladder hand poses.
+- **Third-person and external-camera stereo**, plus HMD aiming and steering for
+  the Basilisk and head-driven surveillance cameras and story sniper sequences.
+- **Tactical belt and physical grenades**, with carried magazines, authored
+  grenade grips and male/female belt assets.
 - **Physical body rotation** (optional) — the character turns to follow the
   headset through the engine's own heading channel, so the mesh, the collision
   capsule, the aim and the movement direction all move with it. The view does not
@@ -116,16 +119,11 @@ Repository: <https://github.com/dariulone/cyberpunk-vr-port>
   latches so the car keeps rolling.
 - **World-map head-lock** — DLSS/NGX handling (the second
   view gets its own upscaler viewport automatically).
-- **13 headsets, 60 resolutions**, every ladder reaching 6000 px, picked before
-  launch — PlayStation VR2 and the Bigscreen Beyond 2/2e included.
-- **HUD placement is HUDitor**, which moves and scales each
-  widget individually. The port shipped its own HUD mod until 2026-08-20 and it
-  is gone: it scaled the shared HUD root around screen centre, which is too
-  blunt to be comfortable and actively fights a real HUD editor. What the port
-  still does for the HUD is the part only it can do -- compositing the engine's
-  own HUD into the SECOND eye. The port's own HUDitor setup -- the editor moved
-  to **F11**, plus a VR-tuned layout for all 26 widgets -- is saved in
-  `mods\config\huditor\`, opt-in rather than installed for you.
+- **15 headsets, 60 resolutions**, every ladder reaching 6000 px, picked before
+  launch.
+- **HUD placement is built into the port.** The HUD page controls native VR
+  panels and their elements. HUDitor is not required and its old layout is not
+  installed by the release package.
 - **The game's own bindings work in menus.** Every controller remap this port makes
   is for gameplay, so a menu or a braindance now gets the raw pad — nothing of ours
   eats a button the menu needs. And B closes the phone, the radio port and the
@@ -136,10 +134,16 @@ Repository: <https://github.com/dariulone/cyberpunk-vr-port>
   popups and the loot window are centred and scaled where a 16:9 layout would put
   them at the edge of vision or off it. The loot window's detailed description used
   to hang off the right edge; it sits above the take button now.
-- **The cascade shadow rows are hidden** from *Graphics → Advanced*. The atlas is
-  shared between the two views, so raising them gives you artefacts the port
-  cannot fix from its side.
+- **Cascade shadow range and resolution remain available** in *Graphics → Advanced*.
+  Stereo sampling follows the active cascade count, and both views render their
+  own shadow maps when settings recreate resources.
+- **Shared MAIN fog with per-eye reprojection** keeps lamp beams fixed in the
+  world during head turns. Underwater effects, colour grading and local-light
+  radiance are synchronized without replacing the current-eye fog grid.
 - **In-headset F10 overlay** with tabbed, live, persisted settings.
+- Hold **L3+R3 for one second** to toggle the VR overlay. Hold **L3+left Grip
+  for half a second** to activate iconic cyberware in gameplay. L3+R3 takes
+  priority when both chords are pressed.
 - SteamVR (OpenVR) runtime supported alongside OpenXR; pre-launch resolution
   selector; quiet-by-default logging with a DEBUG toggle in the launcher.
 
@@ -157,11 +161,9 @@ Repository: <https://github.com/dariulone/cyberpunk-vr-port>
 - Equipment-EX
 - Nova Optics
 - Input Loader
-- HUDitor
+- [More Occluders (Scripted v0.3)](https://www.nexusmods.com/cyberpunk2077/mods/33136)
 
-Recommended but not required: **HUDitor**, **Visible Bullets**, for HUD placement — the port ships a
-VR-tuned layout for it in `mods\config\huditor\` and no longer moves HUD widgets
-itself.
+HUDitor is not required for the native VR HUD and is not bundled.
 
 Install RED4ext, CET and redscript first (the usual Nexus dependencies).
 
@@ -183,10 +185,20 @@ archive\pc\mod\cyberpunkvrport.archive                        # held props, weap
 archive\pc\mod\VRCigarette.archive.xl, vrport_basketball...   # the smoking and basketball props
 bin\x64\plugins\cyber_engine_tweaks\mods\CyberpunkVRPort_*\   # CET mods -- see the table below
 r6\scripts\CyberpunkVRPort_*\                                 # redscript mods -- see the table below
-r6\input\HUDitor.xml, r6\config\...                           # the HUDitor binding and the port's config
+r6\input\CyberpunkVRPort_ScannerHud.xml                      # scanner editor binding for Input Loader
 ```
 
 Then **start your OpenXR runtime first**, and launch the game.
+
+On first launch, the VR preset is merged into UserSettings.json with a timestamped
+backup. Graphics, all input controls, HUD and comfort values come from the preset;
+language, audio, difficulty, telemetry, cloud saves and gallery favorites are
+preserved. The merge runs once, not whenever graphics settings change.
+
+When upgrading, remove the retired `CyberpunkVRPort_LootUi` and
+`CyberpunkVRPort_SettingsGuard` folders from `r6\scripts`. QuickBoot is excluded
+from the release: remove an old development copy from CET's mods folder if present.
+The launcher defaults to visible, but an existing `show_launcher=0` is respected.
 
 > There is no `dxgi.dll` any more — this is a RED4ext plugin. Anything else that
 > proxies dxgi (R.E.A.L. VR, for one) must be out of `bin\x64` or the two fight
@@ -220,14 +232,21 @@ VR controller input is merged into the native CP2077 gamepad, so the in-game
 | Right trigger / Left trigger | Fire / Aim (left trigger is also melee block) |
 | Right grip | Hand-to-holster equip / unequip; melee power modifier |
 | Left grip | **Grab the magazine** during a reload (at the ear it is the scanner) |
+| **L3 + R3, held 1 s** | Toggle the in-headset VR overlay |
+| **L3 + left Grip, held 0.5 s** | Activate iconic cyberware in gameplay; requires Input Loader |
 | Left stick **up / down, to the stop** | Page the quickhack list *while the scanner is open* |
 | A | Jump (double jump and charge jump unchanged) |
 | B, **weapon in hand** | **Drop the magazine** (physical reload) — not dodge |
 | B, **holstered** | The game's own B again — close the phone, back out |
 | B, **phone / radio / vehicle list open** | Closes it, weapon in hand or not — and cannot drop a magazine for a second afterwards |
 | X / Y | Reload·interact / Weapon switch |
-| Left menu button | Pause menu |
+| Menu button (left on Touch; right on Steam Frame) | Pause menu |
 | Swing a melee weapon | VR motion melee (native attack along the blade) |
+
+Steam Frame uses the native `XR_VALVE_frame_controller_interaction` profile when
+available. Right A/B/X/Y, left D-pad, left View, right Menu and both bumpers map
+to the matching gamepad controls. Grips retain the port's VR gestures. Touch
+emulation remains the fallback when the runtime does not expose the extension.
 
 While the scanner is open the same hand works it: the **left stick to the stop**
 pages the quickhack list (below the stop it still walks, so you can read and move),
@@ -259,7 +278,7 @@ While **driving**, the same controllers do something else:
 | Right trigger **with a weapon drawn** | **Fire.** The throttle latches at the speed it had |
 | Left stick forward / back, weapon drawn | Trim the latched throttle |
 | **X, held** | **Get out.** B is never the exit in a car, so no stray press can eject you |
-| Perspective toggle | **Does nothing** — the camera is held in first person |
+| Perspective toggle | Native view toggle; third-person and external cameras retain VR tracking |
 | A | **Confirm a dialogue line** (it is X on foot, and X is the exit in here) — the handbrake still fires |
 
 Each hand is independent, so you can hold the wheel with one and keep the other on
@@ -289,16 +308,15 @@ Hotkeys:
 
 - `F7` — recenter HMD
 - `F8` — toggle the VR menu rectangle between full-HMD and a small panel
-- `F10` / `Insert` — open the in-headset settings overlay
-- `F11` — HUDitor's editor, if you installed it (the port rebinds it off F7)
+- `F10` / `Insert` — toggle the in-headset settings overlay from the keyboard
+- `L3` + `R3`, held for 1 s — toggle the same overlay in the headset
+- `L3` + left Grip, held for 0.5 s — activate iconic cyberware in gameplay
 
-## In-headset overlay (F10)
+## In-headset overlay (F10 or L3+R3)
 
-Four tabs, live, and saved to `vrport.ini` — nothing here needs a restart. The
-**driving** block sits under Controls: wheel grab and its grab radius, steering
-deadzone and full-lock angle, horn on/off with its hub radius,
-trigger-fires-the-gun with its throttle trim rate — plus a live read-out of what
-is grabbed, what the steering is doing and whether the horn is being pressed.
+The controller-operated overlay saves settings to `vrport.ini`. Point, select,
+scroll and grip-drag the panel without pausing gameplay. Separate pages cover
+General, Framegen, HUD, Controls, Stereo, Avatar, Driving and Bindings.
 
 - **General** — world scale, IPD scale, stereo separation, VR menu FOV and quad
   size, motion prediction, reuse-last-clean-frame, pose pair-lock, and the head
@@ -311,9 +329,13 @@ is grabbed, what the steering is doing and whether the horn is being pressed.
   last frame may get before the submit falls back to mono, the HUD composite, and
   the live counters that say whether the second view is producing, being captured
   and reaching the headset.
-- **VRIK** — start/stop tracking, physical body rotation and its free-look cone,
+- **Avatar** — start/stop tracking, physical body rotation and its free-look cone,
   the cutscene-suspend tier, IK calibration (reach scale, height, elbow
   swing/pole, wrist offset), diagnostics.
+- **Framegen** - generation backend, pacing, performance history and overlay placement.
+- **HUD** - per-element controls and independent follow cones for HUD channels.
+- **Driving / Bindings** - steering geometry and prediction, wheel grip and horn,
+  driving controls and the current controller mapping.
 
 The launcher (before the game starts) picks the render resolution and carries a
 **DEBUG** tick-box that arms every diagnostic probe at once. Leave it off for
@@ -340,9 +362,14 @@ play: it is for diagnosis and it costs both frame time and a very large log.
 | `CyberpunkVRPort_Melee` | reds | Native melee along the blade segment |
 | `CyberpunkVRPort_WeaponUp` | reds | Stops auto-lower / auto-unequip of a drawn MELEE weapon |
 | `CyberpunkVRPort_NoAnims` | reds | Disables VR-fighting animations (keeps gameplay systems); also carries no-auto-reload and the firearm half of no-auto-lower |
-| `CyberpunkVRPort_LootUi` | reds | The loot window for the square view — the plate at 0.70 and the detailed description centred above the take button instead of off the right edge |
 | `CyberpunkVRPort_BraindanceHud` | CET | The braindance notification plate, whose slot is declared in a HUD asset the port does not ship |
-| `CyberpunkVRPort_SettingsGuard` | reds | Removes the two cascade shadow rows from the settings menu |
+| `CyberpunkVRPort_TacticalBelt` | CET + assets | Belt, magazine props and physical grenade handling |
+| `CyberpunkVRPort_Swimming` | CET + native | Water state and gesture-driven swimming |
+| `CyberpunkVRPort_Ladder` | CET + native | Grip-based climbing and ladder hand poses |
+| `CyberpunkVRPort_Driving` | CET + native | Native steering response while physically holding the wheel |
+
+`CyberpunkVRPort_QuickBoot`, `CyberpunkVRPort_ReloadRecorder` and
+`CyberpunkVRPort_WorldMapDiag` are development tools, excluded from the dist.
 
 ## Logs
 
@@ -376,3 +403,14 @@ possible — nobody is forcing you to do it.
 | USDT BEP20 | `0x4638c6580d1e684bdc60a1c415e5cb1522b66942` |
 | TRX | `TRgmDeRcFumXvsSRqYV5kQAqRAvoFKXJCt` |
 | BTC | `13AfpBwZvaezf36FmpjtENHTXjYcnzEsze` |
+
+## Credits
+
+- **[iPowerTech](https://github.com/iPowerTech/cyberpunk-vr-port)** — physical
+  wheel steering, vehicle controls and shooting while driving.
+- **[dabinn](https://github.com/dabinn/cyberpunk-vr-port)** — substantial work on
+  weapon aiming, head aim and renderer stability; fixes adapted from his fork.
+- **[Ajson44](https://github.com/Ajson44/cyberpunk-vr-port)** — extensive work
+  on story progression, scripted cameras and quest interaction research.
+- **[tig3rmast3r / OFXR Bridge](https://github.com/tig3rmast3r/OFXR-Bridge)** —
+  open VR frame-generation research used as a reference for the native implementation.

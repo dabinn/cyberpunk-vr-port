@@ -1,4 +1,8 @@
 #pragma once
+#include "Runtimes/HudLayout.hpp"
+#include "Framegen/Framegen.hpp"
+#include "Overlay/VrOverlay.hpp"
+#include "Hooks/ReflexOptions.hpp"
 
 struct LiveControlsUiState {
     float xrHeadOffsetX;
@@ -12,6 +16,24 @@ struct LiveControlsUiState {
     int xrMenuRect;
     float xrMenuFov;
     float xrMenuFollowDeg;
+    int xrHudPanel = 1;
+    float xrHudFollowDeg = 60.0f;
+    int xrInteractionPanel = 1;
+    float xrInteractionFollowDeg = 90.0f;
+    float xrLootFollowDeg = 10.0f;
+    float xrInteractionDistance = 1.5f;
+    float xrInteractionFov = 65.4f;
+    float xrHudFov = 65.4f;
+    float xrHudDistance = 1.5f;
+    int xrHudFollowMode = 0;
+    int xrHudStereoDepth = 0;
+    float xrHudBrightness = 1.0f;
+    float xrHudShadow = 1.0f;
+    float xrHudGlow = 1.0f;
+    cvr::hud::LayoutSettings hudElements{};
+    cvr::framegen::Settings framegen{};
+    int nvidiaReflex = cvr::reflex::DefaultMode;
+    cvr::vrui::Settings overlay{};
     int xr3DofMovement;
     int xrFirstLaunch;      // not a control -- carried so a UI save does not drop the key
     float xrMotionPredictMs;
@@ -46,6 +68,10 @@ struct LiveControlsUiState {
     // 0..3 enum (0=Game, 1=HMD, 2=LeftHand, 3=RightHand). The overlay edits the
     // latter and the proxy mirrors it back into the legacy field.
     int xrMovementSource;
+    int xrMovementSpeedMode = 0;
+    float xrLeftStickDeadzone = .15f;
+    float xrRightStickDeadzone = .15f;
+    float xrMaxInputThreshold = .90f;
     // Kill-switches for the new controller pipeline; default 0 (off) so a stuck
     // OpenXR binding or XInput entry-point patch can't keep CP2077 from booting.
     int xrXInputInstall;
@@ -65,9 +91,12 @@ struct LiveControlsUiState {
     // camera to full head-look + head-relative movement). 0 (default) = classic
     // stick / snap-turn heading. Vehicles are unaffected either way. F10 -> VRIK tab.
     int xrPhysicalBodyRotation;
+    int xrTrackedBodyRotation;
+    int xrHybridBodyRotation;
+    int xrRoomscaleMovement;
     // Cutscene VRIK suspend (PR #40). The minimum GameplayTier at which the plugin fully suspends
-    // the body+arm solve (leaving the engine authored cinematic pose): -1 = never suspend, 0..4 =
-    // Tier1..Tier5. Default 3 (Tier4_FPPCinematic = true cinematics). F10 -> VRIK tab.
+    // the body+arm solve on foot: -1/0 = never, 1..4 = Tier2..Tier5.
+    // Default 3 (Tier4_FPPCinematic). F10 -> VRIK tab.
     int xrCutsceneSuspendTier;
     // In-vehicle head offset, metres, ADDED to the xrHeadOffset* trio while seated and zero by
     // default. The on-foot trio is a standing calibration; seated, the vehicle camera is already in
@@ -87,6 +116,8 @@ struct LiveControlsUiState {
     // centre that steers nothing: 1.5 (default) only swallows tremor.
     float xrWheelSteerMaxDeg;
     float xrWheelSteerDeadDeg;
+    int xrWheelPrediction;
+    float xrWheelPredictionMs;
     // HORN. 1 (default) = laying a hand on the middle of the wheel presses the game's horn button for
     // as long as it stays there. xrWheelHornRadius is how near the wheel centre, in metres, counts as
     // "on the hub".
@@ -97,6 +128,15 @@ struct LiveControlsUiState {
     // xrVehicleThrottleTrim of full travel per second.
     int xrVehicleGunTrigger;
     float xrVehicleThrottleTrim;
+    float xrBodyFreeLookDeg;
+    float xrBodyMoveRadius;
+    float xrBodyFreeLookDownDeg;
+    float xrBodyFreeLookSwimDeg;
+    int xrVehicleCutsceneSuspendTier;
+    int xrBreaststrokeSwim;
+    int xrLadderGripClimb;
+    int xrLadderAutoFinish;
+    float xrLadderFinishDistance;
 };
 
 // Read-only snapshot for the compact ADS-camera diagnostic (dabinn, TofuExpress f8a827eb).

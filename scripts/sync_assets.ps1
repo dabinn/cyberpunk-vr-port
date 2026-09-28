@@ -34,6 +34,10 @@ $Assets = @(
     # the same capsule that decides what the player can walk past, so it ships with the port.
     @{ Repo = "mods\tweaks\vrport";                     Game = "r6\tweaks\vrport";                       Dir = $true  },
     @{ Repo = "mods\archive\cyberpunkvrport.archive";   Game = "archive\pc\mod\cyberpunkvrport.archive"; Dir = $false },
+    # The prop FACTORY registration. Its absence is silent and total: an item whose entityName is a
+    # factory name then resolves to nothing, and AddItemToSlot answers TRUE with an empty slot -- which
+    # is exactly how the speedloader stopped reaching the hand without anything reporting an error.
+    @{ Repo = "mods\archive\cyberpunkvrport.archive.xl"; Game = "archive\pc\mod\cyberpunkvrport.archive.xl"; Dir = $false },
     @{ Repo = "mods\archive\VRCigarette.archive.xl";    Game = "archive\pc\mod\VRCigarette.archive.xl";  Dir = $false },
     # The VR basketball assets: vrbasketball\vr_basketball.{mesh,ent}. Packed separately from
     # cyberpunkvrport.archive so a rebuild of the player-entity pack cannot drop them, and so the

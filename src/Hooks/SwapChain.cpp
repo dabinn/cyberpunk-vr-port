@@ -3,8 +3,18 @@
 #include "Hooks/SwapChainInternal.hpp"
 #include <thread>
 #include "Hooks/SwapChain.hpp"
+#include "Hooks/Hook.hpp"
+#include "Render/CommandResources.hpp"
+#include "Render/GpuStageProfile.hpp"
+#include "Render/SinglePassTrace.hpp"
+#include "Render/NativeGeometryPackets.hpp"
+#include "Render/NativeStereoProbe.hpp"
+#include "Render/StereoGpuProbe.hpp"
 #include "Overlay/ImGuiOverlay.hpp"
 #include "Hooks/Ngx.hpp"
+#include "Framegen/Framegen.hpp"
+#include "Framegen/GpuTimer.hpp"
+#include "Camera/ImagePoseIdentity.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <unordered_map>
@@ -16,6 +26,7 @@
 // Defined in Stereo/CommandListCensus.cpp: hooks the game-facing command-list vtable so the port markers
 // land above a capture layer. Declared here because this is where the game-facing device is in hand.
 extern "C" void RegisterGameFacingListVtable(ID3D12Device* device);
+extern "C" void CyberpunkVR_RegisterRtvSwapchain(IDXGISwapChain* swapChain);
 
 extern void Log(const char* fmt, ...);
 extern volatile int g_verboseLog; // gate per-frame spam (ClipCursor / depth-diag)
@@ -144,6 +155,15 @@ HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* swapChain, UINT syncInte
         }
     }
 
+    {std::lock_guard submissionLock(cvr::camera::ImageSubmissionMutex());cvr::framegen::FinishGpuFrame();}
+    cvr::framegen::PaceRenderedFrame();
+    cvr::gpu::CollectCommandResources();
+    cvr::gpu::profile::Poll();
+    cvr::stereo::trace::FrameBoundary();
+    cvr::stereo::packets::FrameBoundary();
+    cvr::stereo::native_probe::FrameBoundary();
+    cvr::stereo::gpu_probe::Poll();
+
     // Bind the overlay to the game's window on first sight.
     //
     // As a proxy we learned the HWND from CreateSwapChain. A plugin never sees that call, so
@@ -204,6 +224,7 @@ HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* swapChain, UINT syncInte
     // AFTER the pump, so an inline cycle is complete when its numbers are read and the
     // wait/begin/end totals are allowed to be exactly equal. Once a second; see the definition.
     OpenXRManager::Get().ReportXrFrameRates();
+    OverlayRenderDesktop(swapChain);
     void** vtable = *reinterpret_cast<void***>(swapChain);
     PresentFn originalFn = GetOriginalMethod<PresentFn>(vtable, 8);
     const HRESULT hr = originalFn ? originalFn(swapChain, syncInterval, flags) : DXGI_ERROR_INVALID_CALL;
@@ -305,7 +326,9 @@ HRESULT STDMETHODCALLTYPE HookedResizeBuffers(IDXGISwapChain* swapChain, UINT bu
     void** vtable = *reinterpret_cast<void***>(swapChain);
     ResizeBuffersFn originalFn = GetOriginalMethod<ResizeBuffersFn>(vtable, 13);
     OverlayInvalidateSwapchainResources();
-    return originalFn ? originalFn(swapChain, bufferCount, outWidth, outHeight, newFormat, flags) : DXGI_ERROR_INVALID_CALL;
+    const auto result=originalFn ? originalFn(swapChain,bufferCount,outWidth,outHeight,newFormat,flags) : DXGI_ERROR_INVALID_CALL;
+    if(SUCCEEDED(result))CyberpunkVR_RegisterRtvSwapchain(swapChain);
+    return result;
 }
 
 // Same rule as HookedResizeBuffers above, and for the same reasons: the launcher's size, verbatim.
@@ -325,10 +348,13 @@ HRESULT STDMETHODCALLTYPE HookedResizeBuffers1(IDXGISwapChain3* swapChain, UINT 
     void** vtable = *reinterpret_cast<void***>(swapChain);
     ResizeBuffers1Fn originalFn = GetOriginalMethod<ResizeBuffers1Fn>(vtable, 39);
     OverlayInvalidateSwapchainResources();
-    return originalFn ? originalFn(swapChain, bufferCount, outWidth, outHeight, format, flags, creationNodeMask, presentQueue) : DXGI_ERROR_INVALID_CALL;
+    const auto result=originalFn ? originalFn(swapChain,bufferCount,outWidth,outHeight,format,flags,creationNodeMask,presentQueue) : DXGI_ERROR_INVALID_CALL;
+    if(SUCCEEDED(result))CyberpunkVR_RegisterRtvSwapchain(swapChain);
+    return result;
 }
 
 void InstallSwapchainHooks(IDXGISwapChain* swapChain) {
+    CyberpunkVR_RegisterRtvSwapchain(swapChain);
     if (!swapChain) return;
 
     void*** objectVtable = reinterpret_cast<void***>(swapChain);
@@ -398,6 +424,8 @@ HRESULT STDMETHODCALLTYPE DXGIFactoryWrapper::GetWindowAssociation(HWND* pWindow
 
 HRESULT STDMETHODCALLTYPE DXGIFactoryWrapper::CreateSwapChain(IUnknown* pDevice, DXGI_SWAP_CHAIN_DESC* pDesc, IDXGISwapChain** ppSwapChain) {
     Log("CreateSwapChain intercepted! pDevice=%p\n", pDevice);
+    if(pDesc)g_gameHwnd=pDesc->OutputWindow;
+    InstallOSHooks();
     PrepareStartupLiveControls();
 
     DXGI_SWAP_CHAIN_DESC localDesc{};
@@ -525,10 +553,12 @@ static FacCreateSwapChainForHwndFn g_origFacCSCFH = nullptr;
 
 // Everything the wrapper did BEFORE handing the call on: one-time early init, then the
 // device/queue wiring taken off the command queue the game is creating the swapchain with.
-static void PluginPreSwapchain(IUnknown* pDevice) {
+static void PluginPreSwapchain(IUnknown* pDevice,HWND hwnd) {
     static std::atomic<bool> s_early{false};
     bool expected = false;
     if (s_early.compare_exchange_strong(expected, true)) {
+        if(hwnd)g_gameHwnd=hwnd;
+        InstallOSHooks();
         CyberpunkVRPort_EnableDredOnce();
         PrepareStartupLiveControls();
         InitOpenXREarly();          // creates the XR instance/session; InitGraphics needs it
@@ -596,7 +626,7 @@ static void PluginPostSwapchain(IDXGISwapChain* sc, HWND hwnd) {
 static HRESULT STDMETHODCALLTYPE Detour_FacCreateSwapChain(
         IDXGIFactory* self, IUnknown* pDevice, DXGI_SWAP_CHAIN_DESC* pDesc,
         IDXGISwapChain** ppSwapChain) {
-    PluginPreSwapchain(pDevice);
+    PluginPreSwapchain(pDevice,pDesc?pDesc->OutputWindow:nullptr);
 
     DXGI_SWAP_CHAIN_DESC local{};
     DXGI_SWAP_CHAIN_DESC* useDesc = pDesc;
@@ -631,7 +661,7 @@ static HRESULT STDMETHODCALLTYPE Detour_FacCreateSwapChainForHwnd(
     if (IsOurOwnWindow(hWnd)) {
         return g_origFacCSCFH(self, pDevice, hWnd, pDesc, pFsDesc, pRestrict, ppSwapChain);
     }
-    PluginPreSwapchain(pDevice);
+    PluginPreSwapchain(pDevice,hWnd);
 
     DXGI_SWAP_CHAIN_DESC1 local{};
     const DXGI_SWAP_CHAIN_DESC1* useDesc = pDesc;
@@ -760,6 +790,9 @@ extern "C" __declspec(dllexport) void CyberpunkVRPort_PluginBootstrap() {
         Log("PluginBootstrap: MH_Initialize failed %d\n", static_cast<int>(st));
         return;
     }
+    // Boot hooks run after the worker's eight-second delay. Device-initialization
+    // observers must be installed synchronously while RED4ext loads the plugin.
+    cvr::hooks::InstallStage(cvr::hooks::Stage::PreDevice);
     // BEFORE anything touches NVAPI. RenderDoc disables NVAPI by default and the game then fails its
     // NVIDIA-side init, reporting on screen that ray tracing could not load -- with ray tracing off. This
     // flips the one official switch that allows it through, and is a no-op when no capture layer is
@@ -862,6 +895,7 @@ BOOL STDMETHODCALLTYPE DXGIFactoryWrapper::IsWindowedStereoEnabled() { return m_
 HRESULT STDMETHODCALLTYPE DXGIFactoryWrapper::CreateSwapChainForHwnd(IUnknown* pDevice, HWND hWnd, const DXGI_SWAP_CHAIN_DESC1* pDesc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc, IDXGIOutput* pRestrictToOutput, IDXGISwapChain1** ppSwapChain) {
     Log("CreateSwapChainForHwnd intercepted! pDevice=%p\n", pDevice);
     g_gameHwnd = hWnd;
+    InstallOSHooks();
     PrepareStartupLiveControls();
 
     DXGI_SWAP_CHAIN_DESC1 localDesc{};
@@ -971,6 +1005,12 @@ HRESULT STDMETHODCALLTYPE DXGIFactoryWrapper::UnregisterAdaptersChangedEvent(DWO
 // [DEPTH] Accessors for the submit path (openxr_manager) to snapshot the game's
 // scene depth with the correct (observed) resource state.
 extern "C" ID3D12Resource* OmoGetSceneDepthResource() { return g_sceneDepthRes.load(std::memory_order_relaxed); }
+extern "C" ID3D12Resource* OmoAcquireSceneDepthResource() {
+    std::lock_guard lock(g_sceneDepthRefMutex);
+    auto* resource = g_sceneDepthRes.load(std::memory_order_relaxed);
+    if (resource) resource->AddRef();
+    return resource;
+}
 extern "C" ID3D12CommandQueue* OmoGetSceneDepthWriterQueue() { return g_sceneDepthWriterQueue.load(std::memory_order_relaxed); }
 extern "C" unsigned int OmoGetSceneDepthState() { return g_sceneDepthState.load(std::memory_order_relaxed); }
 extern "C" unsigned int OmoGetSceneDepthWidth() { return g_sceneDepthW.load(std::memory_order_relaxed); }

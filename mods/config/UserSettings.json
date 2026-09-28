@@ -1497,8 +1497,8 @@
           "name": "ReflexMode",
           "type": "string_list",
           "is_dynamic": false,
-          "value": "Enabled",
-          "index": 1,
+          "value": "Disabled",
+          "index": 0,
           "default_index": 1,
           "values": [
             "Disabled",

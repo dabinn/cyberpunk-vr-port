@@ -1,3 +1,5 @@
+#include "Utils/DebugGate.hpp"
+#include "Overlay/VrOverlay.hpp"
 // XInput -- one hook, one file. It registers itself at the bottom; Hooks/Hook.hpp says why the
 // stage and order live here rather than in a boot function.
 //
@@ -13,6 +15,15 @@
 #include "Core/Telemetry.hpp"
 #include "Hooks/Hook.hpp"
 #include "Hooks/Trampoline.hpp"
+#include "Hooks/TurnInput.hpp"
+#include "Hooks/VehicleButtons.hpp"
+#include "Hooks/SwimmingInput.hpp"
+#include "Hooks/LadderInput.hpp"
+#include "Hooks/InputPacketSequence.hpp"
+#include "Hooks/AnalogStick.hpp"
+#include "Hooks/KeypadInput.hpp"
+#include "Hooks/CyberwareChord.hpp"
+#include "Quest/StoryAttention.hpp"
 #include "Runtimes/OpenXRManager.hpp"
 #include "Utils/AobScanner.hpp"
 #include "Utils/MemorySafe.hpp"
@@ -22,6 +33,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <Xinput.h>
+#include <mutex>
 
 // DASH on the right stick pushed fully UP. 1 = on. A knob rather than a hardcoded gesture like
 // sprint and crouch, because this one claims half of an axis that a user who turns "Disable Mouse Y"
@@ -244,21 +256,48 @@ static float ApplyStickDeadzone(float v, float dz) {
     return s * (a - dz) / (1.0f - dz);
 }
 
+static void PublishMergedPacket(XINPUT_STATE* state) {
+    static std::mutex mutex;
+    static cvr::input::InputPacketSequence<XINPUT_GAMEPAD> packets;
+    std::lock_guard lock(mutex);
+    // Axes matter too: a swimming glide must publish its final zero, even
+    // when no buttons/triggers changed and the real pad packet stayed fixed.
+    state->dwPacketNumber=packets.Publish(state->Gamepad);
+}
+
 DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     DWORD r = ERROR_DEVICE_NOT_CONNECTED;
     if (g_realXInputGetState) r = g_realXInputGetState(dwUserIndex, pState);
 
     if (!pState) return r;
     if (dwUserIndex != 0) return r;
-    if (g_liveControls.xrXInputHook == 0) return r;
+    if (g_liveControls.xrXInputHook == 0) { cvr::quest::SuspendManualClueInput();cvr::swimming::ResetInput();cvr::ladder::ResetInput();return r; }
 
     VRControllerState vr{};
-    if (!OpenXRManager::Get().GetControllerState(&vr)) return r;
+    if (!OpenXRManager::Get().GetControllerState(&vr)) { cvr::quest::SuspendManualClueInput();cvr::swimming::ResetInput();cvr::ladder::ResetInput();return r; }
+    cvr::input::DispatchCyberwareChord();
 
     if (r != ERROR_SUCCESS) {
         memset(pState, 0, sizeof(*pState));
         r = ERROR_SUCCESS;
     }
+    // Exact, already-scanned manual clue only. Capture before scanner X remaps
+    // and swallow the whole press so the newly revealed Take needs another X.
+    if(cvr::quest::ConsumeManualClueButton(((vr.buttons|pState->Gamepad.wButtons)&0x4000)!=0,true)) {
+        vr.buttons &= static_cast<uint16_t>(~0x4000);
+        pState->Gamepad.wButtons &= static_cast<uint16_t>(~0x4000);
+    }
+    if(cvr::vrui::CapturesInput()){
+        pState->Gamepad={};g_lookStickX.store(0,std::memory_order_relaxed);
+        cvr::swimming::ResetInput();cvr::ladder::ResetInput();
+        for(int slot:{30,49,vrshared::kRightSecondaryBtn,vrshared::kLeftSecondaryBtn,vrshared::kRightStickClick,vrshared::kLeftGripPressed,vrshared::kRightTriggerAnalog,vrshared::kLeftTriggerAnalog})
+            OpenXRManager::Get().SetSharedSlot(slot,0);
+        PublishMergedPacket(pState);return r;
+    }
+    const auto swim=cvr::swimming::UpdateInput(vr,vr.leftThumbY<-.2f || pState->Gamepad.sThumbLY<-6553);
+    const bool inWater=cvr::swimming::Active();
+    cvr::ladder::UpdateInput(vr);
+    const bool onLadder=cvr::ladder::Active() && g_liveControls.xrLadderGripClimb!=0;
 
     // Buttons: OR (so a physical pad can still augment, and vice versa) -- except the two the port has
     // taken for itself, which are masked out here instead of reaching the pad:
@@ -305,11 +344,13 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // forgiving and was the opposite. B is ExitVehicle_Button, so a stray press ejects the
     // player from a moving car -- which reads as being thrown across the street, not as a
     // button. Exit is a deliberate X press now, translated below; nothing else can eject.
-    constexpr uint16_t kVehicleOwnedButtons = 0x4000 | 0x2000;   // X = get out, B = never by accident
-    const bool gameplayScreen = (g_menuModeValue == 0);
+    const bool keypadInput = cvr::input::KeypadInputActive();
+    const bool gameplayScreen = (g_menuModeValue == 0) && !keypadInput;
     const bool mounted = g_isInVehicle;
+    const int vehicleState=g_vehicleState.load(std::memory_order_relaxed);
+    const auto vehicleButtons=cvr::input::VehicleButtonPolicy(mounted,vehicleState);
     uint16_t ownedNow = 0;
-    if (gameplayScreen) ownedNow = mounted ? kVehicleOwnedButtons : kPortOwnedButtons;
+    if (gameplayScreen) ownedNow = vehicleButtons.owned ? vehicleButtons.owned : kPortOwnedButtons;
     pState->Gamepad.wButtons |=
         (vr.buttons & static_cast<uint16_t>(~ownedNow));
 
@@ -320,19 +361,34 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // triggers and sticks are merged the way the blocks below would have merged the shaped ones, and
     // the shared slots the CET mods read are put down -- a gesture must not fire from a menu press, and
     // a slot left standing at 1 would keep firing after the menu closes.
-    if (CyberpunkVR_InputDefaultInUi != 0 &&
-        (g_menuModeValue != 0 || g_bdActive.load(std::memory_order_relaxed) != 0)) {
+    if (keypadInput || (CyberpunkVR_InputDefaultInUi != 0 &&
+        (g_menuModeValue != 0 || g_bdActive.load(std::memory_order_relaxed) != 0))) {
         pState->Gamepad.wButtons |= vr.buttons;
         const BYTE ltUi = FloatToBYTE(vr.leftTrigger);
         const BYTE rtUi = FloatToBYTE(vr.rightTrigger);
         if (ltUi > pState->Gamepad.bLeftTrigger)  pState->Gamepad.bLeftTrigger  = ltUi;
         if (rtUi > pState->Gamepad.bRightTrigger) pState->Gamepad.bRightTrigger = rtUi;
-        if (fabsf(vr.leftThumbX)  > fabsf(pState->Gamepad.sThumbLX / 32767.0f))
-            pState->Gamepad.sThumbLX = FloatToSHORT(vr.leftThumbX);
-        if (fabsf(vr.leftThumbY)  > fabsf(pState->Gamepad.sThumbLY / 32767.0f))
-            pState->Gamepad.sThumbLY = FloatToSHORT(vr.leftThumbY);
+        float leftX = vr.leftThumbX, leftY = vr.leftThumbY;
+        if (keypadInput) {
+            const float padX = pState->Gamepad.sThumbLX / 32767.f, padY = pState->Gamepad.sThumbLY / 32767.f;
+            if (fabsf(padX) > fabsf(leftX)) leftX = padX;
+            if (fabsf(padY) > fabsf(leftY)) leftY = padY;
+            cvr::input::PublishKeypadStick(leftX, leftY, g_liveControls.xrLeftStickDeadzone);
+            // The native world-hit hook moves in keypad pixels. Sending these
+            // axes to the game's screen-space cursor too would apply them twice.
+            leftX = leftY = 0;
+            pState->Gamepad.sThumbLX = pState->Gamepad.sThumbLY = 0;
+        }
+        if (fabsf(leftX) > fabsf(pState->Gamepad.sThumbLX / 32767.0f))
+            pState->Gamepad.sThumbLX = FloatToSHORT(leftX);
+        if (fabsf(leftY) > fabsf(pState->Gamepad.sThumbLY / 32767.0f))
+            pState->Gamepad.sThumbLY = FloatToSHORT(leftY);
         if (fabsf(vr.rightThumbX) > fabsf(pState->Gamepad.sThumbRX / 32767.0f))
             pState->Gamepad.sThumbRX = FloatToSHORT(vr.rightThumbX);
+        // PUBLISHED FOR THE SCENE YAW. The camera composition needs the look axis on frames where
+        // the game does nothing with it -- see g_sceneStickYawRad in PatchCamera.cpp. Taken after
+        // the merge so it is the axis the game is being handed, controller or pad alike.
+        g_lookStickX.store(pState->Gamepad.sThumbRX / 32767.0f, std::memory_order_relaxed);
         if (fabsf(vr.rightThumbY) > fabsf(pState->Gamepad.sThumbRY / 32767.0f))
             pState->Gamepad.sThumbRY = FloatToSHORT(vr.rightThumbY);
         // The discrete ones go down; the analog trigger slots keep their real value, because the hands'
@@ -345,7 +401,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         OpenXRManager::Get().SetSharedSlot(vrshared::kLeftGripPressed, 0.0f);
         OpenXRManager::Get().SetSharedSlot(vrshared::kRightTriggerAnalog, vr.rightTrigger);
         OpenXRManager::Get().SetSharedSlot(vrshared::kLeftTriggerAnalog, vr.leftTrigger);
-        pState->dwPacketNumber++;
+        PublishMergedPacket(pState);
         return r;
     }
 
@@ -598,7 +654,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // The CET hand-to-holster mod reads this + the IN-GAME wrist-to-hip distances the plugin
     // publishes from the live FK pose to decide whether reaching for a visual holster + a grip
     // press should equip / unequip the corresponding weapon.
-    OpenXRManager::Get().SetSharedSlot(49, vr.rightGrip > 0.5f ? 1.0f : 0.0f);
+    OpenXRManager::Get().SetSharedSlot(49, !onLadder && vr.rightGrip > 0.5f ? 1.0f : 0.0f);
     // LEFT hand, for the smoking mod: the lighter is ignited by the left trigger and the cigarette
     // is taken to and from the mouth with either grip, so it needs all three. Only the right grip
     // was ever published; the left pair had no channel at all, and the CET bridge was reading [67]
@@ -607,7 +663,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // the lighter read as permanently at full trigger and the left grip as permanently held.
     OpenXRManager::Get().SetSharedSlot(vrshared::kLeftTriggerAnalog, vr.leftTrigger);
     OpenXRManager::Get().SetSharedSlot(vrshared::kLeftGripPressed,
-                                       vr.leftGrip > 0.5f ? 1.0f : 0.0f);
+                                       !onLadder && vr.leftGrip > 0.5f ? 1.0f : 0.0f);
     // Face buttons B / Y as flags, for gestures that want a button (the physical reload drops the magazine on
     // B). Y still reaches the game through the merge above; B no longer does -- it is the port's now, so a
     // magazine drop cannot also dodge.
@@ -671,8 +727,12 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
 
     // Left stick = locomotion (always merged when magnitude exceeds the
     // physical pad's so the game uses our values).
-    float lx = ApplyStickDeadzone(vr.leftThumbX, 0.12f);
-    float ly = ApplyStickDeadzone(vr.leftThumbY, 0.12f);
+    const bool analogMovement=cvr::input::UseAnalogMovement(g_liveControls.xrMovementSpeedMode,g_isInVehicle);
+    const float fullInput=cvr::input::StickFullInput(g_liveControls.xrMaxInputThreshold);
+    const float scannerLy=ApplyStickDeadzone(vr.leftThumbY,0.12f);
+    float lx=analogMovement?cvr::input::AnalogAxis(vr.leftThumbX,g_liveControls.xrLeftStickDeadzone,fullInput)
+                           :ApplyStickDeadzone(vr.leftThumbX,0.12f);
+    float ly=analogMovement?cvr::input::AnalogAxis(vr.leftThumbY,g_liveControls.xrLeftStickDeadzone,fullInput):scannerLy;
 
     // HOW FAR THE STICK IS ACTUALLY PUSHED, kept before the quantiser below rewrites it. The gesture
     // that means "to the stop" -- the sprint detent further down -- has to read the player's own
@@ -709,10 +769,10 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         if (!(navRearm >= 0.0f) || navRearm >= navFire) navRearm = navFire * 0.55f;
 
         int navDir = 0;
-        if (ly > navFire) navDir = +1;
-        else if (ly < -navFire) navDir = -1;
+        if (scannerLy > navFire) navDir = +1;
+        else if (scannerLy < -navFire) navDir = -1;
 
-        if (fabsf(ly) < navRearm) s_navArmedDir = 0;
+        if (fabsf(scannerLy) < navRearm) s_navArmedDir = 0;
         if (navDir != 0 && navDir != s_navArmedDir) {
             s_navArmedDir = navDir;
             SendListKey(navDir > 0);
@@ -721,7 +781,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         if (navDir != 0) ly = 0.0f;   // at the stop the axis is the list's, not the legs'
     }
 
-    const float lyDetent = ly;
+    const float lyDetent = ly==0 ? 0 : (analogMovement?vr.leftThumbY:ly);
 
     // ONE SPEED PER PUSH. The pad's analogue magnitude is the odd one out in this game: the keyboard
     // binds the same axis at val="1.0", so W runs, sprint is its own key and walk is its own toggle. A
@@ -738,7 +798,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     {
         static bool s_walking = false;
         const float mag = sqrtf(lx * lx + ly * ly);
-        if (CyberpunkVR_MoveTiers != 0 && !g_isInVehicle && mag > 1e-4f) {
+        if (!analogMovement && CyberpunkVR_MoveTiers != 0 && !g_isInVehicle && mag > 1e-4f) {
             float outMag = 1.0f;
             float walkMax = CyberpunkVR_MoveWalkMax;
             if (!(walkMax > 0.0f) || walkMax > 0.95f) walkMax = 0.0f;   // 0 = no band
@@ -755,18 +815,20 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
             const float k = outMag / mag;
             lx *= k;
             ly *= k;
-        } else if (mag <= 1e-4f) {
+        } else if (mag <= 1e-4f || analogMovement) {
             s_walking = false;   // released: the next push decides again from scratch
         }
     }
 
     if (fabsf(lx) > fabsf(pState->Gamepad.sThumbLX / 32767.0f)) pState->Gamepad.sThumbLX = FloatToSHORT(lx);
     if (fabsf(ly) > fabsf(pState->Gamepad.sThumbLY / 32767.0f)) pState->Gamepad.sThumbLY = FloatToSHORT(ly);
+    // Swimming gestures enter the player's native action reader. XInput
+    // remains the physical controller source and does not duplicate them.
 
-    // WHEEL STEERING. While a hand is holding the wheel, the tilt of the line through the controllers
-    // IS the left stick X -- the pose hook has already turned it into a stick value and faded it by the
-    // grab blend, so releasing the wheel hands the steering back over the same tenth of a second the
-    // arm takes to return. ASSIGNMENT, not max(): the whole point is that the wheel drives the car, and
+    // WHEEL STEERING. Controller angle changes drive left stick X immediately;
+    // the arm's visual grab blend does not attenuate steering. Releasing the last
+    // hand centers the synthetic input while the arm blends back. ASSIGNMENT, not max():
+    // the wheel drives the car, and
     // a thumb still resting on the stick must not fight it. Y is left alone (throttle and brake are the
     // triggers).
     //
@@ -780,10 +842,10 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         const float bR = cvr::anim::g_wheelBlendRight.load(std::memory_order_relaxed);
         const float bL = cvr::anim::g_wheelBlendLeft.load(std::memory_order_relaxed);
         if (g_isDriving.load(std::memory_order_relaxed) && (bR > 0.01f || bL > 0.01f)) {
-            float steer = cvr::anim::g_wheelSteer.load(std::memory_order_relaxed);
+            float steer = cvr::anim::WheelSteerInput();
             if (steer >  1.0f) steer =  1.0f;
             if (steer < -1.0f) steer = -1.0f;
-            pState->Gamepad.sThumbLX = FloatToSHORT(steer);
+            pState->Gamepad.sThumbLX = FloatToSHORT(cvr::anim::WheelGamepadSteer(steer));
         }
     }
 
@@ -801,7 +863,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // block is where a replacement goes if one is found.
     if (g_isDriving.load(std::memory_order_relaxed) && g_liveControls.xrWheelHorn != 0) {
         if (cvr::anim::g_wheelHornMask.load(std::memory_order_relaxed) != 0) {
-            ++CyberpunkVR_DebugWheelHornGestures;   // counted, not pressed
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugWheelHornGestures);   // counted, not pressed
         }
     }
 
@@ -918,7 +980,8 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         // puts the old outright block back.
         const bool crouchBlocks = (CyberpunkVR_SprintFromCrouch == 0) && crouched;
 
-        const bool detent = (lyDetent > 0.90f) && !g_isInVehicle && !crouchBlocks;
+        const bool fullForward=cvr::input::AtFullTravel(lyDetent,analogMovement,fullInput);
+        const bool detent = fullForward && !g_isInVehicle && !crouchBlocks;
         if (detent) s_detentMs += dtMs; else s_detentMs = 0.0;
         const double holdMs = (CyberpunkVR_SprintHoldMs >= 0) ? CyberpunkVR_SprintHoldMs : 200;
         const bool want = detent && (s_detentMs >= holdMs);
@@ -944,7 +1007,10 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         const bool haveFeedback = (sprintFlag >= 0);
         const bool sprinting = haveFeedback && (sprintFlag != 0);
 
-        if (!want) {
+        if (swim.water) {
+            wantSprint=cvr::swimming::SprintInput(want);
+            s_phaseMs=s_askMs=0.0;s_gaveUp=false;
+        } else if (!want) {
             wantSprint = false;
             s_phaseMs = 0.0;
             s_askMs = 0.0;
@@ -989,8 +1055,10 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     }
 
     // Right stick = camera turn / pitch.
-    float rx = ApplyStickDeadzone(vr.rightThumbX, 0.18f);
-    float ry = ApplyStickDeadzone(vr.rightThumbY, 0.18f);
+    const float legacyRx=ApplyStickDeadzone(vr.rightThumbX,.18f);
+    const float legacyRy=ApplyStickDeadzone(vr.rightThumbY,.18f);
+    float rx=analogMovement?cvr::input::AnalogAxis(vr.rightThumbX,g_liveControls.xrRightStickDeadzone,fullInput):legacyRx;
+    float ry=analogMovement?cvr::input::AnalogAxis(vr.rightThumbY,g_liveControls.xrRightStickDeadzone,fullInput):legacyRy;
 
     // Right stick pushed near FULL down => CROUCH. Same bind as the right-stick click
     // (R3) used today; we assert R3 while the stick is held fully down and consume the
@@ -1039,9 +1107,9 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
             if (!(th > 0.05f) || th > 1.0f) th = 0.50f;
             const int32_t rep = (CyberpunkVR_ScannerZoomRepeatMs > 0)
                                     ? CyberpunkVR_ScannerZoomRepeatMs : 200;
-            if (ry > th || ry < -th) {
+            if (legacyRy > th || legacyRy < -th) {
                 if (now >= s_nextStepMs) {
-                    SendZoomKey(ry > 0.0f);
+                    SendZoomKey(legacyRy > 0.0f);
                     s_nextStepMs = now + static_cast<uint64_t>(rep);
                 }
             } else {
@@ -1054,7 +1122,9 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         }
     }
 
-    const bool wantCrouch = (ry < -0.90f) && !g_isInVehicle && !deviceScreen && !scannerHold
+    const bool fullDown=cvr::input::AtFullTravel(analogMovement?vr.rightThumbY:ry,analogMovement,fullInput,true);
+    const bool fullUp=cvr::input::AtFullTravel(analogMovement?vr.rightThumbY:ry,analogMovement,fullInput);
+    const bool wantCrouch = fullDown && !inWater && !g_isInVehicle && !deviceScreen && !scannerHold
                             && !DeviceCamActive();   // in a camera the stick aims the camera
     if (wantCrouch) ry = 0.0f;
 
@@ -1076,6 +1146,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         static int      s_dashArmedDir = 0;   // 1 = fired on this push, waiting for the stick to return
         static uint64_t s_dashUntilMs  = 0;
         const bool allowDash = (CyberpunkVR_DashStickUp != 0)
+                               && !inWater
                                && !scannerHold          // the scanner owns this stick
                                && !deviceScreen         // the stick is scrolling a screen
                                && !DeviceCamActive()    // in a camera it is aiming the camera
@@ -1083,13 +1154,13 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
                                && (g_menuModeValue == 0);    // in menus it navigates
         if (allowDash) {
             const uint64_t now = GetTickCount64();
-            if (ry > 0.90f) {
+            if (fullUp) {
                 if (s_dashArmedDir == 0) {
                     s_dashArmedDir = 1;
                     const int ms = (CyberpunkVR_DashPulseMs > 0) ? CyberpunkVR_DashPulseMs : 100;
                     s_dashUntilMs = now + static_cast<uint64_t>(ms);
                 }
-            } else if (ry < 0.50f) {
+            } else if (legacyRy < 0.50f) {
                 s_dashArmedDir = 0;
             }
             dashPulse = (now < s_dashUntilMs);
@@ -1098,7 +1169,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
             s_dashUntilMs = 0;
         }
     }
-    if (ry > 0.90f && !deviceScreen) ry = 0.0f;   // consumed, exactly as the crouch half is
+    if (fullUp && !deviceScreen) ry = 0.0f;   // consumed, exactly as the crouch half is
 
     // Suppress pitch from the stick if the user wants HMD-only pitch.
     // ...but never on a device screen: there this axis is not camera pitch at all, it is the
@@ -1109,46 +1180,31 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // on-foot heading instead, so in a camera it turned a body nobody can see while the view -- composed
     // from the lens -- did not move, and the stick could not pan the camera because its X never reached
     // the game. Off, the game's own continuous camera aim works exactly as it does on a flat screen.
-    if (g_liveControls.xrSnapTurn != 0 && !DeviceCamActive()) {
-        // True instant snap turn: route the right-stick flick directly into a
-        // yaw delta the game applies in ONE frame via the OnFootDeltaHook.
-        // Stick X is consumed (zeroed) so the game never sees stick-driven
-        // smooth rotation. The stick must come back below the re-arm threshold
-        // before another snap can fire -- a held stick produces exactly one snap.
-        //
-        // TO THE STOP, like every other gesture here. This used to fire at HALF deflection and re-arm
-        // at 0.15, so a resting thumb or a wrist drifting while walking turned the player -- the
-        // accidental snaps. See CyberpunkVR_SnapTurnStickFire for the numbers and why the re-arm sits
-        // where it does.
-        float fire = CyberpunkVR_SnapTurnStickFire;
-        if (!(fire > 0.05f) || fire > 1.0f) fire = 0.90f;
-        float rearm = CyberpunkVR_SnapTurnStickRearm;
-        if (!(rearm >= 0.0f) || rearm >= fire) rearm = fire * 0.55f;
-        int wantDir = 0;
-        if (rx > fire) wantDir = +1;
-        else if (rx < -fire) wantDir = -1;
-
-        if (fabsf(rx) < rearm) g_xinputSnapArmedDir = 0;
-
-        if (wantDir != 0 && wantDir != g_xinputSnapArmedDir) {
-            g_xinputSnapArmedDir = wantDir;
-            const float angleDeg = g_liveControls.xrSnapTurnAngleDeg > 0.0f
-                ? g_liveControls.xrSnapTurnAngleDeg : 30.0f;
-            // In CP2077 the on-foot yaw delta is signed such that positive =
-            // turn LEFT, so we negate wantDir to make stick-right -> turn right.
-            const float deltaDeg = -(float)wantDir * angleDeg;
-            LONG bits;
-            memcpy(&bits, &deltaDeg, sizeof(bits));
-            InterlockedExchange(&g_pendingSnapYawDeltaBits, bits);
-        }
-        // Stick X is consumed by the snap turn, so do not pass it to the game. Y is NOT: snap
-        // turning is about yaw, and zeroing ry here took the stick's pitch away even from users who
-        // asked to keep it -- the check above already zeroes it for those who did not (dabinn,
-        // TofuExpress 11974ee5).
-        rx = 0.0f;
+    // ...AND NOT IN A SCENE THAT TURNS NOTHING ITSELF. Same shape as the camera above and for the
+    // same reason: this block CONSUMES stick X, and in such a scene the port's own yaw is the only
+    // thing that can turn the view -- so a snap turn here spends the axis on a body heading the
+    // scene ignores and leaves the view frozen. Reported exactly that way: "если включен snap turn
+    // то он не крутит камеру".
+    // Vehicles and attached ladders use the game's continuous camera turn.
+    // Clear queued snaps and require stick release before snapping on exit.
+    const bool snapEnabled=g_liveControls.xrSnapTurn != 0 && !DeviceCamActive() &&
+        !SceneStickYawArmed() && !cvr::input::NativeOwnsTurn(
+            g_isInVehicle,g_vehicleState.load(std::memory_order_relaxed),cvr::ladder::Active());
+    const auto turn=cvr::input::RouteTurn(rx,snapEnabled,g_xinputSnapArmedDir,
+        g_liveControls.xrSnapTurnAngleDeg,CyberpunkVR_SnapTurnStickFire,CyberpunkVR_SnapTurnStickRearm);
+    if (turn.clearPending) InterlockedExchange(&g_pendingSnapYawDeltaBits,0);
+    else if (turn.snapDegrees!=0) {
+        LONG bits;
+        memcpy(&bits,&turn.snapDegrees,sizeof(bits));
+        InterlockedExchange(&g_pendingSnapYawDeltaBits,bits);
     }
+    rx=turn.axis;
 
     if (fabsf(rx) > fabsf(pState->Gamepad.sThumbRX / 32767.0f)) pState->Gamepad.sThumbRX = FloatToSHORT(rx);
+    // PUBLISHED ON THE PATH THE GAME ACTUALLY PLAYS ON. The first attempt at this sat beside the
+    // merge in the MENU branch, which never runs during play -- the accumulator read a flat 0.0
+    // with its gate wide open, which is how that was caught rather than guessed at.
+    g_lookStickX.store(pState->Gamepad.sThumbRX / 32767.0f, std::memory_order_relaxed);
     if (fabsf(ry) > fabsf(pState->Gamepad.sThumbRY / 32767.0f)) pState->Gamepad.sThumbRY = FloatToSHORT(ry);
 
     // Stick-gesture buttons: full-forward left stick => sprint (L3), full-down right
@@ -1193,7 +1249,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // The ordinary scroll-and-confirm list is unaffected, and it is what a car conversation is.
     if (CyberpunkVR_VehicleDialogConfirmOnA != 0) {
         static bool s_aWas = false;
-        const bool aDown = mounted && gameplayScreen && (vr.buttons & 0x1000) != 0;
+        const bool aDown = vehicleButtons.confirmOnA && gameplayScreen && (vr.buttons & 0x1000) != 0;
         if (aDown && !s_aWas) synthButtons |= 0x4000;   // XINPUT_GAMEPAD_X -> DialogConfirm
         s_aWas = aDown;
     }
@@ -1208,38 +1264,14 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // of the car. Mirrored level, brushing X while driving ejected them into a ragdoll, which reads as
     // a collision or physics bug and not as a button at all. Held, a stray tap costs nothing.
     {
-        static uint64_t s_exitDownSinceMs = 0;
-        const bool xHeld = mounted && gameplayScreen && (vr.buttons & 0x4000) != 0;
-        if (!xHeld) {
-            s_exitDownSinceMs = 0;
-        } else {
-            const uint64_t now = GetTickCount64();
-            if (s_exitDownSinceMs == 0) s_exitDownSinceMs = now;
-            const uint64_t need = (CyberpunkVR_VehicleExitHoldMs > 0)
-                                      ? static_cast<uint64_t>(CyberpunkVR_VehicleExitHoldMs) : 400;
-            if (now - s_exitDownSinceMs >= need) {
-                synthButtons |= 0x2000;   // XINPUT_GAMEPAD_B = ExitVehicle_Button
-            }
-        }
+        static cvr::input::VehicleExitHold exitHold;
+        const uint64_t need=CyberpunkVR_VehicleExitHoldMs>0 ? uint64_t(CyberpunkVR_VehicleExitHoldMs) : 400;
+        if(exitHold.Update(vehicleButtons.exitOnX && gameplayScreen,(vr.buttons&0x4000)!=0,GetTickCount64(),need))
+            synthButtons |= 0x2000;   // XINPUT_GAMEPAD_B = ExitVehicle_Button
     }
     pState->Gamepad.wButtons |= synthButtons;
 
-    // Bump packet number on any change so XInput consumers latch it.
-    static uint16_t s_lastButtons = 0;
-    static uint16_t s_lastSynth = 0;
-    static BYTE s_lastLT = 0, s_lastRT = 0;
-    // The trigger bytes compared here are the MERGED ones, not the raw VR values: the latched vehicle
-    // throttle walks bRightTrigger up and down while the VR trigger sits still, and a consumer that
-    // only re-reads on a new packet number would never see the trim move.
-    const BYTE outLT = pState->Gamepad.bLeftTrigger;
-    const BYTE outRT = pState->Gamepad.bRightTrigger;
-    if (vr.buttons != s_lastButtons || synthButtons != s_lastSynth || outLT != s_lastLT || outRT != s_lastRT) {
-        pState->dwPacketNumber++;
-        s_lastButtons = vr.buttons;
-        s_lastSynth = synthButtons;
-        s_lastLT = outLT;
-        s_lastRT = outRT;
-    }
+    PublishMergedPacket(pState);
     return r;
 }
 

@@ -39,6 +39,7 @@
 #include "Core/VrCoreShared.hpp"
 #include "Core/CoreInternal.hpp"
 #include "Camera/CameraLink.hpp"
+#include "Camera/CameraState.hpp"
 #include "Hooks/Hook.hpp"
 
 static float GetDesiredGameHorizontalFov() {
@@ -99,15 +100,16 @@ extern "C" float CyberpunkVRPort_HalfIpd() { return GetDesiredHalfIpd(); }
 // SAME instant; mix two instants and the hand lands in the wrong WORLD place, by the head motion
 // in between -- which is why it wobbles when the head moves and sits still when it does not.
 //
-// Only one term of the anchor is fast: the head position. Sliders, bakes, world scale and the
-// body heading all change slowly. So the slow half is cached here, and the hand publish (which
-// owns the fast half -- it flushes the very sample the hands were taken with) builds the same
-// worldDelta from it. See FlushHandsToShared.
-volatile float g_anchorOff[3] = {0.0f, 0.0f, 0.0f};   // sliders + camBake + eyeBake
-volatile float g_anchorCy = 1.0f, g_anchorSy = 0.0f;  // flat body heading
-volatile float g_anchorScale = 1.0f;
-volatile int   g_anchorRecipeValid = 0;
+// Locate publishes a framed recipe through CameraLink. Model-space calibration
+// follows entity yaw; physical tracking follows entityYaw - bodyRealign.
 extern "C" __declspec(dllexport) int CyberpunkVR_CoherentHandAnchor = 1;
+
+float cvr::camera::BodyAnchorYaw(float fallback) {
+    if (g_isInVehicle || !CyberpunkVR_EngineBodyYawValid) return fallback;
+    const float z=CyberpunkVR_EngineBodyYawZ, w=CyberpunkVR_EngineBodyYawW;
+    if (!std::isfinite(z) || !std::isfinite(w) || z*z+w*w<0.5f) return fallback;
+    return 2.0f*std::atan2(z,w);
+}
 
 static bool IsFiniteFloat(float value) {
     return std::isfinite(value);

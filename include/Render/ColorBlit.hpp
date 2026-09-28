@@ -39,7 +39,10 @@ public:
                        int mode = 0,
                        bool pixelExact = false,
                        float offX = 0.0f,
-                       float offY = 0.0f);
+                       float offY = 0.0f,
+                       float width = 0.0f, float height = 0.0f,
+                       const float* tint = nullptr,
+                       uint32_t sourceMip = 0, uint32_t targetMip = 0, int blurAxis = 0);
 
     // The engine's own HUD composite, ported from PipelineState_576 (the indirect compute
     // dispatch that produces the final colour). Constants below default to the values read out
@@ -91,6 +94,10 @@ public:
         // headset, so the caller decides via CyberpunkVR_HudDistanceM and the note there explains both
         // sides.
         float hudShiftU      = 0.0f;
+        float layerOnly      = 0.0f;
+        float panelBrightness= 1.0f;
+        float panelShadow    = 1.0f;
+        float panelGlow      = 1.0f;
     };
 
     // Full composite: scene + HUD -> dstColor (which must be in RENDER_TARGET). Unlike
@@ -125,9 +132,10 @@ public:
     // Descriptors are consumed when the command list EXECUTES, not when it is recorded, and
     // the submit path keeps up to three frames in flight. A single SRV/RTV slot would be
     // rewritten by frame N+1 while the GPU is still reading it for frame N.
-    // Two passes per frame (blit + HUD overlay) share this ring, so it is three frames' worth
-    // of BOTH -- six, not three.
-    static constexpr uint32_t kSlots = 6;
+    // Regular eye capture uses two passes per frame. Separate HUD windows use a
+    // dedicated blitter for each fenced producer frame.
+    // HUD panel owns one blitter per fenced frame, with at most 64 source windows.
+    static constexpr uint32_t kSlots = 96; // 64 sprites + mip/blur/style passes, per fenced panel slot
 
 private:
     std::mutex m_mutex;
@@ -135,6 +143,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_pso;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoOverlay;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoOverlayCopy; // RGBA replace for mip/blur passes
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoOverlayAdd;   // ONE / ONE
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoOverlayStraight;  // SRC_ALPHA / INV_SRC_ALPHA
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSigHud;   // 2 SRVs + root constants

@@ -1,3 +1,4 @@
+#include "Utils/DebugGate.hpp"
 // Recoil that reaches the HANDS -- the kick the weapon gives the shooter, not the camera.
 //
 // The game already kicks the camera (an additive spine animation, base\animations\weapon\firearms\*,
@@ -326,7 +327,7 @@ extern "C" void RecoilOnShot() {
 
 // Advance both springs to now. Called once per fresh solve, before either arm is built.
 extern "C" void RecoilTick() {
-    ++CyberpunkVR_DebugRecoilTicks;
+    CVR_DIAGNOSTIC(++CyberpunkVR_DebugRecoilTicks);
     if (!CyberpunkVR_HandRecoil) {
         g_spring[0] = Spring{};
         g_spring[1] = Spring{};
@@ -343,7 +344,7 @@ extern "C" void RecoilTick() {
     if (seq != g_seenSeq) {
         const uint64_t shots = seq - g_seenSeq;
         g_seenSeq = seq;
-        CyberpunkVR_DebugRecoilShots += shots;
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugRecoilShots += shots);
         // ...and the burst walks the muzzle up. A fraction of the angle THIS shot will reach, per
         // round, so a magnum climbs faster than a smart pistol for the same reason it kicks harder.
         g_climbDeg += WeaponRiseDeg() * GripRiseFactor() * CyberpunkVR_RecoilClimbFrac

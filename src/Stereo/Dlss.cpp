@@ -1,3 +1,6 @@
+#include "Utils/DebugGate.hpp"
+#include "Render/NativeStereoProbe.hpp"
+#include "Render/CommandResources.hpp"
 // Dlss -- Streamline and DLSS, made to agree about two views.
 //
 // Five detours: the Streamline constant upload, the DLSS constants, the evaluate call, the apply, and
@@ -10,6 +13,8 @@
 // appears in this module's history at all.
 
 #include "Stereo/SyncStereo.hpp"
+#include "Framegen/Inputs.hpp"
+#include "Camera/ImagePoseIdentity.hpp"
 #include "Utils/StereoLog.hpp"
 #include "Stereo/VrcamConfig.hpp"   // vrcam.json access + CName hashing, shared with the launcher
 #include "Render/ColorBlit.hpp"   // HUD debug overlay on the mirror image
@@ -57,7 +62,7 @@ static __int64 __fastcall Detour_SlConstants(void* a1, void* a2, void* a3) {
                 if (ctx && *reinterpret_cast<uint64_t*>(ctx + 0x28) == 0 &&
                     sl_view_obj(a2) == want &&
                     g_main_view_ctx.exchange(ctx, std::memory_order_release) != ctx) {
-                    ++CyberpunkVR_DebugMainCtxBinds;
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugMainCtxBinds);
                     CyberpunkVR_DebugMainCtx = static_cast<uint64_t>(ctx);
                 }
             }
@@ -78,7 +83,7 @@ static __int64 __fastcall Detour_SlConstants(void* a1, void* a2, void* a3) {
                         CyberpunkVR_DebugVrcamAaMode = *mode;
                         CyberpunkVR_DebugVrcamBuildModeF90 = build_mode;
                         uint32_t want = CyberpunkVR_DebugMainAaMode;   // mirror main
-                        if (*mode != want) { *mode = want; ++CyberpunkVR_DebugSlHistoryHits; }
+                        if (*mode != want) { *mode = want; CVR_DIAGNOSTIC(++CyberpunkVR_DebugSlHistoryHits); }
                     } else if (key == 0) {
                         CyberpunkVR_DebugMainAaMode = *mode;           // observe main
                         CyberpunkVR_DebugMainBuildModeF90 = build_mode;
@@ -177,7 +182,7 @@ static __int64 __fastcall Detour_SlConstants(void* a1, void* a2, void* a3) {
                             CyberpunkVR_DebugVrcamWantFov = static_cast<float>(want);
                         }
                     }
-                    ++CyberpunkVR_DebugForceCamHits;
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugForceCamHits);
                 }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -212,9 +217,10 @@ static __int64 __fastcall Detour_DlssConst(void* a1, unsigned int a2) {
                 *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(a1) + DLSS_JITTER_OFF)     = 0.0f;
                 *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(a1) + DLSS_JITTER_OFF + 4) = 0.0f;
             }
-            ++CyberpunkVR_DebugVrcamDlssConstHits;
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugVrcamDlssConstHits);
         } __except (EXCEPTION_EXECUTE_HANDLER) { flipped = false; }
     }
+    cvr::framegen::RecordNativeCamera(a1,t_vrcam_sl_active ? 2u : 1u);
     __int64 r = g_orig_dlss_const(a1, a2);
     if (flipped) {
         __try {
@@ -245,7 +251,7 @@ static void __fastcall Detour_DlssEval(void* a1, void* a2, int a3, int a4, int a
                 if (g_vrcam_dlss_cache_valid)
                     memcpy(reinterpret_cast<void*>(cache_addr), g_vrcam_dlss_cache, DLSS_CACHE_SZ);
                 flipped = true;
-                ++CyberpunkVR_DebugVrcamDlssEvalHits;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugVrcamDlssEvalHits);
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) { flipped = false; }
     }
@@ -300,7 +306,7 @@ static __int64 __fastcall Detour_ApplyDlss(void* a1, void* a2) {
                         *reinterpret_cast<uint64_t*>(q) = cur | DLSS_EVAL_FLAG_BIT;   // set & keep
                     else if (!want && (cur & DLSS_EVAL_FLAG_BIT))
                         *reinterpret_cast<uint64_t*>(q) = cur & ~DLSS_EVAL_FLAG_BIT;  // unstick
-                    ++CyberpunkVR_DebugVrcamApplyDlssHits;
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugVrcamApplyDlssHits);
                 }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -370,6 +376,7 @@ void STDMETHODCALLTYPE hk_RSSetViewports(
     const CommandListVtableHook* e = command_list_hook_entry(self);
     PFN_RSSetViewports orig = e ? e->viewports_original : nullptr;
     if (orig) orig(self, count, vps);
+    if(CyberpunkVR_NativeStereoProbeState.load(std::memory_order_relaxed)==1)cvr::stereo::native_probe::Viewports(self,count,vps);
 }
  void STDMETHODCALLTYPE hk_RSSetScissorRects(
         ID3D12GraphicsCommandList* self, UINT count, const D3D12_RECT* rects) {
@@ -377,6 +384,7 @@ void STDMETHODCALLTYPE hk_RSSetViewports(
     const CommandListVtableHook* e = command_list_hook_entry(self);
     PFN_RSSetScissorRects orig = e ? e->scissor_original : nullptr;
     if (orig) orig(self, count, rects);
+    if(CyberpunkVR_NativeStereoProbeState.load(std::memory_order_relaxed)==1)cvr::stereo::native_probe::Scissors(self,count,rects);
 }
  HRESULT STDMETHODCALLTYPE hk_GfxReset(
         ID3D12GraphicsCommandList* self, ID3D12CommandAllocator* alloc,
@@ -391,9 +399,21 @@ void STDMETHODCALLTYPE hk_RSSetViewports(
     // finished-frame path latched or learned on this list belonged to the previous recording; carrying
     // it over would let a list that MAIN now records into look like the second view's.
     if (t_final_list == self) { t_final_res = nullptr; t_final_list = nullptr; t_final_writes = 0; }
+    // The outline-swap ordinal counts within ONE recording. Resetting it here is what makes it
+    // usable at all: the previous version reset only on a node change, so with the same node
+    // recurring all session the ordinal matched exactly once per session.
+    vision_swap_list_reset();
     const CommandListVtableHook* e = command_list_hook_entry(self);
     PFN_GfxReset orig = e ? e->reset_original : nullptr;
-    return orig ? orig(self, alloc, pso) : S_OK;
+    const HRESULT result=orig ? orig(self,alloc,pso) : S_OK;
+    if(orig && SUCCEEDED(result)) {
+        if(CyberpunkVR_NativeStereoProbeState.load(std::memory_order_relaxed)==1)
+            cvr::stereo::native_probe::Reset(self,pso,e->shading_state_known);
+        cvr::gpu::ResetCommandResources(self);
+        cvr::camera::ResetImagePoseList(self);
+        cvr::framegen::ResetList(self);
+    }
+    return result;
 }
 
 // EXPERIMENT (attempt 2): overriding only the render-res struct was DISPROVEN live -- the
@@ -429,7 +449,7 @@ static __int64 __fastcall Detour_RenderRes(void* a1, void* a2, void* a3) {
                 // seen by the builder. A/B via CyberpunkVR_VrcamClearFlag64.
                 if (CyberpunkVR_VrcamClearFlag64) {
                     *reinterpret_cast<uint64_t*>(view + DLSS_FLAGSET_OFF) &= ~1ULL;
-                    InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugClearFlag64Hits));
+                    CVR_DIAGNOSTIC(InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugClearFlag64Hits)));
                 }
                 // PLAN B (live-tunable): match MAIN's view+0x17D0 group flags so vrcam SKIPS the
                 // raster tonemap (group 20) and composites via the COMPUTE path like main -> no crop.
@@ -445,7 +465,7 @@ static __int64 __fastcall Detour_RenderRes(void* a1, void* a2, void* a3) {
                     *p = nv;
                     CyberpunkVR_DebugP17D0Before = before;
                     CyberpunkVR_DebugP17D0After  = nv;
-                    InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugP17D0Hits));
+                    CVR_DIAGNOSTIC(InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugP17D0Hits)));
                 }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) { vrcam = false; }
@@ -476,7 +496,7 @@ static __int64 __fastcall Detour_RenderRes(void* a1, void* a2, void* a3) {
                 // publish vrcam render+output dims for the DLSS const/eval subrect+MV fix
                 g_vrcam_dlss_rw = rW; g_vrcam_dlss_rh = rH;
                 g_vrcam_dlss_ow = tW; g_vrcam_dlss_oh = tH;
-                InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugVrcamResScaleHits));
+                CVR_DIAGNOSTIC(InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugVrcamResScaleHits)));
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }

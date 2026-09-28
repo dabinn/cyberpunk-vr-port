@@ -317,6 +317,10 @@ local function killCameraRecoil(wpn, wid)
             or string.find(low, 'melee', 1, true)   then cls = 5
         end
     end
+    -- Cyberware names such as Cyb_StrongArms and Cyb_NanoWires do not contain
+    -- the blade/fists tokens above. Use the game's melee predicate as the
+    -- authority, including modded melee records and cyberware arms.
+    pcall(function() if WeaponObject.IsMelee(wpn:GetItemID()) then cls = 5 end end)
     if type(SetVRWeaponClass) == 'function' then SetVRWeaponClass(cls) end
     -- ...AND INTO THE PROBE FILE, not only into the log. The module's spdlog stops accepting lines after
     -- a mod reload (measured, and the reason this probe file exists at all), so anything that has to be

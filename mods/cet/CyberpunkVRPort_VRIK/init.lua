@@ -338,8 +338,13 @@ local settingsPollTimer = 0.0
 local observersRegistered = false
 local recenterPending = -1.0        -- seconds until a queued recenter fires; <0 = idle
 
--- dxgi writes vrik_settings.ini (disable_mouse_y); follow the overlay checkbox.
+-- Read the live native setting without sandboxed file IO on the game thread.
+-- The bridge file remains a compatibility fallback for an older plugin.
 local function readVrikSettings()
+    if type(GetVRMouseYDisabled)=='function' then
+        mouseDisableEnabled=GetVRMouseYDisabled()
+        return
+    end
     local f = io.open('vrik_settings.ini', 'r')
     if not f then return end
     local t = f:read('*a') or ''

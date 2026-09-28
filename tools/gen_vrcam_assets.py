@@ -65,9 +65,16 @@ ENT_FILES = [
 # src/Stereo/SyncStereo.cpp) and the camera writer accepts either that or the plain vrcam_ name as the
 # second view, so a third prefix would need a plugin build and a selector change to buy nothing. The two
 # replacers are never live at the same time, and their names cannot collide with V's own set.
+# Bella is the q304 netrunner player replacer (Character.q304_netrunner_replacer_bella),
+# confirmed live with appearance bella_replacer_fpp and no authored VRCAM. Its native
+# camera uses the same slots/camera binding as Johnny, so it shares this set as well.
+# q000 VR training uses tutorial_replacer (Character.q000_vr_replacer), also
+# with slots/camera. Its preview/gameplay entity otherwise has no second-eye camera.
 REPLACER_FILES = [
     "base/characters/entities/player/replacer/braindance_replacer.ent.json",
     "base/characters/entities/player/replacer/johnny_silverhand_replacer.ent.json",
+    "base/characters/entities/player/replacer/tutorial_replacer.ent.json",
+    "ep1/characters/entities/player/replacer/bella_replacer.ent.json",
 ]
 REPLACER_PREFIX = "vrcam_braindance_"
 DTEX_DIR = "base/media/tv/entities"

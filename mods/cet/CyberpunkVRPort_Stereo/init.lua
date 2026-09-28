@@ -1,6 +1,8 @@
--- CyberpunkVRPort_Stereo — the Lua half of the VRCAM view.
+-- CyberpunkVRPort_Stereo — script-side VRCAM activation and HUD source publication.
 --
--- It exists for exactly one thing the native plugin cannot do: switching an entity component on.
+-- Game objects are accessed only after CET onInit. Binding registration belongs
+-- to module loading, when CET exposes registerHotkey.
+-- VRCAM activation switches an entity component on.
 -- entRenderToTextureCameraComponent.isEnabled is only reachable through the game's RTTI, which is
 -- script-side, so the plugin asks and this mod does it. Everything else about the second view --
 -- the view key, the render graph, the camera, the submit -- is native.
@@ -16,25 +18,35 @@
 -- talked to no longer exists, and the in-game overlay is drawn by the plugin now.
 
 local VrcamSel = require("modules/vrcam_select")
+local HudPanel = require("modules/hud_panel")
+local VrOverlay = require("modules/vr_overlay")
+local KeypadInput = require("modules/keypad_input")
+local StoryAttention = require("modules/story_attention")
 
-local Stereo = { ready = false, VrcamSel = VrcamSel }
+local Stereo = { ready = false, VrcamSel = VrcamSel, HudPanel = HudPanel, VrOverlay = VrOverlay, KeypadInput = KeypadInput, StoryAttention = StoryAttention }
+
+-- Bind in CET > Bindings if vrcam.json was edited by hand.
+registerHotkey("vrcam_reload_selection", "VRCAM: re-read vrcam.json", function()
+    VrcamSel.reload()
+    print("[Stereo.VRCAM] " .. VrcamSel.status())
+end)
 
 registerForEvent("onInit", function()
     VrcamSel.init()
     Stereo.ready = true
     print("[Stereo] " .. VrcamSel.status())
 
-    -- Bind in CET > Bindings if you edit vrcam.json by hand. The launcher's own writes are picked
-    -- up on the next load anyway; this is for changing the pick without leaving the game.
-    registerHotkey("vrcam_reload_selection", "VRCAM: re-read vrcam.json", function()
-        VrcamSel.reload()
-        print("[Stereo.VRCAM] " .. VrcamSel.status())
-    end)
 end)
 
 registerForEvent("onUpdate", function(dt)
     if not Stereo.ready then return end
     VrcamSel.tick(dt)
+    HudPanel.tick()
+    VrOverlay.tick()
+    KeypadInput.tick(dt, VrOverlay.active)
+    StoryAttention.tick(dt, VrOverlay.active)
 end)
+
+registerForEvent("onShutdown", function() StoryAttention.shutdown();KeypadInput.shutdown();VrOverlay.shutdown();HudPanel.shutdown() end)
 
 return Stereo

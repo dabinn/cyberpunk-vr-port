@@ -1,3 +1,4 @@
+#include "Utils/DebugGate.hpp"
 // Profiler -- where the two-view CPU cost actually goes.
 //
 // QPC accumulators split main vs vrcam, drained and published once per frame from the Present hook.
@@ -72,7 +73,7 @@ extern "C" __declspec(dllexport) int32_t  CyberpunkVR_ProfEnable = 0;   // maste
 // Called once per frame from the overlay's Present hook (via the exported symbol
 // below); averages the window and resets. window = frames since last publish.
 extern "C" __declspec(dllexport) void CyberpunkVR_ProfPublish() {
-    if (!g_qpc_to_ms) return;
+    if (!CyberpunkVR_ProfEnable || !g_qpc_to_ms) return;
     const int64_t now = prof_now();
     const int64_t prev = g_prof_frame_last.exchange(now, std::memory_order_relaxed);
     if (prev) CyberpunkVR_ProfFrameMs = (double)(now - prev) * g_qpc_to_ms;
@@ -367,7 +368,7 @@ void prof_pair_add(uint8_t rtid, uint32_t rva, int64_t self, bool vrcam,
         }
         return;
     }
-    ++CyberpunkVR_DebugProfPairOverflow;   // table full: rows would be lost, dump says so
+    CVR_DIAGNOSTIC(++CyberpunkVR_DebugProfPairOverflow);   // table full: rows would be lost, dump says so
 }
 // Work-fn RVA -> CRenderNode name, generated from the project's own RE census
 // (engine_re/dumps/nodes/nodes_index.md, 163 nodes). This REPLACES the old hand-written

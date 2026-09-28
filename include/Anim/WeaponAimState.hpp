@@ -59,7 +59,7 @@ inline constexpr uintptr_t kWaNormalizeFn  = 0x13DE80;
 inline constexpr uintptr_t kSsOffset = 0x79ACA0;
 inline constexpr uintptr_t kGoOffset = 0x802390;
 inline constexpr uintptr_t kXfOffset = 0x1D92A0;
-inline constexpr uintptr_t kFireOffset = 0x4E4AFC;
+// 0x4E4AFC is render-view preparation, not a weapon entry point.
 inline constexpr uintptr_t kTraceOffset = 0x1303EC;
 
 // ---- the shared globals ----

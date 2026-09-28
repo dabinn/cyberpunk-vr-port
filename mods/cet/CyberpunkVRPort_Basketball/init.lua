@@ -47,6 +47,9 @@ local function capsQueriesOff(now)
     if not capsCache or now - capsScanAt > 5.0 then
         local pl = Game.GetPlayer()
         if not pl then return end
+        -- Empty scans used to convert every component name through CET every
+        -- frame. The native prefilter still checks the current list each tick.
+        if type(VRShouldScanBodyCapsules)=='function' and not VRShouldScanBodyCapsules(pl) then return end
         local found = {}
         local ok = pcall(function()
             local cs = pl:GetComponents()

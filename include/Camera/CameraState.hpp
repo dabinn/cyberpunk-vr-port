@@ -27,8 +27,10 @@ namespace RED4ext { struct CProperty; struct CBaseFunction; }
 extern RED4ext::CProperty* g_equippedWeaponProp;
 extern RED4ext::CProperty* g_isAimingProp;
 extern RED4ext::CProperty* g_mountedVehicleProp;
-// PlayerPuppet::sceneTier (GameplayTier, int32): 0 = Tier1_FullGameplay .. 3 =
-// Tier4_FPPCinematic, 4 = Tier5_Cinematic. Read straight off the player -- no blackboard and no
+extern RED4ext::CProperty* g_vehicleStateProp;
+extern std::atomic<int> g_vehicleState;
+// PlayerPuppet::sceneTier (GameplayTier, int32): 0 = Undefined, 1 = Tier1_FullGameplay ..
+// 4 = Tier4_FPPCinematic, 5 = Tier5_Cinematic. Read straight off the player -- no blackboard and no
 // CET involved, see the cutscene-suspend block in LocateCamera.cpp.
 extern RED4ext::CProperty* g_sceneTierProp;
 // VehicleComponent::IsDriver(GameInstance, GameObject) -- a STATIC script function, so it is executed
@@ -44,6 +46,11 @@ extern RED4ext::CBaseFunction* g_isDriverFunc;
 // write and every read. Atomic because the writer is the camera thread and the reader is the
 // animation thread.
 extern std::atomic<int> g_sceneTier;
+// The look axis as the game receives it, published by the XInput merge and consumed by the camera
+// composition. -1..1, right positive.
+extern std::atomic<float> g_lookStickX;
+// True on the frames where the port supplies the view's yaw itself, because the game supplies none.
+bool SceneStickYawArmed();
 // MAIN's camera object, latched by the PatchCamera owner classification. Needed outside that
 // classification by the ADS weapon-zoom sync in LocateCamera.cpp.
 extern std::atomic<uintptr_t> g_camObjMain;
@@ -68,11 +75,10 @@ extern std::atomic<uintptr_t> g_camObjVrcam;
 //   `armed` stays 0 until the port has re-identified BOTH cameras since the last disarm, the name
 //   offset is known, and no braindance is running.
 //
-//   A REPLACED CAMERA OBJECT -- noticing a new object needs the name read on an UNLATCHED
-//   component, which is exactly what the fast path skips. Hence the heartbeat: the worker thread
-//   disarms every 200 ms, and re-arming takes a full pass in which both cameras are recognised by
-//   the ordinary route. A replaced camera is therefore found within one heartbeat instead of being
-//   rejected forever by a stale pointer -- the one failure here that would be silent AND permanent.
+//   A REPLACED CAMERA OBJECT -- the worker disarms when a camera stops updating. A player
+//   identity change also clears MAIN and disarms immediately: an obsolete puppet may still
+//   animate, so advancing counters alone cannot detect that replacement. The classifier checks
+//   MAIN's owning entity against GetPlayer before keeping or acquiring its latch.
 struct alignas(64) PatchFastPath {
     volatile uintptr_t owner[3];   // +0x00 main, +0x08 vrcam, +0x10 device
     volatile uint32_t  armed;      // +0x18
@@ -106,7 +112,8 @@ void TakeoverLensRelease();
 // Write a component's world transform (position from `base`, plus this eye's half IPD) and make the
 // engine's own change notification, so the render side rebuilds the view. Defined in LocateCamera.cpp.
 void BdPushTransformOnce(uintptr_t comp, float qx, float qy, float qz, float qw,
-                         bool secondEye, const int32_t* base);
+                         bool secondEye, const int32_t* base,
+                         const OpenXRHeadPose* pose=nullptr,uint64_t poseId=0);
 // Compose the head onto the taken-over lens and write it there; see CyberpunkVR_LensHeadWrite.
 void PushLensHeadTransform(const float* quat);
 extern "C" __declspec(dllexport) extern int32_t  CyberpunkVR_LensHeadWrite;
@@ -196,10 +203,11 @@ extern "C" __declspec(dllexport) extern int      CyberpunkVR_VrikNativeFramePair
 extern "C" __declspec(dllexport) extern int      CyberpunkVR_VrikVehicleFullEntityQuat;
 extern "C" __declspec(dllexport) extern int      CyberpunkVR_VehicleAnchorFromViewYaw;
 extern "C" __declspec(dllexport) extern int      CyberpunkVR_CamWriteOrientInVehicle;
-// The yaw the VIEW was composed with, published by PatchCamera at the instant it uses it and consumed by
-// LocateCamera in the same frame (PatchCamera writes the camera; LocateCamera runs downstream of it).
+// Retired diagnostic exports; per-eye yaw catch-up is no longer applied.
 extern "C" __declspec(dllexport) extern int CyberpunkVR_YawCatchUpOnSharedEpoch;
 extern "C" __declspec(dllexport) extern unsigned long long CyberpunkVR_DebugYawCaughtUp;
+// The yaw the VIEW was composed with, published by PatchCamera at the instant it uses it and consumed by
+// LocateCamera in the same frame (PatchCamera writes the camera; LocateCamera runs downstream of it).
 extern volatile float g_viewYawUsedRad;
 extern volatile int   g_viewYawUsedValid;
 extern "C" __declspec(dllexport) extern uint64_t CyberpunkVR_DebugVrikNativePairUsed;
@@ -212,6 +220,11 @@ extern "C" __declspec(dllexport) extern int      CyberpunkVR_VrikArmAnchorFromBo
 extern "C" __declspec(dllexport) extern int      CyberpunkVR_VrikElbowPolicy;
 extern "C" __declspec(dllexport) extern int      CyberpunkVR_BodyYawFollow;
 extern "C" __declspec(dllexport) extern float    CyberpunkVR_BodyYawRealignRad;
+// Live mirrors above are diagnostics. Consumers refresh scene eligibility and
+// read the protected follower state through these functions.
+bool BodyYawFollowActive();
+float BodyYawFollowOffset();
+extern "C" void BodyYawFollowRelease();
 extern "C" __declspec(dllexport) extern float    CyberpunkVR_BodyYawFollowDeadDeg;
 extern "C" __declspec(dllexport) extern float    CyberpunkVR_DebugBodyFollowOffsetDeg;
 extern "C" __declspec(dllexport) extern float    CyberpunkVR_DebugBodyFollowErrDeg;
@@ -253,9 +266,6 @@ extern std::atomic<uint64_t> g_camComposedForPresent;
 extern uint64_t g_finalCameraHits;
 extern uint64_t g_locateCameraHits;
 extern uint64_t g_patchCameraHits;
-extern volatile float g_anchorCy;
-extern volatile float g_anchorOff[3];
-extern volatile float g_anchorScale;
 extern volatile float g_engineCamQuat[4];
 extern volatile float g_headQuatComposed[4];
 extern volatile float g_headingCy;
@@ -271,7 +281,6 @@ extern volatile float g_gamePitchRadians;
 extern volatile float g_headingPitchS;
 extern volatile float g_headingPitchC;
 extern volatile float g_lastLocateQuat[4];
-extern volatile int g_anchorRecipeValid;
 extern volatile int32_t g_lastIpdShiftFP[3];
 extern volatile int32_t g_lastLocatePosFP[3];
 extern volatile uint32_t g_engineCamQuatValid;
@@ -282,7 +291,6 @@ extern volatile uint32_t g_renderedSeq;
 // Declarators the generator could not see because they share a line with a sibling -- and one
 // (g_headQuatValid) shared a line with a whole second DEFINITION, which is exactly why this split
 // is done by symbol and not by line range. That line is now two lines.
-extern volatile float g_anchorSy;
 extern float g_dbgEntryPosX;
 extern float g_dbgEntryPosY;
 extern float g_dbgEntryPosZ;

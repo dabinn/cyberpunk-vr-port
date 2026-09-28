@@ -1,37 +1,7 @@
--- CyberpunkVRPort_ForceFPP -- the player stays in first person, and cannot be switched out of it.
---
--- WHY IT IS THESE TWO THINGS AND NOT A HOOK. Third person in this game is the VEHICLE camera, and the
--- game already owns both halves of the problem; both were read out of its own scripts rather than
--- guessed:
---
---   BLOCKING THE SWITCH. vehicleTransition.swift acts on `ToggleVehCamera` only when
---   `IsVehicleCameraChangeBlocked` is false, and defaultTransition.swift defines that as
---
---       StatusEffectSystem.ObjectHasStatusEffectWithTag(owner, n"VehicleFPP") || ...VehicleCombatNoInterruptions
---
---   and the game ships the record for it: GameplayRestriction.VehicleFPP. Described from tweakdb.bin, it
---   carries two gameplay tags (GameplayRestriction, VehicleFPP), no packages, no actionRestriction, no
---   stat modifiers and no UI data, with infinite duration -- so applying it does exactly one thing and
---   nothing else. That is the whole block: no override of a native, nothing to fight with other mods.
---
---   PUTTING IT BACK. The restriction stops the toggle but does not move a camera that is already in
---   third person (a vehicle entered in TPP, or a save made there). defaultTransition.swift does that with
---
---       camEvent = new vehicleRequestCameraPerspectiveEvent(); camEvent.cameraPerspective = ...;
---       scriptInterface.executionOwner.QueueEvent(camEvent)
---
---   i.e. the event goes to the PLAYER, not to the vehicle, and vehicleCameraPerspective.FPP is 0.
---
--- POLLED TWICE A SECOND, deliberately. "Has the camera been moved out of first person" does not need
--- frame resolution, and a per-frame trip into the game's systems is expensive -- measured elsewhere in
--- this port at 13.5 ms for a single VirtualQuery and 41 ms for a per-frame component walk. Two checks a
--- second cost nothing and are indistinguishable to the eye.
---
--- THE RESTRICTION IS SAVABLE, so it is removed on shutdown. Otherwise a save made after this mod is
--- taken out would keep a status effect nothing owns any more, and the vehicle camera would stay locked
--- with no way left in the game to explain why.
-
-local RESTRICTION = "GameplayRestriction.VehicleFPP"
+-- Camera bridge. The legacy folder name is retained for existing installations.
+-- CameraDirector owns FPP/TPP and scripted camera transitions. This module only
+-- publishes scene/device/UI state; it never forces a camera perspective.
+local RESTRICTION = "GameplayRestriction.VehicleFPP" -- remove legacy saved restriction once per player
 
 -- WHAT THIS FILE PAYS FOR EVERY FRAME, and what it no longer pays for.
 --
@@ -65,16 +35,11 @@ local function memoDrop()
 end
 
 local S = {
-  on = true,
   sceneGate = true,    -- open the scene-camera path for ORDINARY scenes, not only braindances
   sceneInTakeover = false,  -- ...and during a device takeover as well: an A/B, see the panel
   latched = false,     -- this scene was judged to need the fix, decided once on entry
   remote = false,
   remotePos = "-",
-  applied = false,
-  forced = 0,          -- how many times the camera was put back
-  note = "waiting for the player",
-  acc = 0.0,
   owns = false,        -- the scene system says it is driving the camera
   tier = -1,
   fppFov = 0.0,
@@ -394,54 +359,21 @@ local function statusSystem()
   return s
 end
 
--- Applied once and then only re-applied if something removed it: a load, a respawn, or a script that
--- clears effects. Checked rather than re-applied blindly, so no stack is added twice.
-local function ensureRestriction(pl)
+-- Upgrade cleanup only: do not periodically fight the game's own restrictions.
+local cleanedPlayer = nil
+local cleanupTime = 0.5
+local function clearLegacyRestriction(player)
+  local id = player and tostring(player:GetEntityID().hash)
+  if not id then cleanedPlayer = nil; memoDrop(); return end
+  if id == cleanedPlayer then return end
   local sys = statusSystem()
-  if sys == nil or pl == nil then return false end
-  local has = false
-  pcall(function() has = sys:HasStatusEffect(pl:GetEntityID(), RESTRICTION) end)
-  if has then
-    S.applied = true
-    return true
-  end
-  local ok = pcall(function() sys:ApplyStatusEffect(pl:GetEntityID(), RESTRICTION) end)
-  S.applied = ok
-  if ok then S.note = "camera switching blocked by the game's own restriction" end
-  return ok
-end
-
-local function dropRestriction()
-  local pl = Game.GetPlayer()
-  local sys = statusSystem()
-  if pl == nil or sys == nil then return end
-  pcall(function() sys:RemoveStatusEffect(pl:GetEntityID(), RESTRICTION) end)
-  S.applied = false
-end
-
--- The camera itself. GetActivePerspective is on the vehicle's camera manager, and FPP is the zero
--- member of vehicleCameraPerspective; the request goes to the player.
-local function forceFirstPerson(pl)
-  local veh = nil
-  pcall(function() veh = Game.GetMountedVehicle(pl) end)
-  if veh == nil then return end
-
-  local persp = nil
-  pcall(function() persp = veh:GetCameraManager():GetActivePerspective() end)
-  if persp == nil then return end
-  if persp == vehicleCameraPerspective.FPP then return end
-
+  if not sys then return end
   local ok = pcall(function()
-    local ev = vehicleRequestCameraPerspectiveEvent.new()
-    ev.cameraPerspective = vehicleCameraPerspective.FPP
-    pl:QueueEvent(ev)
+    if sys:HasStatusEffect(player:GetEntityID(), RESTRICTION) then
+      sys:RemoveStatusEffect(player:GetEntityID(), RESTRICTION)
+    end
   end)
-  if ok then
-    S.forced = S.forced + 1
-    S.note = "was in third person -> put back to first"
-  else
-    S.note = "could not queue the camera request"
-  end
+  if ok then cleanedPlayer = id end
 end
 
 -- WHICH SURVEILLANCE CAMERA THE PLAYER TOOK OVER, handed to the plugin.
@@ -530,13 +462,29 @@ local function publishRemoteCamera()
   if devCache.obj ~= obj then
     releaseLensFov()
     devCache.obj, devCache.cam, devCache.sent = obj, nil, nil
+    -- THE LENS BY NAME FIRST, and only then by class. A SurveillanceCamera carries TWO camera
+    -- components -- `virtualcamera` of class entVirtualCameraComponent and `cameraComponent` of class
+    -- gameCameraComponent -- and the old test, `string.find(class, "CameraComponent")`, matches BOTH.
+    -- Whichever the engine happened to list first won, and on that camera it was the virtual one, so
+    -- the position published here was not the lens's. The plugin looks the lens up by the name
+    -- `cameraComponent` (BindLensFromEntity), so publishing anything else describes a different point
+    -- than the one it identifies -- and the "is this buffer the lens" test in LocateCamera is a one
+    -- metre sphere around exactly this published point.
+    --
+    -- Measured live on that camera, 2026-09-05, with both components listed and named.
     pcall(function()
+      local anyCam = nil
       for _, c in ipairs(obj:GetComponents()) do
-        if string.find(tostring(c:GetClassName().value), "CameraComponent") then
-          devCache.cam = c
-          break
+        local cls = tostring(c:GetClassName().value)
+        if string.find(cls, "CameraComponent") then
+          if tostring(c:GetName().value) == "cameraComponent" then
+            devCache.cam = c
+            break
+          end
+          if anyCam == nil then anyCam = c end
         end
       end
+      if devCache.cam == nil then devCache.cam = anyCam end
     end)
   end
   local p = nil
@@ -790,6 +738,7 @@ local function publishBraindance()
 end
 
 registerForEvent("onInit", function()
+  ObserveAfter("PlayerPuppet", "OnGameAttached", function() cleanedPlayer = nil end)
   devcamLoad()
   devcamPush()
   print(string.format("[ForceFPP] ready; lens offset right=%.2f forward=%.2f up=%.2f",
@@ -801,8 +750,7 @@ registerForEvent("onUpdate", function(dt)
   -- BEFORE the press, and the phone half of it is a single blackboard read.
   publishUiPopup(dt)
 
-  -- BEFORE the mod's own switch: a braindance is not a first-person preference, and the second eye has
-  -- to follow that camera whether or not the FPP hold is wanted.
+  -- Scene/device publications remain active regardless of camera perspective.
   publishBraindance()
 
   -- THE TAKEOVER POSITION, EVERY FRAME. The plugin believes a camera only within a metre and a half of
@@ -812,22 +760,11 @@ registerForEvent("onUpdate", function(dt)
   -- and with it went the fov, the lens and the second eye's base. Standing still it worked, which is why
   -- this took so long to see.
   publishRemoteCamera()
-  if not S.on then return end
-  local pl = Game.GetPlayer()
-  if pl == nil then
-    S.applied = false            -- a load screen: the effect goes with the old player object
-    memoDrop()                   -- ...and so do the cached systems, boards and widgets
-    return
+  cleanupTime = cleanupTime + (dt or 0)
+  if cleanupTime >= 0.5 then
+    cleanupTime = 0
+    clearLegacyRestriction(Game.GetPlayer())
   end
-  S.acc = S.acc + (dt or 0.016)
-  if S.acc < 0.25 then return end
-  S.acc = 0.0
-  ensureRestriction(pl)
-  forceFirstPerson(pl)
-end)
-
-registerForEvent("onShutdown", function()
-  dropRestriction()
 end)
 
 local overlay = false
@@ -837,13 +774,7 @@ registerForEvent("onOverlayClose", function() overlay = false end)
 registerForEvent("onDraw", function()
   if not overlay then return end
   pcall(function()
-    ImGui.Begin("VR force FPP")
-    local b, ch = ImGui.Checkbox("hold the player in first person", S.on)
-    if ch then
-      S.on = b
-      if not b then dropRestriction() end
-    end
-    ImGui.Text("restriction applied: " .. tostring(S.applied))
+    ImGui.Begin("VR camera bridge")
     ImGui.Text("UI overlay owning B: " .. tostring(S.popupWhat or "-"))
     local g, gch = ImGui.Checkbox("scene camera path in ordinary scenes", S.sceneGate)
     if gch then S.sceneGate = g end
@@ -854,8 +785,6 @@ registerForEvent("onDraw", function()
                S.bdFov or 0.0, S.fppFov or 0.0, math.abs((S.bdFov or 0.0) - (S.fppFov or 0.0))))
     ImGui.Text("scene camera: " .. tostring(S.scam or "-"))
     ImGui.Text("pose gate (scene owns, plugin side): " .. tostring(S.bdOwns == true))
-    ImGui.Text(string.format("camera put back %d time(s)", S.forced))
-    ImGui.Text(S.note)
     ImGui.Text("remote camera: " .. (S.remote and ("yes, at " .. tostring(S.remotePos)) or "no"))
     ImGui.Separator()
     if S.takeover then

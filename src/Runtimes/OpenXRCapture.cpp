@@ -1,8 +1,15 @@
+#include "Utils/DebugGate.hpp"
+#include "Render/CommandResources.hpp"
+#include "Render/GpuStageProfile.hpp"
 // openxr_capture.cpp - mono frame + depth capture and submit-resource setup.
 // Split verbatim from openxr_manager.cpp (OpenXRManager methods). Shared module
 // state/helpers via openxr_internal.h (inline).
 #include <atomic>
+extern "C" int CyberpunkVR_BindPoseToImage;
 #include "Runtimes/OpenXRManager.hpp"
+#include "Camera/ImagePoseIdentity.hpp"
+#include "Camera/ImagePoseMath.hpp"
+#include "Camera/CameraState.hpp"
 #include "Overlay/ImGuiOverlay.hpp"   // OverlayRecordIntoTarget, the second-eye pass
 #include "Runtimes/OpenXRInternal.hpp"
 #include "Utils/XrMath.hpp"
@@ -236,7 +243,7 @@ bool OpenXRManager::EnsureMonoCaptureResource(const D3D12_RESOURCE_DESC& sourceD
 
 // [DEPTH] Accessors implemented in swapchain_hooks.cpp — the game's pinned
 // scene depth resource and its CURRENT (observed) D3D12 resource state.
-extern "C" ID3D12Resource* OmoGetSceneDepthResource();
+extern "C" ID3D12Resource* OmoAcquireSceneDepthResource(); // returns one owned reference
 extern "C" unsigned int OmoGetSceneDepthState();
 extern "C" unsigned int OmoGetSceneDepthWidth();
 extern "C" unsigned int OmoGetSceneDepthHeight();
@@ -244,6 +251,7 @@ extern "C" unsigned int OmoGetSceneDepthFormat();
 extern "C" ID3D12CommandQueue* OmoGetSceneDepthWriterQueue(); // game's depth-writer queue (safe mono depth capture)
 
 bool OpenXRManager::EnsureDepthSnapshot(ID3D12Resource* gameDepth) {
+    std::lock_guard<std::mutex> snapshotLock(m_presentMutex);
     if (!gameDepth || !m_d3dDevice) {
         return false;
     }
@@ -335,12 +343,18 @@ void OpenXRManager::CaptureSceneDepthInline(ID3D12GraphicsCommandList* list,
                                             ID3D12Resource* gameDepth,
                                             unsigned int stateAfter) {
     if (!list || !gameDepth || !m_d3dDevice) return;
+    // The consumer rejects menu/loading depth too. Do not create/copy transient
+    // startup textures that will never be submitted to the headset.
+    if (!GetMonoDepthCapture() || !GetDepthSubmit() || GetMenuMode() || GetMenuRectMode() ||
+        !m_sessionRunning.load(std::memory_order_relaxed) || m_stopFrameThread.load(std::memory_order_relaxed) ||
+        !m_depthStageCaptureAllowed.load(std::memory_order_acquire)) return;
     // The engine can make the depth readable more than once per frame; one copy is enough.
-    const uint64_t frame = m_presentCount.load(std::memory_order_relaxed);
+    uint64_t frame = m_presentCount.load(std::memory_order_relaxed);
     if (m_depthStageFrame.load(std::memory_order_acquire) == frame) return;
-    if (m_depthStageFrame.exchange(frame, std::memory_order_acq_rel) == frame) return;
-
-    std::lock_guard<std::mutex> lock(m_depthStageMutex);
+    std::unique_lock<std::mutex> lock(m_depthStageMutex, std::try_to_lock);
+    if (!lock.owns_lock()) return;
+    frame = m_presentCount.load(std::memory_order_relaxed);
+    if (m_depthStageFrame.load(std::memory_order_relaxed) == frame) return;
 
     D3D12_RESOURCE_DESC srcDesc = gameDepth->GetDesc();
     if (srcDesc.Width == 0 || srcDesc.Height == 0) return;
@@ -383,6 +397,11 @@ void OpenXRManager::CaptureSceneDepthInline(ID3D12GraphicsCommandList* list,
         SetD3DNamef(m_depthStage, L"OpenXR_depth_stage");
     }
     if (!m_depthStage) return;
+    // A size change can release the owner's old stage immediately, but every
+    // recorded copy retains its exact source/destination until the GPU is done.
+    if (!cvr::gpu::KeepCommandResources(list, {gameDepth, m_depthStage})) return;
+    // Publish before ResourceBarrier re-enters the depth hook.
+    m_depthStageFrame.store(frame, std::memory_order_release);
 
     const auto before = static_cast<D3D12_RESOURCE_STATES>(stateAfter);
     D3D12_RESOURCE_BARRIER pre[2] = {};
@@ -458,6 +477,7 @@ bool OpenXRManager::RecordDepthCapture(ID3D12GraphicsCommandList* cmdList,
                                        D3D12_RESOURCE_STATES gameDepthState,
                                        bool transitionGameDepth) {
     if (!cmdList || !gameDepth || !m_depthSnapshot) return false;
+    if (!cvr::gpu::KeepCommandResources(cmdList, {gameDepth, m_depthSnapshot})) return false;
     const DXGI_FORMAT srcFmt = gameDepth->GetDesc().Format;
     const bool is64bpp =
         srcFmt == DXGI_FORMAT_R32G8X24_TYPELESS ||
@@ -574,7 +594,9 @@ bool OpenXRManager::RecordDepthCapture(ID3D12GraphicsCommandList* cmdList,
 
 bool OpenXRManager::CaptureMonoDepthOnWriterQueue(uint64_t serial) {
     if (GetMonoDepthCapture() == 0) return false;
-    ID3D12Resource* gameDepth = OmoGetSceneDepthResource();
+    Microsoft::WRL::ComPtr<ID3D12Resource> depthLease;
+    depthLease.Attach(OmoAcquireSceneDepthResource());
+    ID3D12Resource* gameDepth = depthLease.Get();
     ID3D12CommandQueue* writerQueue = OmoGetSceneDepthWriterQueue();
     const D3D12_RESOURCE_STATES gameDepthState = static_cast<D3D12_RESOURCE_STATES>(OmoGetSceneDepthState());
     // No writer queue discovered yet (or no explicit depth state observed) -> skip this
@@ -659,16 +681,56 @@ extern "C" __declspec(dllexport) std::atomic<unsigned long long> CyberpunkVR_Deb
 extern "C" __declspec(dllexport) std::atomic<unsigned long long> CyberpunkVR_DebugCapFenceUsSum   = 0;
 extern "C" __declspec(dllexport) std::atomic<unsigned long long> CyberpunkVR_DebugCapFenceUsMax   = 0;
 
+ID3D12Resource* OpenXRManager::AcquireCapturedVrcamLocked(uint64_t serial,uint32_t maxReuse,
+        XrPosef* pose,XrFovf* fov,uint64_t* poseId,bool* reused) {
+    int best=-1;
+    uint64_t bestSerial=0;
+    for(int i=0;i<kVrcamEyeSlots;++i) {
+        const auto sourceSerial=m_vrcamEyePoolSerial[i];
+        auto* source=m_vrcamEyePool[i];
+        if(!source || !sourceSerial || sourceSerial>serial || !m_vrcamEyeLabels[i].valid ||
+           m_captureLeases.Writing(reinterpret_cast<uintptr_t>(source)))continue;
+        if(sourceSerial!=serial && (!maxReuse || serial-sourceSerial>maxReuse))continue;
+        if(sourceSerial>bestSerial) { best=i;bestSerial=sourceSerial; }
+    }
+    if(best<0)return nullptr;
+    auto* resource=m_vrcamEyePool[best];
+    if(!m_captureLeases.Pin(reinterpret_cast<uintptr_t>(resource)))return nullptr;
+    resource->AddRef();
+    const auto& label=m_vrcamEyeLabels[best];
+    *pose=label.pose;*fov=label.fov;*poseId=label.poseId;*reused=bestSerial!=serial;
+    return resource;
+}
+
+void OpenXRManager::ReleaseCapturedRead(ID3D12Resource* resource,uint64_t fence) {
+    if(!resource)return;
+    std::vector<ID3D12Resource*> release;
+    const auto completed=m_fence ? m_fence->GetCompletedValue() : UINT64_MAX;
+    {
+        std::lock_guard lock(m_presentMutex);
+        m_captureLeases.Unpin(reinterpret_cast<uintptr_t>(resource));
+        if(fence && completed<fence)m_retiredCaptureReads.push_back({resource,fence});
+        else release.push_back(resource);
+        for(auto it=m_retiredCaptureReads.begin();it!=m_retiredCaptureReads.end();) {
+            if(it->fence<=completed) { release.push_back(it->resource);it=m_retiredCaptureReads.erase(it); }
+            else ++it;
+        }
+    }
+    for(auto* item:release)item->Release();
+}
+
 bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const D3D12_RESOURCE_DESC& sourceDesc, uint64_t serial,
-    const XrPosef poses[2], const XrFovf fovs[2], const bool hasView[2]) {
+    const XrPosef poses[2], const XrFovf fovs[2], const bool hasView[2],const XrPosef headCenters[2]) {
     if (!backBuffer || !hasView[0] || !hasView[1]) {
-        CyberpunkVR_DebugCapSkipNoView.fetch_add(1, std::memory_order_relaxed);
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugCapSkipNoView.fetch_add(1, std::memory_order_relaxed));
         return false;
     }
 
     std::lock_guard<std::mutex> captureLock(m_captureMutex);
+    uintptr_t writeResources[2]{};
+    cvr::capture::WriteRelease releaseWrites(m_captureLeases,m_presentMutex,writeResources);
     if (!EnsureMonoCaptureResource(sourceDesc)) {
-        CyberpunkVR_DebugCapSkipNoRes.fetch_add(1, std::memory_order_relaxed);
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugCapSkipNoRes.fetch_add(1, std::memory_order_relaxed));
         return false;
     }
 
@@ -684,15 +746,22 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
     uint64_t previousSerial = 0;
     {
         std::lock_guard<std::mutex> lock(m_presentMutex);
-        m_monoPoolSlot = (m_monoPoolSlot + 1) % 3;
-        snapshot = m_monoPool[m_monoPoolSlot];
+        for(uint32_t step=1;step<=3;++step) {
+            const auto slot=(m_monoPoolSlot+step)%3;
+            auto* candidate=m_monoPool[slot];
+            if(candidate==m_monoCapturedFrame.texture)continue;
+            if(m_captureLeases.BeginWrite(reinterpret_cast<uintptr_t>(candidate))) {
+                m_monoPoolSlot=slot;snapshot=candidate;
+                writeResources[0]=reinterpret_cast<uintptr_t>(candidate);break;
+            }
+        }
         previousSerial = m_monoCapturedFrame.serial;
         if (snapshot) {
             snapshot->AddRef();
         }
     }
     if (!snapshot) {
-        CyberpunkVR_DebugCapSkipNoSlot.fetch_add(1, std::memory_order_relaxed);
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugCapSkipNoSlot.fetch_add(1, std::memory_order_relaxed));
         return false;
     }
 
@@ -707,20 +776,23 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
         // TIMED, not just counted. This blocks the game's Present thread, so the duration IS the
         // cost -- and a wait that succeeds after 30 ms does more damage than one that times out,
         // because it delays the publish without being recorded as a skip.
-        const double fenceEnterMs = XrDiagNowMs();
+        const bool diagnostics=cvr::RuntimeDiagnosticsEnabled();
+        const double fenceEnterMs = diagnostics ? XrDiagNowMs() : 0;
         const DWORD fenceRes = WaitForSingleObject(m_captureFenceEvent, 100);
+        if(diagnostics) {
         const double fenceMs = XrDiagNowMs() - fenceEnterMs;
-        CyberpunkVR_DebugCapFenceWaits.fetch_add(1, std::memory_order_relaxed);
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugCapFenceWaits.fetch_add(1, std::memory_order_relaxed));
         const unsigned long long fenceUs = (unsigned long long)(fenceMs * 1000.0);
-        CyberpunkVR_DebugCapFenceUsSum.fetch_add(fenceUs, std::memory_order_relaxed);
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugCapFenceUsSum.fetch_add(fenceUs, std::memory_order_relaxed));
         unsigned long long prevMax =
             CyberpunkVR_DebugCapFenceUsMax.load(std::memory_order_relaxed);
         while (fenceUs > prevMax &&
                !CyberpunkVR_DebugCapFenceUsMax.compare_exchange_weak(
                    prevMax, fenceUs, std::memory_order_relaxed)) {
         }
+        }
         if (fenceRes != WAIT_OBJECT_0) {
-            CyberpunkVR_DebugCapSkipFence.fetch_add(1, std::memory_order_relaxed);
+            CVR_DIAGNOSTIC(CyberpunkVR_DebugCapSkipFence.fetch_add(1, std::memory_order_relaxed));
             snapshot->Release();
             return false;
         }
@@ -734,6 +806,9 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
         return false;
     }
 
+    auto gpuProfile = cvr::gpu::profile::Begin(m_captureCmdList);
+    {
+    cvr::gpu::profile::Scope gpuScope(gpuProfile, cvr::gpu::profile::Stage::CaptureMain);
     D3D12_RESOURCE_BARRIER barriers[2] = {};
     UINT barrierCount = 0;
 
@@ -768,6 +843,7 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
     afterCopy[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
     afterCopy[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     m_captureCmdList->ResourceBarrier(2, afterCopy);
+    }
 
     // ---- right eye: the VRCAM view, converted here and now ---------------------------------
     //
@@ -801,6 +877,7 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
     // Deriving these from the XR image instead is what killed the GPU twice: that resource is
     // typeless, and a typeless RTV is invalid.
     bool vrcamEyeCaptured = false;
+    ID3D12Resource* vrcamCaptureSource=nullptr;
     const uint32_t eyeW = static_cast<uint32_t>(sourceDesc.Width);
     const uint32_t eyeH = sourceDesc.Height;
     // NOT IN A MENU. The right eye below is VRCAM's view of the WORLD; the menu is not in it,
@@ -813,6 +890,7 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
     const bool menuOpen = (GetMenuRectMode() != 0) || (GetMenuMode() != 0);
     if (CyberpunkVR_StereoSubmit && eyeW && eyeH && !(menuOpen && CyberpunkVR_MonoMenu)) {
         ID3D12Resource* vrcamSrc = CyberpunkVR_GetVrcamEyeTextureFresh();
+        vrcamCaptureSource=vrcamSrc;
         // THE AGE OF THE SECOND EYE'S CONTENT, which is a different quantity from everything else
         // measured so far and the only one that can be asymmetric between the eyes.
         //
@@ -832,8 +910,8 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
             const unsigned long long ageUs = CyberpunkVR_DebugVrcamEyeAgeUs;
             const unsigned long long ageMs = CyberpunkVR_DebugVrcamEyeAgeMs;
             if (ageMs != 0xFFFFFFFFull) {
-                CyberpunkVR_DebugEyeAgeCount.fetch_add(1, std::memory_order_relaxed);
-                CyberpunkVR_DebugEyeAgeSumMs.fetch_add(ageUs, std::memory_order_relaxed);
+                CVR_DIAGNOSTIC(CyberpunkVR_DebugEyeAgeCount.fetch_add(1, std::memory_order_relaxed));
+                CVR_DIAGNOSTIC(CyberpunkVR_DebugEyeAgeSumMs.fetch_add(ageUs, std::memory_order_relaxed));
                 unsigned long long prev =
                     CyberpunkVR_DebugEyeAgeMaxMs.load(std::memory_order_relaxed);
                 while (ageUs > prev &&
@@ -844,9 +922,9 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
                 int b = (int)(ageUs / 20000ull);
                 if (b < 0) b = 0;
                 if (b > 3) b = 3;
-                CyberpunkVR_DebugEyeAgeBuckets[b].fetch_add(1, std::memory_order_relaxed);
+                CVR_DIAGNOSTIC(CyberpunkVR_DebugEyeAgeBuckets[b].fetch_add(1, std::memory_order_relaxed));
             } else {
-                CyberpunkVR_DebugEyeAgeNever.fetch_add(1, std::memory_order_relaxed);
+                CVR_DIAGNOSTIC(CyberpunkVR_DebugEyeAgeNever.fetch_add(1, std::memory_order_relaxed));
             }
         }
         if (vrcamSrc) {
@@ -866,9 +944,18 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
                     // still copying out of -- the whole point of the pool.
                     {
                         std::lock_guard<std::mutex> lock(m_presentMutex);
-                        m_vrcamEyeSlot = (m_vrcamEyeSlot + 1) % kVrcamEyeSlots;
+                        for(int step=1;step<=kVrcamEyeSlots;++step) {
+                            const auto slot=(m_vrcamEyeSlot+step)%kVrcamEyeSlots;
+                            if(m_vrcamEyePoolSerial[slot]==m_monoCapturedFrame.serial && m_monoCapturedFrame.serial)continue;
+                            auto* candidate=m_vrcamEyePool[slot];
+                            if(m_captureLeases.BeginWrite(reinterpret_cast<uintptr_t>(candidate))) {
+                                m_vrcamEyeSlot=slot;writeResources[1]=reinterpret_cast<uintptr_t>(candidate);break;
+                            }
+                        }
                     }
+                    if(!writeResources[1]) { m_captureCmdList->Close();snapshot->Release();return false; }
                     ID3D12Resource* const eyeSlotTex = m_vrcamEyePool[m_vrcamEyeSlot];
+                    cvr::gpu::profile::Scope gpuScope(gpuProfile, cvr::gpu::profile::Stage::CaptureSecond);
 
                     D3D12_RESOURCE_BARRIER toRt{};
                     toRt.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -934,11 +1021,13 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
                                 }
                             }
                         }
+                        cvr::gpu::profile::Scope hudScope(gpuProfile, cvr::gpu::profile::Stage::SecondHud);
                         vrcamEyeCaptured = m_colorBlit->RecordHudComposite(
                             m_captureCmdList, vrcamSrc, hud, hudBlur, hudExpo, frameCb, hudCb,
                             eyeSlotTex, hp);
                     }
                     if (!vrcamEyeCaptured) {
+                        cvr::gpu::profile::Scope blitScope(gpuProfile, cvr::gpu::profile::Stage::SecondBlit);
                         vrcamEyeCaptured = m_colorBlit->RecordBlit(m_captureCmdList, vrcamSrc,
                                                                    eyeSlotTex);
                     }
@@ -955,7 +1044,7 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
                                                            CyberpunkVR_VisionFit != 0,
                                                            CyberpunkVR_VisionOffX,
                                                            CyberpunkVR_VisionOffY))
-                                ++CyberpunkVR_DebugVisionOverlays;
+                                CVR_DIAGNOSTIC(++CyberpunkVR_DebugVisionOverlays);
                         }
                     }
 
@@ -973,7 +1062,7 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
                                                    CyberpunkVR_BarrelDotNdcY,
                                                    CyberpunkVR_BarrelDotRadiusPx,
                                                    1.0f, 0.045f, 0.045f, 1.0f))
-                            ++CyberpunkVR_DebugBarrelDotDraws;
+                            CVR_DIAGNOSTIC(++CyberpunkVR_DebugBarrelDotDraws);
                     }
 
                     // AND THE OVERLAY ITSELF -- the F10 menu and the mouse cursor, which live in
@@ -1041,11 +1130,14 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
     //   * the scene-depth has been the SAME resource (menus closed) for a warmup window
     //     -> skips the intro/menu-load transient depth entirely, and
     //   * it is shader-readable THIS frame.
-    // No game state is ever touched => device-remove is impossible; a rare torn read is
-    // a harmless one-frame reprojection hint.
+    // Resource references must also survive recording and execution. A CPU-local
+    // pointer alone does not keep a D3D12 copy's operands alive on the GPU.
     bool depthCaptured = false;
+    if (!GetMonoDepthCapture()) m_depthStageCaptureAllowed.store(false, std::memory_order_release);
     if (GetMonoDepthCapture() != 0) {
-        ID3D12Resource* gameDepth = OmoGetSceneDepthResource();
+        Microsoft::WRL::ComPtr<ID3D12Resource> depthLease;
+        depthLease.Attach(OmoAcquireSceneDepthResource());
+        ID3D12Resource* gameDepth = depthLease.Get();
         const UINT depthStateRaw = OmoGetSceneDepthState();
         const bool menuOpen = (GetMenuRectMode() != 0) || (GetMenuMode() != 0);
         const bool srvReadable = (depthStateRaw & D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) != 0;
@@ -1058,18 +1150,21 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
         }
         s_depthGateRes = gameDepth;
         const bool gateOk = gameDepth && !menuOpen && s_depthGateStable >= 60; // ~1s stable gameplay depth
+        m_depthStageCaptureAllowed.store(gateOk && GetDepthSubmit() != 0, std::memory_order_release);
         bool snapOk = false;
         // Resolve from the STAGING copy taken at the readable barrier, not from the engine's
         // buffer. The stage is ours and sits in PIXEL_SHADER_RESOURCE, so the resolve no
         // longer depends on what state the engine happens to leave its depth in at Present --
         // which is what made the depth layer flicker.
         ID3D12Resource* resolveSrc = nullptr;
+        Microsoft::WRL::ComPtr<ID3D12Resource> stageLease;
         D3D12_RESOURCE_STATES resolveState = D3D12_RESOURCE_STATE_COMMON;
         bool fromStage = false;
         {
             std::lock_guard<std::mutex> lock(m_depthStageMutex);
             if (m_depthStage && m_depthStageSerial == serial) {
-                resolveSrc = m_depthStage;
+                stageLease = m_depthStage;
+                resolveSrc = stageLease.Get();
                 resolveState = D3D12_RESOURCE_STATE_COPY_SOURCE;
                 fromStage = true;
             }
@@ -1079,6 +1174,7 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
             resolveState = static_cast<D3D12_RESOURCE_STATES>(depthStateRaw);
         }
         if (gateOk && resolveSrc && (snapOk = EnsureDepthSnapshot(gameDepth))) {
+            cvr::gpu::profile::Scope depthScope(gpuProfile, cvr::gpu::profile::Stage::CaptureDepth);
             depthCaptured = RecordDepthCapture(m_captureCmdList, resolveSrc, resolveState,
                                                /*transitionGameDepth=*/false);
         }
@@ -1095,10 +1191,44 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
 
     m_captureCmdList->Close();
     ID3D12CommandList* cmdLists[] = {m_captureCmdList};
-    m_d3dQueue->ExecuteCommandLists(1, cmdLists);
-
-    ++m_captureFenceValue;
-    m_d3dQueue->Signal(m_captureFence, m_captureFenceValue);
+    XrPosef capturedPoses[2]={poses[0],poses[1]};
+    uint64_t capturedPoseIds[2]{},capturedImageGenerations[2]{};
+    std::shared_ptr<const cvr::framegen::Inputs> capturedInputs[2];
+    {
+        // Select labels at the actual queue submission, not when a producer
+        // merely recorded commands. The same-queue copy now sits between the
+        // labelled writes and any subsequent replacement of the source images.
+        std::lock_guard submissionLock(cvr::camera::ImageSubmissionMutex());
+        const auto mainImage=cvr::camera::ReadImagePose(backBuffer);
+        const auto vrcamImage=cvr::camera::ReadImagePose(vrcamCaptureSource);
+        const uint32_t vrcamEye=CyberpunkVR_MainIsRightEye ? 0u : 1u;
+        for(uint32_t eye=0;eye<2;++eye) {
+            const bool separate=vrcamEyeCaptured && eye==vrcamEye;
+            const auto& source=separate ? vrcamImage : mainImage;
+            const uint32_t view=separate ? 2u : 1u;
+            if(CyberpunkVR_BindPoseToImage && !ExternalPoseResetPending() && source && source.pose && source.pose.view==view &&
+               source.queue==reinterpret_cast<uintptr_t>(m_d3dQueue) &&
+               source.pose.head.originSerial==GetTrackingOriginSerial()) {
+                capturedPoses[eye]=cvr::camera::RebaseImageEyePose(headCenters[eye],poses[eye],source.pose.localHead);
+                capturedPoseIds[eye]=source.pose.poseId;
+                capturedImageGenerations[eye]=source.generation;
+                if(cvr::framegen::Enabled() && source.pose.hasRenderFrameId)
+                    capturedInputs[eye]=cvr::framegen::AcquireInputs(view,source.pose.renderFrameId,
+                        source.pose.poseId,source.pose.head.originSerial,m_d3dQueue);
+                CVR_DIAGNOSTIC(CyberpunkVR_PoseIdCaptured[view-1].fetch_add(1,std::memory_order_relaxed));
+                CVR_DIAGNOSTIC(CyberpunkVR_PoseIdLastCapture[eye].store(source.pose.poseId,std::memory_order_relaxed));
+                CVR_DIAGNOSTIC(CyberpunkVR_PoseIdImageGeneration[eye].store(source.generation,std::memory_order_relaxed));
+            } else {
+                CVR_DIAGNOSTIC(CyberpunkVR_PoseIdCaptureMiss[view-1].fetch_add(1,std::memory_order_relaxed));
+                CVR_DIAGNOSTIC(CyberpunkVR_PoseIdLastCapture[eye].store(0,std::memory_order_relaxed));
+                CVR_DIAGNOSTIC(CyberpunkVR_PoseIdImageGeneration[eye].store(0,std::memory_order_relaxed));
+            }
+        }
+        m_d3dQueue->ExecuteCommandLists(1,cmdLists);
+        ++m_captureFenceValue;
+        if (SUCCEEDED(m_d3dQueue->Signal(m_captureFence,m_captureFenceValue)))
+            cvr::gpu::profile::Submitted(gpuProfile, m_d3dQueue, m_captureFence, m_captureFenceValue);
+    }
 
     {
         std::lock_guard<std::mutex> lock(m_presentMutex);
@@ -1109,9 +1239,12 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
         if (m_monoCapturedFrame.texture == snapshot) {
             m_monoCapturedFrame.serial = serial;
             m_monoCapturedFrame.captureMs = XrDiagNowMs();
-            CyberpunkVR_DebugCapOk.fetch_add(1, std::memory_order_relaxed);
+            CVR_DIAGNOSTIC(CyberpunkVR_DebugCapOk.fetch_add(1, std::memory_order_relaxed));
             for (int eye = 0; eye < 2; ++eye) {
-                m_monoCapturedFrame.poses[eye] = poses[eye];
+                m_monoCapturedFrame.poses[eye] = capturedPoses[eye];
+                m_monoCapturedFrame.poseIds[eye]=capturedPoseIds[eye];
+                m_monoCapturedFrame.imageGenerations[eye]=capturedImageGenerations[eye];
+                m_monoCapturedFrame.framegenInputs[eye]=capturedInputs[eye];
                 m_monoCapturedFrame.fovs[eye] = fovs[eye];
                 m_monoCapturedFrame.hasView[eye] = hasView[eye];
             }
@@ -1128,12 +1261,20 @@ bool OpenXRManager::CaptureMonoPresentedFrame(ID3D12Resource* backBuffer, const 
             m_vrcamEyeSerial = vrcamEyeCaptured ? serial : 0;
             if (vrcamEyeCaptured) {
                 m_vrcamEyePoolSerial[m_vrcamEyeSlot] = serial;
+                const auto eye=CyberpunkVR_MainIsRightEye ? 0u : 1u;
+                m_vrcamEyeLabels[m_vrcamEyeSlot]={capturedPoses[eye],fovs[eye],capturedPoseIds[eye],capturedImageGenerations[eye],true};
             }
+        }
+        for(auto& resource:writeResources) {
+            if(resource)m_captureLeases.EndWrite(resource);
+            resource=0;
         }
     }
     if (m_monoPresentEvent) {
         SetEvent(m_monoPresentEvent);
     }
+
+    if(cvr::framegen::MetricsEnabled())cvr::framegen::OnRealFrame(serial,cvr::framegen::NowMs());
 
     snapshot->Release();
     if (g_verboseLog && (serial % 300) == 1) {
@@ -1189,7 +1330,9 @@ bool OpenXRManager::EnsureMonoSubmitResources() {
     // depth path is considered stable. The 64-bit R32G8X24 typeless family caused
     // repeated GPU removal during snapshot/submission experiments, so depth is kept
     // disabled there to preserve a working Mono baseline.
-    ID3D12Resource* pinnedDepth = OmoGetSceneDepthResource();
+    Microsoft::WRL::ComPtr<ID3D12Resource> pinnedDepthLease;
+    pinnedDepthLease.Attach(OmoAcquireSceneDepthResource());
+    ID3D12Resource* pinnedDepth = pinnedDepthLease.Get();
     const DXGI_FORMAT pinnedDepthFormat = pinnedDepth ? pinnedDepth->GetDesc().Format : DXGI_FORMAT_UNKNOWN;
     int64_t selectedDepthFormat = 0;
     // CP2077 mono-only mode hangs at start-up when a depth swapchain is created

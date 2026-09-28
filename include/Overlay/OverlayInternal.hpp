@@ -9,6 +9,7 @@
 // ================================================================================================
 
 #include "Runtimes/OpenXRManager.hpp"
+#include "Overlay/LiveControlsUi.hpp"
 
 #include <imgui.h>
 #include <im3d.h>
@@ -21,7 +22,10 @@ namespace overlay {
 
 
 Im3d::Vec3 AbstractHandPointToHeadSpace(const OpenXRHeadPose& handPose, bool isLeftHand, float hx, float hy, float hz);
-bool DrawLiveControls(LiveControlsUiState& state);
+bool DrawLiveControls(LiveControlsUiState& state, int section=-1);
+bool DrawFpsOverlayControls(LiveControlsUiState& state);
+void ApplyVrStyle();
+bool DrawVrShell(LiveControlsUiState& state);
 bool GetOverlayProjTans(const ImVec2& displaySize, float* tanHalfX, float* tanHalfY);
 bool ProjectHandLocalPoint(const OpenXRHeadPose& headPose, const OpenXRHeadPose& handPose, float localX, float localY, float localZ, const ImVec2& displaySize, ImVec2* outScreen);
 bool ProjectHeadSpacePointToScreen(float pointX, float pointY, float pointZ, const ImVec2& displaySize, ImVec2* outScreen);

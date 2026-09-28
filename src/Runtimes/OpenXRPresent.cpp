@@ -1,3 +1,4 @@
+#include "Utils/DebugGate.hpp"
 // 1 (default) = label each captured frame with the head orientation the camera injection
 // actually used for it, instead of the pose cache as of Present. See the use site.
 extern "C" __declspec(dllexport) int CyberpunkVR_BindPoseToImage = 1;
@@ -161,7 +162,7 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
     // that carries it are serialised on one thread, so PoseFrameLag 0 is right by
     // construction. Different means a simulation thread runs ahead of this one and the lag is
     // whatever that depth is.
-    CyberpunkVR_DebugTidPresent = GetCurrentThreadId();
+    CVR_DIAGNOSTIC(CyberpunkVR_DebugTidPresent = GetCurrentThreadId());
 
     uint64_t s_presentCount = m_presentCount.fetch_add(1, std::memory_order_relaxed) + 1;
 
@@ -202,7 +203,7 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
                 int b = (int)(dtMs / p);
                 if (b < 0) b = 0;
                 if (b > 3) b = 3;
-                CyberpunkVR_DebugPresentGapBuckets[b].fetch_add(1, std::memory_order_relaxed);
+                CVR_DIAGNOSTIC(CyberpunkVR_DebugPresentGapBuckets[b].fetch_add(1, std::memory_order_relaxed));
                 const unsigned long long dtUs = (unsigned long long)(dtMs * 1000.0);
                 unsigned long long prevMax =
                     CyberpunkVR_DebugPresentGapUsMax.load(std::memory_order_relaxed);
@@ -216,12 +217,10 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
     }
     const bool monoEnabled = m_monoSubmitEnabled.load(std::memory_order_relaxed);
 
-    // Publish the VRIK shared slots HERE, before the next animation pass -- the readers on the
-    // script side consume them during anim eval, which precedes render.
-    //
-    // Every present, not on a pair boundary: publishing per pair updated VRIK at HALF the present
-    // rate, and hands "teleported" at 20-45 Hz while the world rendered at 90. The pair-lock
-    // snapshot that used to be taken alongside is gone with AER -- see FlushHandsToShared.
+    // Present is the fallback publisher. On foot, native roomscale publishes
+    // before the CCT/animation tick from the very head sample used by physics.
+    // FlushHandsToShared checks that ownership under its mutex, so Present
+    // cannot replace the tick's packet with a differently timed XR head cache.
     FlushHandsToShared();
 
     // VRIK RATE CENSUS -- the skeleton's update rate, which is not the present rate.
@@ -471,6 +470,7 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
     }
 
     XrPosef monoCapturedPoses[2]{};
+    XrPosef monoCapturedCenters[2]{};
     XrFovf monoCapturedFovs[2]{};
     bool monoCapturedViews[2] = {};
     if (monoEnabled) {
@@ -510,9 +510,9 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
             OpenXRManager::XrFrameSlot slot{};
             bool slotExact = false;
             const bool haveSlot = GetFrameSlot(s_presentCount, &slot, &slotExact);
-            if (!haveSlot)      ++CyberpunkVR_DebugSlotMiss;   // no slot at all -- live fallback
-            else if (slotExact) ++CyberpunkVR_DebugSlotHit;    // this frame's own locate
-            else                ++CyberpunkVR_DebugSlotReused; // no locate this interval; correct
+            if (!haveSlot)      CVR_DIAGNOSTIC(++CyberpunkVR_DebugSlotMiss);   // no slot at all -- live fallback
+            else if (slotExact) CVR_DIAGNOSTIC(++CyberpunkVR_DebugSlotHit);    // this frame's own locate
+            else                CVR_DIAGNOSTIC(++CyberpunkVR_DebugSlotReused); // no locate this interval; correct
 
             const XrPosef* srcViewPose = haveSlot ? slot.viewPose : nullptr;
             const XrFovf*  srcViewFov  = haveSlot ? slot.viewFov  : nullptr;
@@ -589,7 +589,7 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
                 haveExactPose =
                     (CyberpunkVR_PoseReadBack &&
                      OpenXRManager::Get().PopRenderedFramePose(&pending) && pending.valid);
-                if (haveExactPose) ++CyberpunkVR_DebugPoseReadBack;
+                if (haveExactPose) CVR_DIAGNOSTIC(++CyberpunkVR_DebugPoseReadBack);
                 if (!haveExactPose) {
                     haveExactPose =
                         (OpenXRManager::Get().GetFramePoseForSerial(s_presentCount, &pending) &&
@@ -599,44 +599,18 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
                          pending.valid);
                 }
             }
+            if(haveExactPose && !ResolveRenderedPose(pending,&monoCenterPose))haveExactPose=false;
             if (haveExactPose) {
-                ++CyberpunkVR_DebugPoseExact;
-                ++CyberpunkVR_DebugPoseFromWrite;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugPoseExact);
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugPoseFromWrite);
             } else if (haveSlot && slotExact) {
                 // monoCenterPose already holds the slot's headPoseLocal, in the layer's space.
-                ++CyberpunkVR_DebugPoseEstimated;
-                ++CyberpunkVR_DebugPoseFromSlot;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugPoseEstimated);
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugPoseFromSlot);
             }
-            if (haveExactPose) {
-                // THE WHOLE POSE, AND IN THE LAYER'S SPACE. Both halves of that mattered.
-                //
-                // Only the orientation used to be taken from the rendered pose; the position
-                // stayed the head centre as of NOW, from m_views. So the image carried the head
-                // position it was drawn at while the label said where the head is at submit
-                // time, and the compositor duly re-projected away a translation that was
-                // already in the pixels. On head motion that is a lag-then-snap of exactly one
-                // frame -- which is what "дрожь" is. The OpenXR guide states the invariant
-                // plainly: the runtime has no way to know which pose a frame was rendered with,
-                // so what is submitted must BE that pose. Crysis VR does the same thing the
-                // simple way -- FinishFrame submits m_renderViews[eye].pose whole, the very
-                // struct AwaitFrame filled.
-                //
-                // And the space: GetHeadPose() is recenter-relative, the layer is m_localSpace.
-                // Undo the base here rather than shipping a pose from the wrong frame of
-                // reference (identity base hides it; a recenter does not).
-                XrPosef base{};
-                OpenXRManager::Get().GetRecenterBase(&base);
-                const XrQuaternionf relOri{ pending.oriX, pending.oriY, pending.oriZ, pending.oriW };
-                const XrVector3f relPos{ pending.posX, pending.posY, pending.posZ };
-                const XrVector3f rotated = RotateVector(base.orientation, relPos);
-                monoCenterPose.orientation = MultiplyQuat(base.orientation, relOri);
-                monoCenterPose.position = XrVector3f{
-                    base.position.x + rotated.x,
-                    base.position.y + rotated.y,
-                    base.position.z + rotated.z };
-            } else if (GetRenderPoseSubmit() != 0 && hasRenderHeadPose) {
-                monoCenterPose = renderHeadPose;
-            }
+            // The origin and its base were checked together by ResolveRenderedPose.
+            if(!haveExactPose && GetRenderPoseSubmit()!=0 && hasRenderHeadPose)
+                monoCenterPose=renderHeadPose;
 
             // AND THE SECOND EYE'S OWN CENTRE, from its own queue, built by the same arithmetic as the
             // centre above -- undo the recenter base, then compose. Empty queue (the view not active, a
@@ -648,19 +622,8 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
                 CyberpunkVR_VrcamOwnLabel) {
                 OpenXRHeadPose vrPending{};
                 if (OpenXRManager::Get().PopVrcamRenderedFramePose(&vrPending) && vrPending.valid) {
-                    XrPosef vbase{};
-                    OpenXRManager::Get().GetRecenterBase(&vbase);
-                    const XrQuaternionf relOriV{ vrPending.oriX, vrPending.oriY,
-                                                 vrPending.oriZ, vrPending.oriW };
-                    const XrVector3f relPosV{ vrPending.posX, vrPending.posY, vrPending.posZ };
-                    const XrVector3f rotatedV = RotateVector(vbase.orientation, relPosV);
-                    vrcamCenterPose.orientation = MultiplyQuat(vbase.orientation, relOriV);
-                    vrcamCenterPose.position = XrVector3f{
-                        vbase.position.x + rotatedV.x,
-                        vbase.position.y + rotatedV.y,
-                        vbase.position.z + rotatedV.z };
-                    haveVrcamCenter = true;
-                    ++CyberpunkVR_DebugVrcamLabelUsed;
+                    haveVrcamCenter=ResolveRenderedPose(vrPending,&vrcamCenterPose);
+                    if(haveVrcamCenter)CVR_DIAGNOSTIC(++CyberpunkVR_DebugVrcamLabelUsed);
                 }
             }
             const uint32_t vrcamEyeIndex = CyberpunkVR_MainIsRightEye ? 0u : 1u;
@@ -692,6 +655,7 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
                 const bool useVrcamCentre =
                     haveVrcamCenter && (static_cast<uint32_t>(eye) == vrcamEyeIndex);
                 const XrPosef& centre = useVrcamCentre ? vrcamCenterPose : monoCenterPose;
+                monoCapturedCenters[eye]=centre;
                 const XrVector3f eyeOffset =
                     RotateVector(centre.orientation, eyeOffsetHead);
                 monoCapturedPoses[eye] = centre;
@@ -713,7 +677,7 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
     bool monoCaptureOk = false;
     if (monoEnabled && backBuffer) {
         monoCaptureOk = CaptureMonoPresentedFrame(backBuffer, resourceDesc, s_presentCount,
-            monoCapturedPoses, monoCapturedFovs, monoCapturedViews);
+            monoCapturedPoses,monoCapturedFovs,monoCapturedViews,monoCapturedCenters);
         if (!monoCaptureOk && (s_presentCount % 300) == 1) {
             Log("OpenXRManager: Mono capture failed. serial=%llu views=(%d,%d)\n",
                 static_cast<unsigned long long>(s_presentCount),
@@ -721,6 +685,11 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
                 monoCapturedViews[1] ? 1 : 0);
         }
     }
+
+    cvr::hud::Capture(m_d3dDevice,m_d3dQueue);
+    cvr::hud::Capture(m_d3dDevice,m_d3dQueue,cvr::hud::Channel::Interaction);
+    cvr::hud::Capture(m_d3dDevice,m_d3dQueue,cvr::hud::Channel::Basilisk);
+    cvr::hud::Capture(m_d3dDevice,m_d3dQueue,cvr::hud::Channel::Surveillance);
 
     std::unique_lock<std::mutex> presentLock(m_presentMutex);
         if (m_lastPresentedBackBuffer) {
@@ -746,7 +715,7 @@ void OpenXRManager::OnPresent(IDXGISwapChain* swapChain) {
     // Inline submit runs the XR frame loop directly from the Present hook, so there is
     // no separate frame thread to wait for here.
 
-    if ((s_presentCount % 300) != 1) return;
+    if (!cvr::RuntimeDiagnosticsEnabled() || (s_presentCount % 300) != 1) return;
 
     Log("OpenXRManager: Present observed. hwnd=%p size=%ux%u format=%u backbufferIndex=%u resourceWidth=%llu resourceHeight=%u sessionRunning=%d\n",
         desc.OutputWindow,

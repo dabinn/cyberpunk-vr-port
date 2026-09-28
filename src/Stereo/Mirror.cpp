@@ -1,3 +1,4 @@
+#include "Utils/DebugGate.hpp"
 // Mirror -- the desktop window that shows what the headset sees, and the thread that drives it.
 //
 // It owns its OWN command queue, D3D12 swapchain and window with a message pump, so DWM keeps
@@ -170,8 +171,8 @@ void d12_submit_mirror_copy(ID3D12CommandQueue* queue) {
     if (!use_own && !use_stable) {
         const uint32_t tracked = CyberpunkVR_DebugMirrorSrcState;
         if (tracked == 0 && CyberpunkVR_NoStateLies) {
-            InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(
-                &CyberpunkVR_DebugForeignStateRefusals));
+            CVR_DIAGNOSTIC(InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(
+                &CyberpunkVR_DebugForeignStateRefusals)));
             return;      // a skipped mirror frame costs a frame; a wrong barrier costs the device
         }
         if (tracked != 0) copy_src_state = (D3D12_RESOURCE_STATES)tracked;
@@ -227,7 +228,7 @@ void d12_submit_mirror_copy(ID3D12CommandQueue* queue) {
                                                     CyberpunkVR_VisionFit != 0,
                                                     CyberpunkVR_VisionOffX,
                                                     CyberpunkVR_VisionOffY))
-                    ++CyberpunkVR_DebugVisionOverlays;
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugVisionOverlays);
             }
         }
         // The barrel dot, at the same NDC the overlay drew it at on the backbuffer. The mirror
@@ -240,7 +241,7 @@ void d12_submit_mirror_copy(ID3D12CommandQueue* queue) {
                                             CyberpunkVR_BarrelDotNdcY,
                                             CyberpunkVR_BarrelDotRadiusPx,
                                             1.0f, 0.045f, 0.045f, 1.0f))
-                ++CyberpunkVR_DebugBarrelDotDraws;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugBarrelDotDraws);
         }
         // Armed dump of the same layer, on the same list and the same fence as everything else
         // here. The snapshot rests in COMMON, which promotes implicitly for a copy source, so
@@ -471,8 +472,8 @@ void d12_submit_mirror_copy(ID3D12CommandQueue* queue) {
         CyberpunkVR_DebugMirrorReadyFence = v;
     }
     ++g_d12_copy_frame;
-    InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(
-        &CyberpunkVR_DebugMirrorPendingHits));
+    CVR_DIAGNOSTIC(InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(
+        &CyberpunkVR_DebugMirrorPendingHits)));
     bool ex = false;
     if (g_d12_present_started.compare_exchange_strong(ex, true))
         std::thread(d12_present_thread).detach();
@@ -763,7 +764,7 @@ void d12_present_thread() {
             bb->Release();
             q->Signal(pf, ++pv);                   // throttle THIS thread (allocator reuse)
             if (pf->GetCompletedValue() < pv) { pf->SetEventOnCompletion(pv, ev); WaitForSingleObject(ev, 100); }
-            ++CyberpunkVR_DebugMirrorFrames;
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugMirrorFrames);
             last = rdy;
             if (testpat) Sleep(16);
         } else {

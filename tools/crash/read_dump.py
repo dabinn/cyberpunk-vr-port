@@ -22,6 +22,7 @@ mixed with stale slots -- read it top-down and the first few are the recent fram
 prints from our own module is worth looking at; the rest is noise by construction.
 """
 import collections
+import argparse
 import ctypes
 import ctypes.wintypes as wt
 import glob
@@ -50,15 +51,16 @@ class IMAGEHLP_LINE64(ctypes.Structure):
 class Symbols:
     """dbghelp wrapper. Silently degrades to module+RVA when a PDB is not around."""
 
-    def __init__(self):
+    def __init__(self, image_dir=None):
         self.ok = False
+        self.image_dir = os.path.abspath(image_dir) if image_dir else None
         try:
             self.dh = ctypes.WinDLL("dbghelp.dll")
         except OSError:
             return
         self.h = ctypes.c_void_p(0x5EED)          # any unique token; no live process is read
-        self.dh.SymSetOptions(0x00000002 | 0x00000004 | 0x00000010)   # UNDNAME|DEFERRED|LOAD_LINES
-        search = ";".join(sorted({os.path.dirname(p) for p in
+        self.dh.SymSetOptions(0x00000002 | 0x00000004 | 0x00000010 | 0x400 | 0x80000)
+        search = self.image_dir or ";".join(sorted({os.path.dirname(p) for p in
                                   glob.glob(os.path.join(REPO, "build", "**", "*.pdb"), recursive=True)}))
         self.dh.SymInitialize.argtypes = [ctypes.c_void_p, ctypes.c_char_p, wt.BOOL]
         self.ok = bool(self.dh.SymInitialize(self.h, search.encode() or None, False))
@@ -71,7 +73,9 @@ class Symbols:
         """Point dbghelp at the built copy of one of our modules."""
         if not self.ok or base in self.loaded:
             return
-        hits = glob.glob(os.path.join(REPO, "build", "**", name), recursive=True)
+        hits = ([os.path.join(self.image_dir,name)] if self.image_dir else
+                glob.glob(os.path.join(REPO, "build", "**", name), recursive=True))
+        hits = [p for p in hits if os.path.isfile(p)]
         if not hits:
             return
         self.loaded.add(base)
@@ -213,7 +217,10 @@ def report(path, syms):
 
 
 def main():
-    args = sys.argv[1:]
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--image-dir',help='Exact archived DLL/PDB directory for this crash build')
+    parser.add_argument('dumps',nargs='*')
+    options=parser.parse_args();args=options.dumps
     if not args:
         q = os.path.join(os.environ.get("LOCALAPPDATA", ""), "REDEngine", "ReportQueue")
         args = sorted(glob.glob(os.path.join(q, "*", "Cyberpunk2077.dmp")))[-1:]
@@ -221,7 +228,7 @@ def main():
             print(__doc__)
             return
         print("no path given -- reading the newest report in %s\n" % q)
-    syms = Symbols()
+    syms = Symbols(options.image_dir)
     if not syms.ok:
         print("dbghelp unavailable: addresses will be module+RVA only\n")
     for a in args:

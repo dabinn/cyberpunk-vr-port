@@ -80,12 +80,10 @@ void DrawHandLocatorOverlay() {
     if (!g_drawHandLocator) return;
 
     OpenXRHeadPose head{};
-    OpenXRHeadPose left{};
-    OpenXRHeadPose right{};
-    if (!OpenXRManager::Get().GetHeadPose(&head) || !head.valid) return;
-
-    const bool hasLeft = OpenXRManager::Get().GetHandPose(0, &left) && left.valid;
-    const bool hasRight = OpenXRManager::Get().GetHandPose(1, &right) && right.valid;
+    OpenXRHeadPose hands[2]{};
+    if(!OpenXRManager::Get().GetPublishedHandFrame(&head,hands))return;
+    const auto& left=hands[0];const auto& right=hands[1];
+    const bool hasLeft=left.valid,hasRight=right.valid;
     if (!hasLeft && !hasRight) return;
 
     const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
@@ -313,6 +311,7 @@ extern "C" int CyberpunkVR_MainIsRightEye;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_BarrelDotTick = 0;
 extern "C" __declspec(dllexport) int32_t  CyberpunkVR_BarrelDotSecondEye = 1;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugBarrelDotDraws = 0;
+extern "C" int CyberpunkVR_WeaponClass;
 
 // EXACT barrel crosshair. The plugin publishes the weapon muzzle WORLD forward (shared[24..26]); we
 // rotate it into the located game camera's local frame (inv(camQuat) * fwd) and project that
@@ -369,22 +368,12 @@ void DrawCompactAdsCameraTelemetry() {
 }
 
 void DrawBarrelCrosshair() {
-    
-    const float enableLaser = OpenXRManager::Get().GetSharedSlot(144);   // weapon flag (was [126]: HMD-Z collision)
-    
-    float rad = 3.0f;
-    
-    if (!g_drawBarrelCross || enableLaser < 0.9f){
-        /*rad = 0.0f;
-        // Background list: world-projected, see DrawHandLocatorOverlay.
-        ImDrawList* dl = ImGui::GetBackgroundDrawList();
-        if (dl) {
-            ImVec2 sc = {0.0f, 0.0f};
-            dl->AddCircleFilled(sc, rad, IM_COL32(255, 60, 60, 0));
-            //dl->AddCircle(sc, 11.0f, IM_COL32(255, 255, 255, 235), 0, 2.0f);
-        }*/
-        return;
-    } 
+    // Invalidate the second-eye/mirror publication before any early return.
+    // Equipping melee must not leave the previous gun's dot alive for 250ms.
+    CyberpunkVR_BarrelDotTick = 0;
+    const float equipped = OpenXRManager::Get().GetSharedSlot(144);
+    if (!g_drawBarrelCross || !(equipped >= 0.9f) || CyberpunkVR_WeaponClass == 5) return;
+    const float rad = 3.0f;
 
     // ONE INSTANT, BOTH QUANTITIES (dabinn, TofuExpress 821e8a4e). The camera quaternion and the
     // muzzle direction come out of a single seqlocked packet published at MAIN's final-camera

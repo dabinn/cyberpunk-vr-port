@@ -1,3 +1,9 @@
+#include "Utils/DebugGate.hpp"
+#include "Render/SinglePassTrace.hpp"
+#include "Render/NativeStereoProbe.hpp"
+#include "Render/StereoSceneState.hpp"
+#include "Render/NativeUploadShadow.hpp"
+#include "Render/RenderProbeScope.hpp"
 // CommandListCensus -- what each view actually asks the GPU to do, counted rather than guessed.
 //
 // Twenty-odd probes, each the same three pieces: a fixed-size table, a *_note() called from a
@@ -550,7 +556,7 @@ static bool expo_stage_ensure() {
     s.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
     s.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
     e->barrier_call(list, 1, &s);
-    InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugExpoMirrors));
+    CVR_DIAGNOSTIC(InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugExpoMirrors)));
 }
 
 
@@ -1006,6 +1012,26 @@ struct PsoIds { uint64_t ps, vs; uint32_t ps_len, vs_len; };
 static std::unordered_map<void*, PsoIds> g_pso_ids;
 static std::mutex g_pso_ids_mtx;
 static thread_local ID3D12PipelineState* t_current_pso = nullptr;
+// Which dispatch inside the vision node is the outline generator, and where that count stands.
+// WHICH 384x384 DISPATCH IN THE NODE IS THE OUTLINE: the third, ordinal 2. Established on the
+// picture, not by reasoning -- with the shader forced to write RED while keeping the alpha it
+// computed, ordinal 2 turned the outline red and left the rest of the frame intact, while 0 blacked
+// the frame out (it writes the frame's colour) and 1 changed nothing. It agrees with the capture's
+// own event list, where the outline dispatch (event 44898, PipelineState_917) is the third of the
+// five 384x384 dispatches recorded into the PostFX list.
+extern "C" __declspec(dllexport) int32_t CyberpunkVR_VisionCsOrd = 2;
+extern "C" __declspec(dllexport) int32_t CyberpunkVR_VisionCsDim = 384;
+// The node whose square dispatch draws the outline, measured by [viscs] rather than remembered: the
+// historical 0x61FDE4 moved to 0x61EE78 with a game update. Kept separate from CyberpunkVR_VisionNode,
+// which also picks the surface the second eye copies -- one number, one meaning.
+// 0xFFFFFFFF = do not filter by node at all, which is the shipping value: see the note at the
+// selection itself. A concrete RVA is still accepted, for narrowing a measurement by hand.
+extern "C" __declspec(dllexport) uint32_t CyberpunkVR_VisionCsNode = 0xFFFFFFFFu;
+extern "C" __declspec(dllexport) extern int32_t  CyberpunkVR_VisionCsSwap;
+extern "C" __declspec(dllexport) extern uint64_t CyberpunkVR_DebugVisionCsSwaps;
+std::atomic<ID3D12RootSignature*> g_last_compute_rootsig{nullptr};
+static thread_local uintptr_t t_vis_swap_node = 0;
+static thread_local int32_t   t_vis_swap_ord = 0;
 
  uint64_t fnv1a(const void* p, size_t n) {
     const uint8_t* b = static_cast<const uint8_t*>(p);
@@ -1202,6 +1228,8 @@ extern "C" __declspec(dllexport) int32_t CyberpunkVR_SightAxisProbe = 1;
         UINT start, UINT num, const D3D12_VERTEX_BUFFER_VIEW* views) {
     const CommandListVtableHook* e = command_list_hook_entry(self);
     if (!e || !e->iavb_original) return;
+    if(CyberpunkVR_NativeStereoProbeState.load(std::memory_order_relaxed)==1)
+        cvr::stereo::native_probe::VertexBuffers(self,start,num,views);
     if (CyberpunkVR_SightAxisProbe && views && num >= 1 && start == 7) {
         t_inst_va = views[0].BufferLocation;
         t_inst_stride = views[0].StrideInBytes;
@@ -1326,11 +1354,91 @@ static void sight_axis_note(bool vrcam, UINT sinst) {
         r[0], r[1], r[2], r[4], r[5], r[6], r[8], r[9], r[10]);
 }
 
+
+// A list Reset starts a new recording: the ordinal and the pending table mask both belong to the
+// one that just ended.
+void vision_swap_list_reset() {
+    t_vis_swap_node = 0;
+    t_vis_swap_ord = 0;
+}
+
+ void STDMETHODCALLTYPE hk_SetComputeRootSignature(ID3D12GraphicsCommandList* self,
+        ID3D12RootSignature* rs) {
+    const CommandListVtableHook* e = command_list_hook_entry(self);
+    if (!e || !e->crootsig_original) return;
+    t_current_compute_rootsig = rs;
+    // ALSO GLOBALLY. The thread-local is the correct answer for the list being recorded here, but the
+    // dilater needs a root signature on lists recorded by OTHER threads -- MAIN's outline pass is one,
+    // and there the thread-local is null, which made the dilater return before it had even loaded its
+    // shader (no log line at all, which is how this was found). The engine uses one compute root
+    // signature for these passes, so the last one seen anywhere is a sound fallback.
+    if (rs) g_last_compute_rootsig.store(rs, std::memory_order_release);
+    e->crootsig_original(self, rs);
+    cvr::stereo::scene_state::ComputeRoot(self,rs);
+}
+
+// ---- the second view's grading LUT is built from a DIFFERENT SOURCE TEXTURE --------------------
+//
+// Inside GenerateTonemappingLUT the three build dispatches read an `8 x Texture3D<float4>` SRV
+// table, and the two views are handed different tables. Measured in an Nsight capture: MAIN's
+// source has mean rgb 0.044/0.200/0.056, the second view's 0.962/0.836/0.635 -- not a shade apart,
+// a different asset. It is a DESCRIPTOR TABLE, not a constant, which is why no buffer diff could
+// ever see it: viewData, the graph context, the 688-byte grading block and the cloud buffer were
+// all compared field by field at a yellow lamp where MAIN reads warm and the second view cold, and
+// every one of them came back either equal or already mirrored.
+//
+// So MAIN's table is learned inside that node and handed to the second view inside that same node,
+// per root-parameter index. Everything outside the node passes through untouched, and the scope is
+// a node identity the port itself sets, not a guess about what the data looks like.
+//
+// THE KNOWN HAZARD, and why this defaults to 0: descriptor handles address a shader-visible heap
+// the engine recycles. The second view records its frame BEFORE MAIN, so the handle lent to it is
+// MAIN's from the PREVIOUS frame, and a heap that has wrapped in between would hand it something
+// else entirely. If the picture goes wrong rather than merely unchanged, that is the first thing to
+// suspect -- and the fix would be to learn the table at its creation instead of at its bind.
+// CONFIRMED ON THE PICTURE 2026-09-05, which is why this ships at 1: with the lend on, the second
+// eye at the street lamp went from cold to the same warm as MAIN, immediately. Everything else had
+// already been excluded by measurement -- viewData, the graph context, the 688-byte grading block
+// with all 26 fields substituted, the cloud buffer copied whole, the render masks, the reuse modes
+// and the eye's capture source. The difference was never a number in a buffer; it was which texture
+// the build was pointed at.
+extern "C" __declspec(dllexport) uint32_t CyberpunkVR_LutSrcLend      = 1;
+extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugLutSrcLearn = 0;
+extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugLutSrcLend  = 0;
+
+namespace { std::atomic<uint64_t> g_lut_src_tbl[8]{}; }
+
+ void STDMETHODCALLTYPE hk_SetComputeRootDescriptorTable(ID3D12GraphicsCommandList* self,
+        UINT index, D3D12_GPU_DESCRIPTOR_HANDLE handle) {
+    const CommandListVtableHook* e = command_list_hook_entry(self);
+    if (!e || !e->crootdt_original) return;
+    if (CyberpunkVR_LutSrcLend && g_exe_base && index < 8 &&
+        t_current_node_work == reinterpret_cast<uintptr_t>(g_exe_base) + TONEMAP_LUT_RVA) {
+        if (t_view_side == 0) {
+            g_lut_src_tbl[index].store(handle.ptr, std::memory_order_release);
+            CVR_DIAGNOSTIC(InterlockedIncrement64(
+                reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugLutSrcLearn)));
+        } else if (t_view_side > 0) {
+            const uint64_t mainh = g_lut_src_tbl[index].load(std::memory_order_acquire);
+            if (mainh) {
+                handle.ptr = mainh;
+                CVR_DIAGNOSTIC(InterlockedIncrement64(
+                    reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugLutSrcLend)));
+            }
+        }
+    }
+    e->crootdt_original(self, index, handle);
+    cvr::stereo::scene_state::ComputeTable(self,index,handle);
+}
+
  void STDMETHODCALLTYPE hk_SetPipelineState(ID3D12GraphicsCommandList* self,
         ID3D12PipelineState* pso) {
     const CommandListVtableHook* e = command_list_hook_entry(self);
     if (!e || !e->setpso_original) return;
+    if(cvr::stereo::probe::internalCommands){e->setpso_original(self,pso);return;}
     t_current_pso = pso;
+    if(CyberpunkVR_NativeStereoProbeState.load(std::memory_order_relaxed)==1)
+        cvr::stereo::native_probe::Pipeline(self,pso);
     e->setpso_original(self, pso);
 }
 
@@ -1476,84 +1584,23 @@ void cascade_report() {
 }
 }  // namespace
 
-// The duplicate cascade rasterisation, withheld from MAIN. Both eyes bind the same atlas descriptor from an
-// identical record (see the depth-target probe in Capture.cpp), so MAIN's copy of it is redundant work --
-// but the earlier attempt to save it by cutting the NODE made shadows twitch, because the node's binds and
-// transitions went with it. Here the node still runs and only the draws are dropped, so the graph keeps
-// every barrier it declared. Paired with skipping MAIN's ClearShadowCascades, which is what leaves the
-// second view's contents in the atlas for MAIN to sample. See CyberpunkVR_CascadeSaveMain in ViewReuse.cpp.
-extern "C" __declspec(dllexport) extern int32_t  CyberpunkVR_CascadeSaveMain;
-extern "C" __declspec(dllexport) extern uint64_t CyberpunkVR_DebugCascadeDrawsSaved;
-extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugCascadeClearsSaved = 0;
-// Draws seen at the cascade node, PER SIDE, counted before anything is withheld.
-//
-// Built because four captures and a counter disagreed. Every capture -- including one taken before this knob
-// existed -- shows cascade draws only in the FIRST view's half of the frame and none in MAIN's, while
-// DebugCascadeDrawsSaved says 286 of MAIN's are withheld every frame. Both cannot be true, and the difference
-// between them is entirely about which side the port thinks it is on when the cascade node runs. So the port
-// counts what it actually sees instead of being argued about: three numbers, and each of the competing stories
-// predicts a different one.
-//
-//   side1 large, side0 zero   MAIN never draws cascades here at all, and the withheld count is mislabelled:
-//                             the side test is reading the wrong thing at this node
-//   both large                both views draw them, the captures are missing MAIN's, and a capture cannot be
-//                             used to judge command-list work (RenderDoc records above our hook)
-//   side0 large, side1 zero   the sides are inverted and the port has been withholding the FIRST view's work
-// EVERY counter and report below is behind this, and the gate zeroes it when DEBUG is unticked. The
-// reason is measurable rather than tidiness: the per-side census called GetTickCount64 on EVERY draw at
-// the cascade node -- hundreds a frame -- which is exactly the kind of cost this file warns about at the
-// top. With the box unticked cascade_draw_withheld() now does one node compare and the withheld
-// decision, and nothing else. The FIXES are not gated: they have to work in an ordinary session.
-extern "C" __declspec(dllexport) int32_t  CyberpunkVR_CascSideCensus = 1;
-extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugCascadeDrawsSide0 = 0;   // MAIN
-extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugCascadeDrawsSide1 = 0;   // second view
-extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugCascadeDrawsSideX = 0;   // neither eye
-
+// Optional per-side cascade census. It observes native draws without dropping them.
+extern "C" __declspec(dllexport) int32_t CyberpunkVR_CascSideCensus = 1;
+extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugCascadeDrawsSide0 = 0;
+extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugCascadeDrawsSide1 = 0;
+extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugCascadeDrawsSideX = 0;
 extern "C" __declspec(dllexport) extern uint64_t CyberpunkVR_DebugCaptureMarkers;
-extern "C" __declspec(dllexport) extern int32_t CyberpunkVR_CascSideCensus;
 
-static void cascade_draw_seen_report() {
-    static uint64_t s_last = 0;
-    const uint64_t now = GetTickCount64();
-    if (s_last && now - s_last < 5000) return;
-    s_last = now;
-    log("[cascside] draws AT the cascade node by side: MAIN=%llu secondView=%llu neither=%llu "
-        "| withheld=%llu clears=%llu | markersEmitted=%llu | vrcamFlag=%d viewSide=%d",
-        (unsigned long long)CyberpunkVR_DebugCascadeDrawsSide0,
-        (unsigned long long)CyberpunkVR_DebugCascadeDrawsSide1,
-        (unsigned long long)CyberpunkVR_DebugCascadeDrawsSideX,
-        (unsigned long long)CyberpunkVR_DebugCascadeDrawsSaved,
-        (unsigned long long)CyberpunkVR_DebugCascadeClearsSaved,
-        (unsigned long long)CyberpunkVR_DebugCaptureMarkers,
-        t_vrcam_node_active ? 1 : 0, (int)t_view_side);
+static void cascade_draw_seen() {
+    if (!cvr::RuntimeDiagnosticsEnabled() || !CyberpunkVR_CascSideCensus || !g_exe_base ||
+        t_current_node_work != reinterpret_cast<uintptr_t>(g_exe_base) + CASCADE_NODE_RVA) return;
+    volatile LONG64* slot =
+        t_view_side == 0 ? reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugCascadeDrawsSide0)
+      : t_view_side == 1 ? reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugCascadeDrawsSide1)
+                        : reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugCascadeDrawsSideX);
+    InterlockedIncrement64(slot);
 }
 
-static bool cascade_draw_withheld() {
-    if (!g_exe_base) return false;
-    if (t_current_node_work != reinterpret_cast<uintptr_t>(g_exe_base) + CASCADE_NODE_RVA) return false;
-    // Counted for every side, and BEFORE the knob is consulted, so the numbers describe the engine rather
-    // than the effect of our own switch. Diagnostic only: silent with DEBUG unticked.
-    if (CyberpunkVR_CascSideCensus) {
-        volatile LONG64* slot =
-            (t_view_side == 0) ? reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugCascadeDrawsSide0)
-          : (t_view_side == 1) ? reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugCascadeDrawsSide1)
-                               : reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugCascadeDrawsSideX);
-        InterlockedIncrement64(slot);
-        cascade_draw_seen_report();
-    }
-    // MAIN by hash, not "not VRCAM": the desktop window draws cascades too, and saving ITS cascade
-    // as MAIN's is how the reference silently becomes the wrong one.
-    if (!CyberpunkVR_CascadeSaveMain || !view_is_main_now()) return false;
-    if (CyberpunkVR_CascSideCensus)
-        InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugCascadeDrawsSaved));
-    return true;
-}
-
-// MAIN's clear of the shadow atlas, withheld -- the other half of the same saving, and the half the previous
-// attempt got wrong by cutting the node that issues it. The node still runs, so the atlas still transitions
-// NON_PIXEL_SHADER_RESOURCE -> DEPTH_WRITE and back exactly as the graph declared; only the clear command
-// itself is dropped, so the depth the second view rasterised this frame survives for MAIN to sample.
-//
 // ---- VIEW AND NODE MARKERS, so a capture labels itself -------------------------------------------
 //
 // Built because a question could not be answered from three captures in a row: with MAIN's cascade draws
@@ -1655,7 +1702,7 @@ void maybe_marker_in(ID3D12GraphicsCommandList* self, MarkerState& mk) {
     __try {
         self->SetMarker(kPixAnsiMarker, label, static_cast<UINT>(strlen(label) + 1));
     } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
-    InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugCaptureMarkers));
+    CVR_DIAGNOSTIC(InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugCaptureMarkers)));
 }
 }  // namespace
 
@@ -1663,6 +1710,11 @@ void maybe_marker_in(ID3D12GraphicsCommandList* self, MarkerState& mk) {
 // D3D12Core.dll -- so once the wrapper vtable is hooked this stops emitting rather than burning work for
 // nothing. It still earns its keep under PIX and Nsight, which intercept below us.
 void maybe_marker(ID3D12GraphicsCommandList* self) {
+    if(CyberpunkVR_SinglePassTraceState.load(std::memory_order_relaxed)==1 && g_exe_base) {
+        const auto base=reinterpret_cast<uintptr_t>(g_exe_base);
+        if(t_current_node_work>base)cvr::stereo::trace::List(
+            static_cast<uint32_t>(t_current_node_work-base),t_view_side,self);
+    }
     if (g_wrapper_vtable) return;
     maybe_marker_in(self, t_mark_real);
 }
@@ -1773,37 +1825,13 @@ extern "C" void RegisterGameFacingListVtable(ID3D12Device* device) {
     alloc->Release();
 }
 
-// Whether this knob DID anything, in one line. "The picture is fine" and "the knob never fired" look identical
-// from the outside, and this port has already spent rounds on probes that never reached their target -- so the
-// counters get said out loud. NOT gated behind a diagnostic flag: it confirms a fix rather than measuring one,
-// it is one line per five seconds, and with the launcher's DEBUG box unticked it is the only thing that can
-// distinguish a saving from a no-op.
-static void cascade_save_report() {
-    if (!CyberpunkVR_CascadeSaveMain || !CyberpunkVR_CascSideCensus) return;
-    static uint64_t s_last = 0;
-    const uint64_t now = GetTickCount64();
-    if (s_last && now - s_last < 5000) return;
-    s_last = now;
-    log("[cascsave] MAIN's cascade work withheld so far: draws=%llu clears=%llu",
-        (unsigned long long)CyberpunkVR_DebugCascadeDrawsSaved,
-        (unsigned long long)CyberpunkVR_DebugCascadeClearsSaved);
-}
-
-// Gated on the CLEAR node, not the render node: a depth clear anywhere else in the frame is somebody else's.
+// Native clears always execute, including MAIN's cascade atlas after a resize.
 void STDMETHODCALLTYPE hk_ClearDepthStencilView(ID3D12GraphicsCommandList* self,
         D3D12_CPU_DESCRIPTOR_HANDLE dsv, D3D12_CLEAR_FLAGS flags, FLOAT depth, UINT8 stencil,
         UINT rects, const D3D12_RECT* rect) {
     const CommandListVtableHook* e = command_list_hook_entry(self);
     if (!e || !e->cleardsv_original) return;
     maybe_marker(self);
-    cascade_save_report();
-    if (CyberpunkVR_CascadeSaveMain && g_exe_base && view_is_main_now() &&
-            t_current_node_work == reinterpret_cast<uintptr_t>(g_exe_base) + CASCADE_CLEAR_NODE_RVA) {
-        if (CyberpunkVR_CascSideCensus)
-            InterlockedIncrement64(
-                reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugCascadeClearsSaved));
-        return;
-    }
     e->cleardsv_original(self, dsv, flags, depth, stencil, rects, rect);
 }
 
@@ -1812,7 +1840,7 @@ void STDMETHODCALLTYPE hk_ClearDepthStencilView(ID3D12GraphicsCommandList* self,
     const CommandListVtableHook* e = command_list_hook_entry(self);
     if (!e || !e->draw_original) return;
     maybe_marker(self);
-    if (cascade_draw_withheld()) return;
+    cascade_draw_seen();
     e->draw_original(self, vtx, inst, sv, si);
     if (CyberpunkVR_DrawCensus) draw_census_note(t_vrcam_node_active);
 }
@@ -1821,8 +1849,14 @@ void STDMETHODCALLTYPE hk_ClearDepthStencilView(ID3D12GraphicsCommandList* self,
         UINT idx, UINT inst, UINT si, INT bv, UINT sinst) {
     const CommandListVtableHook* e = command_list_hook_entry(self);
     if (!e || !e->drawidx_original) return;
+    if(cvr::stereo::probe::internalCommands){e->drawidx_original(self,idx,inst,si,bv,sinst);return;}
+    if(CyberpunkVR_NativeStereoProbeState.load(std::memory_order_relaxed)==1) {
+        const auto base=reinterpret_cast<uintptr_t>(g_exe_base);
+        const auto node=base && t_current_node_work>base?uint32_t(t_current_node_work-base):0;
+        if(cvr::stereo::native_probe::Draw(self,t_current_pso,node,t_view_side,idx,inst,si,bv,sinst))return;
+    }
     maybe_marker(self);
-    if (cascade_draw_withheld()) return;
+    cascade_draw_seen();
     // The sight's exact draw shape, from the capture: 6 indices, one instance, no index or vertex
     // offset, and an instance slot picked by StartInstanceLocation. Resolved BEFORE the call,
     // because the skip test has to be able to withhold it.
@@ -1969,7 +2003,55 @@ static void volume_node_note(uint32_t rva, UINT n, bool vrcam) {
     const CommandListVtableHook* e = command_list_hook_entry(self);
     if (!e || !e->dispatch_original) return;
     maybe_marker(self);
+    bool vis_swapped = false;
+    ID3D12PipelineState* vis_prev = t_current_pso;
+    if (CyberpunkVR_VisionCsSwap && g_exe_base) {
+        const uintptr_t vbase = reinterpret_cast<uintptr_t>(g_exe_base);
+        const uintptr_t vwork = t_current_node_work;
+        const uint32_t vrva = (vwork > vbase) ? static_cast<uint32_t>(vwork - vbase) : 0u;
+        // SELECT BY SHAPE **AND** BY THE ROOT TABLES BOUND. Shape alone names five different passes
+        // in one command list (see the header note), and an ordinal is only meaningful once the mask
+        // has narrowed the field -- so it counts the dispatches that already match both, and it is
+        // reset by the list's Reset rather than by a node change.
+        const bool dimOk = (CyberpunkVR_VisionCsDim <= 0) ||
+                           (x == static_cast<UINT>(CyberpunkVR_VisionCsDim) &&
+                            y == static_cast<UINT>(CyberpunkVR_VisionCsDim));
+        // ANY NODE, by default. The node RVA was only ever a crutch, and it is the wrong handle: the
+        // outline pass runs once per VIEW, in a different node for each, so pinning one node reaches
+        // one eye at best -- measured, 77120C carries it for the second view (vrcam=1) and produces no
+        // 384x384 dispatch at all in a session where that view is not rendering. Shape plus the bound
+        // root tables identify the pass on their own; the ordinal then disambiguates the two dispatches
+        // that share both, counted within ONE node of ONE recording.
+        const bool nodeOk = (CyberpunkVR_VisionCsNode == 0xFFFFFFFFu) ||
+                            (vrva == CyberpunkVR_VisionCsNode);
+        if (nodeOk && dimOk) {
+            if (vwork != t_vis_swap_node) { t_vis_swap_node = vwork; t_vis_swap_ord = 0; }
+            const int32_t vord = t_vis_swap_ord++;
+            // -1 = every dispatch in the node. The ordinal filter was a bug, not a feature: the
+            // counter resets only when the NODE changes, never per frame, so with the same node
+            // recurring all session `vord == 0` was true exactly ONCE -- on the first matching
+            // dispatch of the session -- and the substitution never happened again. That is why the
+            // picture never changed for any candidate node, and why the log carried a single
+            // "pipeline built" line.
+            // SELECT BY DISPATCH SHAPE, not by ordinal. 61EE78 turned out to be a container that
+            // dispatches at 112, 192, 223 and 384 in one frame, so "the Nth dispatch" is meaningless --
+            // and the ordinal never reset per frame anyway. The shape is stable and it is known: the
+            // outline layer is one group per 8x8 pixels, so 384 at 3072 and 223 at 1782, which are
+            // exactly the layer sizes [vismap] reports.
+            if (CyberpunkVR_VisionCsOrd < 0 || vord == CyberpunkVR_VisionCsOrd) {
+                if (CyberpunkVR_VisionCsSwap) {
+                    ID3D12PipelineState* mine = vision_cs_pso_get(self);
+                    if (mine) {
+                        self->SetPipelineState(mine);
+                        vis_swapped = true;
+                        CVR_DIAGNOSTIC(++CyberpunkVR_DebugVisionCsSwaps);
+                    }
+                }
+            }
+        }
+    }
     e->dispatch_original(self, x, y, z);
+    if (vis_swapped && vis_prev) self->SetPipelineState(vis_prev);
     t_last_disp[0] = x; t_last_disp[1] = y; t_last_disp[2] = z;
     if (CyberpunkVR_DispatchCensus && g_exe_base) {
         const uintptr_t base = reinterpret_cast<uintptr_t>(g_exe_base);
@@ -1994,11 +2076,18 @@ static void volume_node_note(uint32_t rva, UINT n, bool vrcam) {
     if (CyberpunkVR_LightContent) light_content_report();
 }
 
+void STDMETHODCALLTYPE probe_CopyResource(ID3D12GraphicsCommandList* self,ID3D12Resource* destination,ID3D12Resource* source) {
+    const auto* entry=command_list_hook_entry(self);if(!entry || !entry->copyres)return;
+    if(!cvr::stereo::probe::internalCommands)cvr::stereo::packets::upload_shadow::Invalidate(destination);
+    entry->copyres(self,destination,source);
+}
  void STDMETHODCALLTYPE hk_CopyBufferRegion(ID3D12GraphicsCommandList* self,
         ID3D12Resource* dst, UINT64 dst_off, ID3D12Resource* src, UINT64 src_off,
         UINT64 num_bytes) {
     const CommandListVtableHook* e = command_list_hook_entry(self);
     if (!e || !e->cbr_original) return;
+    if(!cvr::stereo::probe::internalCommands)
+        cvr::stereo::packets::upload_shadow::Observe(dst,dst_off,src,src_off,num_bytes);
     e->cbr_original(self, dst, dst_off, src, src_off, num_bytes);
     // ---- how many lights does each view actually get? ---------------------------------------
     // Everything measurable about the two views is identical -- same camera to the byte bar the
@@ -2055,8 +2144,8 @@ static void volume_node_note(uint32_t rva, UINT n, bool vrcam) {
             if (prev) prev->Release();
         }
         g_cb_off.store(dst_off, std::memory_order_release);
-        InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(
-            &CyberpunkVR_DebugCbCaptures));
+        CVR_DIAGNOSTIC(InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(
+            &CyberpunkVR_DebugCbCaptures)));
     }
     // Every fill from a mappable source, remembered so a DEFAULT-heap buffer can still be read on
     // the CPU. Gated: it costs one GetGPUVirtualAddress per copy.

@@ -1,4 +1,5 @@
 #pragma once
+namespace cvr::camera { struct PoseIdentity; }
 
 // ================================================================================================
 // The internal interface of the stereo module.
@@ -82,11 +83,7 @@ enum HudSnapSlot { kSnapHud = 0, kSnapBlur, kSnapMainOut, kSnapMainScene, kSnapV
 struct MappedUpload { ID3D12Resource* res; uint8_t* ptr; uint64_t size; uint64_t va; };
 // The descriptor-handle -> dimensions map entry. The HUD asks what a bound target's size is, and the
 // answer is recorded by the capture path, so the type is complete here.
-struct RtvDimEntry {
-    std::atomic<SIZE_T> handle{0};
-    uint32_t w = 0, h = 0;
-    ID3D12Resource* res = nullptr;
-};
+inline constexpr uint32_t RtvDescriptorCapacity=8192;
 
 // The light-upload destination record. A complete type at the TOP of this namespace, because
 // std::array<LightDst, 24> below needs it complete -- a definition appended after its use is how the
@@ -141,10 +138,24 @@ using PFN_DrawInstanced = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,
     UINT, UINT, UINT, UINT);
 using PFN_DrawIndexedInstanced = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,
     UINT, UINT, UINT, INT, UINT);
+// Slot 29. Recorded, not altered: the outline swap needs the engine's OWN compute root signature to
+// build a pipeline the engine's already-bound root arguments still fit.
+using PFN_SetComputeRootSignature = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,
+                                                              ID3D12RootSignature*);
+using PFN_SetComputeRootDescriptorTable = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,
+                                                                    UINT, D3D12_GPU_DESCRIPTOR_HANDLE);
 using PFN_SetPipelineState = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,
     ID3D12PipelineState*);
 using PFN_IASetVertexBuffers = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,
     UINT, UINT, const D3D12_VERTEX_BUFFER_VIEW*);
+using PFN_IASetIndexBuffer = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,const D3D12_INDEX_BUFFER_VIEW*);
+using PFN_SetGraphicsRootCbv = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,UINT,D3D12_GPU_VIRTUAL_ADDRESS);
+using PFN_SetPredication = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,ID3D12Resource*,UINT64,D3D12_PREDICATION_OP);
+using PFN_ProbeHeaps = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,UINT,ID3D12DescriptorHeap* const*);
+using PFN_ProbeTopology = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,D3D12_PRIMITIVE_TOPOLOGY);
+using PFN_ProbeStencil = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,UINT);
+using PFN_ProbeShadingRate = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList5*,D3D12_SHADING_RATE,const D3D12_SHADING_RATE_COMBINER*);
+using PFN_ProbeShadingImage = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList5*,ID3D12Resource*);
 using PFN_CopyTextureRegion = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,
     const D3D12_TEXTURE_COPY_LOCATION*, UINT, UINT, UINT,
     const D3D12_TEXTURE_COPY_LOCATION*, const D3D12_BOX*);
@@ -209,6 +220,19 @@ struct CommandListVtableHook {
     PFN_SetPipelineState   setpso_original = nullptr;   // slot 25 (hooked, PSO probe)
     PFN_IASetVertexBuffers iavb_original = nullptr;     // slot 44 (hooked, sight axis probe)
     PFN_ClearDepthStencilView cleardsv_original = nullptr;  // slot 47 (hooked, cascade atlas reuse)
+    PFN_SetComputeRootSignature crootsig_original = nullptr; // slot 29 (hooked, outline swap)
+    PFN_SetComputeRootDescriptorTable crootdt_original = nullptr; // slot 31 (LUT source lend)
+    PFN_SetComputeRootSignature groot_original = nullptr; // slot 30, optional native stereo probe
+    PFN_SetComputeRootDescriptorTable grootdt_original = nullptr; // slot 32, optional probe
+    PFN_SetGraphicsRootCbv grootcbv_original = nullptr; // slot 38, optional probe
+    PFN_IASetIndexBuffer iaib_original = nullptr; // slot 43, optional probe
+    PFN_SetPredication predication_original = nullptr; // slot 55, optional probe
+    PFN_ProbeHeaps heaps_original = nullptr; // slot 28, optional probe
+    PFN_ProbeTopology topology_original = nullptr; // slot 20, optional probe
+    PFN_ProbeStencil stencil_original = nullptr; // slot 24, optional probe
+    PFN_ProbeShadingRate shading_rate_original = nullptr; // slot 77, optional list5
+    PFN_ProbeShadingImage shading_image_original = nullptr; // slot 78, optional list5
+    bool shading_state_known = false;
 };
 
 // Function-pointer types the trampoline pointers are declared in terms of. They have to be here
@@ -616,11 +640,23 @@ void STDMETHODCALLTYPE hk_Dispatch(ID3D12GraphicsCommandList*, UINT, UINT, UINT)
 void STDMETHODCALLTYPE hk_ExecuteIndirect(ID3D12GraphicsCommandList*, ID3D12CommandSignature*, UINT, ID3D12Resource*, UINT64, ID3D12Resource*, UINT64);
 void STDMETHODCALLTYPE hk_DrawInstanced(ID3D12GraphicsCommandList*, UINT, UINT, UINT, UINT);
 void STDMETHODCALLTYPE hk_SetPipelineState(ID3D12GraphicsCommandList*, ID3D12PipelineState*);
+void STDMETHODCALLTYPE hk_SetComputeRootSignature(ID3D12GraphicsCommandList*, ID3D12RootSignature*);
+void STDMETHODCALLTYPE hk_SetComputeRootDescriptorTable(ID3D12GraphicsCommandList*, UINT,
+                                                       D3D12_GPU_DESCRIPTOR_HANDLE);
+// A command-list Reset ends the recording the outline-swap ordinal was counted in. Called from
+// hk_GfxReset so the count starts at zero for every list, which is what makes an ordinal usable at
+// all -- the previous version only reset on a NODE change and so matched once per session.
+void vision_swap_list_reset();
+// The engine's last compute root signature and PSO on this thread, and the pipeline built from our
+// replacement outline shader against that signature. Defined in DeviceHooks.cpp.
+extern thread_local ID3D12RootSignature* t_current_compute_rootsig;
+ID3D12PipelineState* vision_cs_pso_get(ID3D12GraphicsCommandList* list);
 void STDMETHODCALLTYPE hk_IASetVertexBuffers(ID3D12GraphicsCommandList*, UINT, UINT, const D3D12_VERTEX_BUFFER_VIEW*);
 void STDMETHODCALLTYPE hk_DrawIndexedInstanced(ID3D12GraphicsCommandList*, UINT, UINT, UINT, INT, UINT);
 void STDMETHODCALLTYPE hk_ClearDepthStencilView(ID3D12GraphicsCommandList*, D3D12_CPU_DESCRIPTOR_HANDLE,
                                                D3D12_CLEAR_FLAGS, FLOAT, UINT8, UINT, const D3D12_RECT*);
 void STDMETHODCALLTYPE hk_CopyBufferRegion(ID3D12GraphicsCommandList*, ID3D12Resource*, UINT64, ID3D12Resource*, UINT64, UINT64);
+void STDMETHODCALLTYPE probe_CopyResource(ID3D12GraphicsCommandList*, ID3D12Resource*, ID3D12Resource*);
 
 void expo_probe_copy(ID3D12GraphicsCommandList*, ID3D12Resource*, bool);
 void expo_mirror(ID3D12GraphicsCommandList*, ID3D12Resource*, bool);
@@ -650,8 +686,7 @@ extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugVisionSnaps;
 extern "C" __declspec(dllexport) uint32_t CyberpunkVR_VisionMaxAgeMs;
 extern ID3D12Resource* g_hud_res;
 extern bool g_hud_batch_listed;
-extern bool g_rtv_dim_wrapped_logged;
-extern std::array<RtvDimEntry, 8192> g_rtv_dim_map;
+extern std::atomic<bool> g_rtv_dim_wrapped_logged;
 extern std::atomic<bool> g_hud_snap_fresh;
 extern std::atomic<uint32_t> g_hud_last_mip;
 extern std::atomic<uint32_t> g_rtv_dim_count;
@@ -735,7 +770,6 @@ extern D3D12_RESOURCE_DESC g_stable_desc;
 extern std::atomic<SIZE_T> g_2rt_seen_h0[4];
 extern std::atomic<SIZE_T> g_2rt_seen_h1[4];
 extern std::atomic<SIZE_T> g_tonemap_h0;
-extern std::atomic<uint32_t> g_rtv_dim_next;
 extern std::atomic<uint64_t> g_eye_copy_calls;
 extern std::atomic<uint64_t> g_eye_no_list;
 extern std::atomic<uint64_t> g_eye_no_rtv;
@@ -743,7 +777,6 @@ extern std::atomic<uint64_t> g_eye_node_hits;
 extern std::atomic<uint64_t> g_stable_tick;
 extern std::atomic<uint64_t> g_stable_tick_us;
 extern std::mutex g_gcb_mtx;
-extern std::mutex g_rtv_dim_mtx;
 extern thread_local DXGI_FORMAT t_mirror_copy_rtv_format;
 extern thread_local ID3D12GraphicsCommandList* t_mirror_copy_list;
 extern thread_local ID3D12GraphicsCommandList* t_tm_rt0_list;
@@ -779,7 +812,8 @@ void STDMETHODCALLTYPE hk_CreateRTV(ID3D12Device*, ID3D12Resource*, const D3D12_
 
 void STDMETHODCALLTYPE hk_OMSetRenderTargets(ID3D12GraphicsCommandList*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, BOOL, const D3D12_CPU_DESCRIPTOR_HANDLE*);
 
-void mirror_stable_inline_copy(ID3D12GraphicsCommandList*, ID3D12Resource*, uint32_t src_state);
+void mirror_stable_inline_copy(ID3D12GraphicsCommandList*, ID3D12Resource*, uint32_t src_state,
+                              const cvr::camera::PoseIdentity* pose=nullptr);
 
 extern "C" __declspec(dllexport) uint32_t  CyberpunkVR_DebugDescHeapSVFlags;
 extern "C" __declspec(dllexport) uint32_t  CyberpunkVR_DebugDescHeapSVNum;
@@ -795,6 +829,18 @@ extern std::atomic<bool>         g_desc_vtable_patched;
 extern std::atomic<bool>   g_desc_heap_resized;
 extern uint32_t g_desc_heap_target;
 void patch_descriptor_heap_size();
+
+// Applies or reverts the one-byte plane-routing patch (src/Stereo/WeaponPlane.cpp) to match
+// CyberpunkVR_WeaponPlaneAsScene. Cheap to call every tick: it returns immediately unless the
+// requested state differs from what it last wrote.
+void weapon_plane_sync();
+
+// Applies or reverts the per-object highlight plane filter to match CyberpunkVR_HighlightAnyPlane.
+// Same contract: a no-op unless the requested state differs from what it last wrote.
+void highlight_any_plane_sync();
+
+// Applies or reverts the global scene-bucket patch to match CyberpunkVR_PlaneBucketScene.
+void plane_bucket_scene_sync();
 void patch_device_descriptor_slot(void* device);
 
 bool node_cut_match(uint32_t rva, uint8_t rtid, bool vrcam);

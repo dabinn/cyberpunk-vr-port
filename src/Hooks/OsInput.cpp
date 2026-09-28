@@ -18,6 +18,7 @@
 #include <thread>
 #include "Hooks/SwapChain.hpp"
 #include "Overlay/ImGuiOverlay.hpp"
+#include "Overlay/LauncherDialog.hpp"
 #include "Hooks/Ngx.hpp"
 #include <cstdint>
 #include <cstdio>
@@ -148,6 +149,7 @@ HWND g_gameHwnd = nullptr;
 
 static BOOL WINAPI HookedGetCursorPos(LPPOINT lpPoint) {
     BOOL res = g_origGetCursorPos ? g_origGetCursorPos(lpPoint) : FALSE;
+    if(IsLauncherOpen())return res;
     static int callCount = 0;
     if (g_verboseLog && callCount++ % 1000 == 0) {
         Log("HookedGetCursorPos: called %d times. lpPoint=%p, pos=(%ld,%ld) g_gameHwnd=%p\n",
@@ -180,6 +182,9 @@ static BOOL WINAPI HookedGetCursorPos(LPPOINT lpPoint) {
 }
 
 static BOOL WINAPI HookedSetCursorPos(int X, int Y) {
+    // The settings panel leaves simulation running. Do not let the game's
+    // relative-mouse recenter fight desktop pointing or steal the VR cursor.
+    if(IsLauncherOpen() || OverlayIsVisible())return TRUE;
     static int callCount = 0;
     if (g_verboseLog && callCount++ % 100 == 0) {
         Log("HookedSetCursorPos: called %d times, target=(%d,%d) g_gameHwnd=%p\n", callCount, X, Y, g_gameHwnd);
@@ -213,6 +218,7 @@ static BOOL WINAPI HookedSetCursorPos(int X, int Y) {
 
 static BOOL WINAPI HookedGetCursorInfo(PCURSORINFO pci) {
     BOOL res = g_origGetCursorInfo ? g_origGetCursorInfo(pci) : FALSE;
+    if(IsLauncherOpen())return res;
     static int callCount = 0;
     if (g_verboseLog && callCount++ % 1000 == 0) {
         Log("HookedGetCursorInfo: called %d times. ptScreenPos=(%ld,%ld)\n",
@@ -245,6 +251,7 @@ static BOOL WINAPI HookedGetCursorInfo(PCURSORINFO pci) {
 }
 
 static BOOL WINAPI HookedClipCursor(const RECT* lpRect) {
+    if(IsLauncherOpen())return g_origClipCursor ? g_origClipCursor(nullptr) : ClipCursor(nullptr);
     RECT scaledRect{};
     const RECT* rectToUse = lpRect;
     
@@ -300,6 +307,7 @@ static BOOL WINAPI HookedClipCursor(const RECT* lpRect) {
 
 static BOOL WINAPI HookedGetClientRect(HWND hWnd, LPRECT lpRect) {
     BOOL res = g_origGetClientRect ? g_origGetClientRect(hWnd, lpRect) : FALSE;
+    if(IsLauncherOpen())return res;
     static int callCount = 0;
     if (g_verboseLog && callCount++ % 100 == 0) {
         Log("HookedGetClientRect: called %d times. hWnd=%p g_gameHwnd=%p\n", callCount, hWnd, g_gameHwnd);
@@ -321,6 +329,7 @@ static BOOL WINAPI HookedGetClientRect(HWND hWnd, LPRECT lpRect) {
 
 static BOOL WINAPI HookedGetWindowRect(HWND hWnd, LPRECT lpRect) {
     BOOL res = g_origGetWindowRect ? g_origGetWindowRect(hWnd, lpRect) : FALSE;
+    if(IsLauncherOpen())return res;
     static int callCount = 0;
     if (g_verboseLog && callCount++ % 100 == 0) {
         Log("HookedGetWindowRect: called %d times. hWnd=%p g_gameHwnd=%p\n", callCount, hWnd, g_gameHwnd);
@@ -380,6 +389,7 @@ static BOOL WINAPI HookedMoveWindow(HWND hWnd, int X, int Y, int nWidth, int nHe
 
 static int WINAPI HookedGetSystemMetrics(int nIndex) {
     int res = g_origGetSystemMetrics ? g_origGetSystemMetrics(nIndex) : 0;
+    if(IsLauncherOpen())return res;
     
     UINT virtualWidth = GetForcedDisplayModeWidth();
     UINT virtualHeight = GetForcedDisplayModeHeight();
@@ -400,6 +410,7 @@ static int WINAPI HookedGetSystemMetrics(int nIndex) {
 
 static DWORD WINAPI HookedGetMessagePos(VOID) {
     DWORD res = g_origGetMessagePos ? g_origGetMessagePos() : 0;
+    if(IsLauncherOpen())return res;
     if (g_gameHwnd) {
         UINT virtualWidth = GetForcedDisplayModeWidth();
         UINT virtualHeight = GetForcedDisplayModeHeight();
@@ -528,7 +539,7 @@ static bool GetClampedClientRect(HWND hwnd, RECT* outRect) {
 }
 
 void UpdateCursorCapture(HWND hwnd) {
-    if (OverlayIsVisible()) {
+    if (IsLauncherOpen() || OverlayIsVisible()) {
         if (g_cursorClipped) {
             ClipCursor(nullptr);
             g_cursorClipped = false;

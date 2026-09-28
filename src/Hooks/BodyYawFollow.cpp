@@ -1,3 +1,4 @@
+#include "Utils/DebugGate.hpp"
 // BodyYawFollow -- PHYSICAL BODY ROTATION: the character turns under the headset, the view does not
 // turn with it. Gated by "Physical body rotation" in the overlay (vrport.ini
 // xr_physical_body_rotation), off by default.
@@ -61,16 +62,25 @@
 // clamps or eases still leaves the hands on the controllers.
 
 #include "Core/VrCoreShared.hpp"
+#include "Core/LiveControls.hpp"
 #include "Hooks/Hook.hpp"
 #include "Runtimes/OpenXRManager.hpp"
 #include "Anim/CharacterRig.hpp"   // g_VREntityPos*: the player's world position for the publish
 #include "Anim/VrikState.hpp"
 #include "Camera/CameraLink.hpp"
+#include "Camera/NativeCameraPair.hpp"
+#include "Hooks/RoomscaleMove.hpp"
+#include "Runtimes/BodyYawFollower.hpp"
+#include "Camera/CameraState.hpp"
+#include "Runtimes/LookDownCone.hpp"
+#include "Runtimes/HybridBodyYaw.hpp"
+#include <mutex>
 
 #include <windows.h>
 #include <atomic>
 #include <cstdint>
 #include <cmath>
+#include <chrono>
 
 extern void Log(const char* fmt, ...);
 
@@ -82,79 +92,102 @@ extern "C" __declspec(dllexport) int   CyberpunkVR_BodyYawFollow        = 0;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugVrikNativePairPublished = 0;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugVrikNativePairRejected = 0;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugVrikNativePairPhaseMiss = 0;
-// 25 DEGREES OF FREE LOOK, and that is the only number this feature has.
+// FIVE DEGREES OF FREE LOOK, per the roomscale movement requirement.
 //
-// Inside the cone nothing is issued: you can glance around without the character turning, which is
-// what a neck is for. Outside it the WHOLE residual goes in the frame it appears -- no rate limit, no
-// hold timer, no per-frame ceiling, no stepping. The body therefore never lags the head by more than
-// the cone, and it settles exactly on the cone edge rather than oscillating across it, because only
-// the part beyond the edge is ever asked for.
-//
-// Tried at 5, which tracked the head almost rigidly, and at 0, where the body faces exactly where the
-// head faces at all times. Both work; 25 is the one that leaves a neck.
-extern "C" __declspec(dllexport) float CyberpunkVR_BodyYawFollowDeadDeg = 25.0f;
+// Glances inside the cone leave the body still. Crossing it starts a short
+// body-only catch-up toward the centre, restoring the full free-look zone.
+// Camera tracking and its same-frame yaw cancellation remain immediate.
+extern "C" __declspec(dllexport) float CyberpunkVR_BodyYawFollowDeadDeg = 5.0f;
 
 namespace {
+cvr::roomscale::BodyYawFollower s_yawFollower;
+cvr::body::TrackedBodyYaw s_trackedBody;
+cvr::body::RotationMode s_bodyRotationMode=cvr::body::RotationMode::Off;
+cvr::body::HybridBodyYaw s_hybridBody;
+std::mutex s_yawFollowerMutex;
 std::atomic<uint32_t> s_nativePairSeq{0};
+std::mutex s_nativePairWriter;
 struct AtomicNativePair {
-    std::atomic<float> camQuat[4]{};
-    std::atomic<float> entityQuat[4]{};
-    std::atomic<float> cameraMinusEntity[3]{};
-    std::atomic<uint32_t> valid{0};
-    std::atomic<uint32_t> consumerEpoch{0};
+    std::atomic<float> camQuat[4]{},entityQuat[4]{},cameraMinusEntity[3]{};
+    std::atomic<uint32_t> valid{0},consumerEpoch{0}; // epoch is diagnostic only
+    std::atomic<float> bodyCameraMinusEntity[3]{};
+    std::atomic<uint32_t> unavailable{0};
+    std::atomic<uintptr_t> owner{0};
+    std::atomic<uint64_t> origin{0},stampMs{0};
 };
 AtomicNativePair s_nativePair{};
-
-void PublishNativePair(const cvr::camera::LocatedCameraFrame& camera,
-                       const float entityPos[3], const float entityQuat[4],
-                       uint32_t consumerEpoch) {
-    const float dx = camera.worldPos[0] - entityPos[0];
-    const float dy = camera.worldPos[1] - entityPos[1];
-    const float dz = camera.worldPos[2] - entityPos[2];
-    const float spanSq = dx * dx + dy * dy + dz * dz;
-    const bool valid = std::isfinite(spanSq) && spanSq >= 1.0e-4f && spanSq < 9.0f;
-
-    s_nativePairSeq.fetch_add(1u, std::memory_order_acq_rel);
-    for (int i = 0; i < 4; ++i) {
-        s_nativePair.camQuat[i].store(camera.worldQuat[i], std::memory_order_relaxed);
-        s_nativePair.entityQuat[i].store(entityQuat[i], std::memory_order_relaxed);
-    }
-    s_nativePair.cameraMinusEntity[0].store(dx, std::memory_order_relaxed);
-    s_nativePair.cameraMinusEntity[1].store(dy, std::memory_order_relaxed);
-    s_nativePair.cameraMinusEntity[2].store(dz, std::memory_order_relaxed);
-    s_nativePair.valid.store(valid ? 1u : 0u, std::memory_order_relaxed);
-    s_nativePair.consumerEpoch.store(consumerEpoch, std::memory_order_relaxed);
-    s_nativePairSeq.fetch_add(1u, std::memory_order_release);
-    if (valid) ++CyberpunkVR_DebugVrikNativePairPublished;
-    else ++CyberpunkVR_DebugVrikNativePairRejected;
+struct CurrentBodyFrame {
+    std::mutex mutex;
+    float position[3]{},rotation[4]{0,0,0,1},trackingYaw{};
+    uintptr_t owner{};
+    uint64_t stamp{};
+} s_currentBodyFrame;
 }
-}  // namespace
+
+bool VRIK_ReadCurrentBodyFrame(float* p,float* q,float* trackingYaw) {
+    std::lock_guard lock(s_currentBodyFrame.mutex);
+    const auto now=GetTickCount64();
+    if(!s_currentBodyFrame.owner || s_currentBodyFrame.owner!=cvr::roomscale::PlayerIdentity() ||
+       now<s_currentBodyFrame.stamp || now-s_currentBodyFrame.stamp>250)return false;
+    for(int k=0;k<3;++k)p[k]=s_currentBodyFrame.position[k];
+    for(int k=0;k<4;++k)q[k]=s_currentBodyFrame.rotation[k];
+    *trackingYaw=s_currentBodyFrame.trackingYaw;return true;
+}
+
+void VRIK_PublishNativeCameraPair(const int32_t* centre,const int32_t* bodyBase,
+        const int32_t* entity,const float* cameraQuat,const float* entityQuat,
+        uintptr_t owner,uint64_t origin,bool ownerStable) {
+    using namespace cvr::camera;
+    const auto pair=MakeCameraEntitySample({centre[0],centre[1],centre[2]},
+        {bodyBase[0],bodyBase[1],bodyBase[2]},{entity[0],entity[1],entity[2]},cameraQuat,entityQuat);
+    std::lock_guard lock(s_nativePairWriter);
+    s_nativePairSeq.fetch_add(1,std::memory_order_acq_rel);
+    for(int k=0;k<4;++k) {
+        s_nativePair.camQuat[k].store(pair.cameraQuat[k],std::memory_order_relaxed);
+        s_nativePair.entityQuat[k].store(pair.entityQuat[k],std::memory_order_relaxed);
+    }
+    for(int k=0;k<3;++k) {
+        s_nativePair.cameraMinusEntity[k].store(pair.cameraMinusEntity[k],std::memory_order_relaxed);
+        s_nativePair.bodyCameraMinusEntity[k].store(pair.bodyMinusEntity[k],std::memory_order_relaxed);
+    }
+    s_nativePair.valid.store(ownerStable && pair.valid,std::memory_order_relaxed);
+    s_nativePair.unavailable.store(!ownerStable,std::memory_order_relaxed);
+    s_nativePair.consumerEpoch.store(g_VrikFrameEpoch.load(std::memory_order_relaxed),std::memory_order_relaxed);
+    s_nativePair.owner.store(owner,std::memory_order_relaxed);
+    s_nativePair.origin.store(origin,std::memory_order_relaxed);
+    s_nativePair.stampMs.store(GetTickCount64(),std::memory_order_relaxed);
+    s_nativePairSeq.fetch_add(1,std::memory_order_release);
+    if(ownerStable && pair.valid)CVR_DIAGNOSTIC(++CyberpunkVR_DebugVrikNativePairPublished);
+    else CVR_DIAGNOSTIC(++CyberpunkVR_DebugVrikNativePairRejected);
+}
 
 bool VRIK_ReadNativeTransformSnapshot(VrikTransformSnapshot* out) {
-    if (!out) return false;
-    const uint32_t expectedEpoch = g_VrikFrameEpoch.load(std::memory_order_relaxed);
-    for (int tries = 0; tries < 4; ++tries) {
-        const uint32_t s0 = s_nativePairSeq.load(std::memory_order_acquire);
-        if (s0 == 0u) return false;
-        if (s0 & 1u) continue;
-        VrikTransformSnapshot tmp{};
-        for (int i = 0; i < 4; ++i) {
-            tmp.camQuat[i] = s_nativePair.camQuat[i].load(std::memory_order_relaxed);
-            tmp.entityQuat[i] = s_nativePair.entityQuat[i].load(std::memory_order_relaxed);
+    if(!out)return false;
+    for(int attempt=0;attempt<4;++attempt) {
+        const uint32_t before=s_nativePairSeq.load(std::memory_order_acquire);
+        if(!before)return false;
+        if(before&1u)continue;
+        VrikTransformSnapshot value{};
+        for(int k=0;k<4;++k) {
+            value.camQuat[k]=s_nativePair.camQuat[k].load(std::memory_order_relaxed);
+            value.entityQuat[k]=s_nativePair.entityQuat[k].load(std::memory_order_relaxed);
         }
-        for (int i = 0; i < 3; ++i) {
-            tmp.cameraMinusEntity[i] =
-                s_nativePair.cameraMinusEntity[i].load(std::memory_order_relaxed);
+        for(int k=0;k<3;++k) {
+            value.cameraMinusEntity[k]=s_nativePair.cameraMinusEntity[k].load(std::memory_order_relaxed);
+            value.bodyCameraMinusEntity[k]=s_nativePair.bodyCameraMinusEntity[k].load(std::memory_order_relaxed);
         }
-        tmp.valid = s_nativePair.valid.load(std::memory_order_relaxed);
-        const uint32_t consumerEpoch =
-            s_nativePair.consumerEpoch.load(std::memory_order_relaxed);
-        if (s_nativePairSeq.load(std::memory_order_acquire) == s0 &&
-            consumerEpoch == expectedEpoch &&
-            g_VrikFrameEpoch.load(std::memory_order_relaxed) == expectedEpoch) {
-            *out = tmp;
-            return true;
-        }
+        value.valid=s_nativePair.valid.load(std::memory_order_relaxed);
+        value.unavailable=s_nativePair.unavailable.load(std::memory_order_relaxed);
+        const auto owner=s_nativePair.owner.load(std::memory_order_relaxed);
+        const auto origin=s_nativePair.origin.load(std::memory_order_relaxed);
+        const auto stamp=s_nativePair.stampMs.load(std::memory_order_relaxed);
+        if(before!=s_nativePairSeq.load(std::memory_order_acquire))continue;
+        using namespace cvr::camera;
+        const auto state=CameraPacketStatus(owner,origin,stamp,cvr::roomscale::PlayerIdentity(),
+            OpenXRManager::Get().GetTrackingOriginSerial(),GetTickCount64(),value.valid!=0,value.unavailable!=0);
+        value.valid=state==CameraPacketState::Valid;
+        value.unavailable=state==CameraPacketState::Unavailable;
+        *out=value;return true;
     }
     return false;
 }
@@ -184,12 +217,17 @@ extern "C" __declspec(dllexport) int   CyberpunkVR_PlayerEntityValid = 0;
 namespace {
 
 // The HMD's yaw relative to the recenter base, radians, about the XR vertical (+Y).
-bool HeadYawRelBase(float* outYaw) {
+bool HeadYawRelBase(float* outYaw,float* outDownDegrees,float* outBend,uint64_t* origin,bool* yawDefined) {
     OpenXRHeadPose hp{};
-    if (!OpenXRManager::Get().GetHeadPose(&hp) || !hp.valid) return false;
-    const float y = hp.oriY, z = hp.oriZ, x = hp.oriX, w = hp.oriW;
-    *outYaw = std::atan2(2.0f * (w * y + x * z), 1.0f - 2.0f * (y * y + z * z));
-    return true;
+    // This starts the next native move. Read the same input latch as CCT, not
+    // the completed previous move that camera/IK consumers still own.
+    if (!OpenXRManager::Get().AcquireFrameHeadSample(&hp,nullptr,nullptr,nullptr,false) || !hp.valid) return false;
+    *origin = hp.originSerial;
+    *outDownDegrees=cvr::roomscale::HeadDownDegrees(hp.oriX,hp.oriY,hp.oriZ,hp.oriW);
+    *outBend=hp.bodyBend.angle;
+    *yawDefined=cvr::roomscale::HeadYaw(hp.oriX, hp.oriY, hp.oriZ, hp.oriW, outYaw);
+    const float norm=hp.oriX*hp.oriX+hp.oriY*hp.oriY+hp.oriZ*hp.oriZ+hp.oriW*hp.oriW;
+    return std::isfinite(norm) && norm>.5f && norm<1.5f;
 }
 
 }  // namespace
@@ -232,48 +270,91 @@ bool HeadYawRelBase(float* outYaw) {
 //   far off the road (the cone is 25 deg, so the residue is head yaw minus 25), with no way back:
 //   the only thing that unwinds the accumulator is the on-foot loop. Released here, the vehicle view
 //   is composed from the car's own heading and nothing else, and stepping out re-converges normally.
+namespace {
+void PublishFollowerState() {
+    CyberpunkVR_BodyYawFollow=s_yawFollower.Enabled() ? 1 : 0;
+    CyberpunkVR_BodyYawRealignRad=s_yawFollower.Offset();
+    CyberpunkVR_DebugBodyFollowOffsetDeg=s_yawFollower.Offset()*57.2957795f;
+}
+void RefreshFollowerState() {
+    const auto mode=static_cast<cvr::body::RotationMode>(g_liveControls.xrBodyRotationMode);
+    s_yawFollower.SetEnabled(mode!=cvr::body::RotationMode::Off &&
+                            cvr::roomscale::PhysicalBodyHeadingOwned());
+    if(mode!=s_bodyRotationMode || !s_yawFollower.Enabled()){
+        s_trackedBody.Reset(s_yawFollower.Offset(),mode!=cvr::body::RotationMode::Hybrid);
+        s_hybridBody.Reset();s_bodyRotationMode=mode;
+    }
+    PublishFollowerState();
+}
+}
+
+bool BodyYawFollowActive() {
+    std::lock_guard lock(s_yawFollowerMutex);
+    RefreshFollowerState();
+    return s_yawFollower.Enabled();
+}
+float BodyYawFollowOffset() {
+    std::lock_guard lock(s_yawFollowerMutex);
+    RefreshFollowerState();
+    return s_yawFollower.Offset();
+}
 extern "C" void BodyYawFollowRelease() {
-    if (CyberpunkVR_BodyYawRealignRad == 0.0f) return;
-    CyberpunkVR_BodyYawRealignRad = 0.0f;
-    CyberpunkVR_DebugBodyFollowOffsetDeg = 0.0f;
+    std::lock_guard lock(s_yawFollowerMutex);
+    s_yawFollower.Reset();
+    s_trackedBody.Reset(0,s_bodyRotationMode!=cvr::body::RotationMode::Hybrid);
+    s_hybridBody.Reset();
+    PublishFollowerState();
 }
 
 extern "C" float BodyYawFollowStep() {
-    ++CyberpunkVR_DebugBodyFollowCalls;
-    if (!CyberpunkVR_BodyYawFollow) {
-        BodyYawFollowRelease();
-        return 0.0f;
+    // Acquire XR state before taking the follower lock: camera consumers may
+    // read the offset while publishing that same XR frame.
+    float hmdYaw{},headDownDegrees{},bodyBend{};
+    uint64_t origin{};
+    bool yawDefined=false;
+    const bool haveHead=HeadYawRelBase(&hmdYaw,&headDownDegrees,&bodyBend,&origin,&yawDefined);
+    cvr::body::TrackingFrame bodyFrame{};
+    const bool haveBody=cvr::body::NeedsBodyTracking(static_cast<cvr::body::RotationMode>(g_liveControls.xrBodyRotationMode)) &&
+        OpenXRManager::Get().GetBodyTrackingFrame(&bodyFrame);
+    std::lock_guard lock(s_yawFollowerMutex);
+    CVR_DIAGNOSTIC(++CyberpunkVR_DebugBodyFollowCalls);
+    RefreshFollowerState();
+    if(!s_yawFollower.Enabled() || !cvr::roomscale::PhysicalBodyAllowed() || !haveHead){
+        s_trackedBody.Suspend();s_hybridBody.Suspend();return 0;
     }
-    float hmdYaw = 0.0f;
-    if (!HeadYawRelBase(&hmdYaw)) return 0.0f;
-
-    float resid = hmdYaw - CyberpunkVR_BodyYawRealignRad;
-    while (resid >  3.14159265f) resid -= 6.28318531f;
-    while (resid < -3.14159265f) resid += 6.28318531f;
-    CyberpunkVR_DebugBodyFollowErrDeg = resid * 57.2957795f;
-
-    // Asymmetric on purpose, and that is what keeps it stable: only the part beyond the cone is
-    // issued, so the body settles exactly on the cone edge, and looking back toward it shrinks the
-    // residual by itself with nothing issued -- no unwinding, no oscillation across the edge.
-    float cone = CyberpunkVR_BodyYawFollowDeadDeg * 0.01745329252f;
-    if (cone < 0.0f) cone = 0.0f;
-    float step = 0.0f;
-    if (resid >  cone) step = resid - cone;
-    else if (resid < -cone) step = resid + cone;
-    if (step == 0.0f) return 0.0f;
-
-    // NO CEILING, NO RATE, NO HOLD. The whole residual outside the cone goes in this frame, on the
-    // user's call: the body is to be as fast as the channel can carry it. A 45 deg per-frame clamp
-    // lived here briefly; the snap turn puts that much through this same channel in one frame anyway,
-    // so the clamp only ever limited how fast a big head turn could be answered. If the engine ever
-    // refuses part of a large delta the view would drift by the refused part -- that would show up as
-    // the view creeping during fast turns, and nothing else looks like it.
-
-    CyberpunkVR_BodyYawRealignRad += step;
-    while (CyberpunkVR_BodyYawRealignRad >  3.14159265f) CyberpunkVR_BodyYawRealignRad -= 6.28318531f;
-    while (CyberpunkVR_BodyYawRealignRad < -3.14159265f) CyberpunkVR_BodyYawRealignRad += 6.28318531f;
-    CyberpunkVR_DebugBodyFollowOffsetDeg = CyberpunkVR_BodyYawRealignRad * 57.2957795f;
-    ++CyberpunkVR_DebugBodyFollowApplied;
+    const auto now=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    CVR_DIAGNOSTIC(CyberpunkVR_DebugBodyFollowErrDeg=yawDefined?
+        std::remainder(hmdYaw-s_yawFollower.Offset(),6.28318530718f)*57.2957795f:0);
+    cvr::body::YawEstimate result{};
+    if(cvr::body::NeedsBodyTracking(s_bodyRotationMode)){
+        if(haveBody && bodyFrame.origin==origin)result=s_trackedBody.Update(bodyFrame);
+        else s_trackedBody.Suspend();
+    }
+    if(s_bodyRotationMode==cvr::body::RotationMode::Hybrid){
+        const auto command=s_hybridBody.Step({hmdYaw,headDownDegrees,bodyBend,s_yawFollower.Offset(),
+            g_liveControls.xrBodyFreeLookDeg,result,yawDefined,result.valid && s_trackedBody.Ready(),now,origin});
+        CyberpunkVR_BodyYawFollowDeadDeg=command.coneDegrees;
+        const float step=s_yawFollower.Step(command.targetYaw,0,now,origin);
+        PublishFollowerState();
+        if(step!=0)CVR_DIAGNOSTIC(++CyberpunkVR_DebugBodyFollowApplied);
+        return step;
+    }
+    if(s_bodyRotationMode==cvr::body::RotationMode::Tracked){
+        CyberpunkVR_BodyYawFollowDeadDeg=0; // no standing, look-down or swimming cone in this mode
+        const float target=result.valid?result.yaw:s_yawFollower.Offset();
+        const float step=s_yawFollower.Step(target,0,now,origin);
+        PublishFollowerState();
+        if(step!=0)CVR_DIAGNOSTIC(++CyberpunkVR_DebugBodyFollowApplied);
+        return step;
+    }
+    if(!yawDefined)return 0;
+    CyberpunkVR_BodyYawFollowDeadDeg=cvr::roomscale::BodyFreeLookCone(
+        cvr::swimming::Active(),g_liveControls.xrBodyFreeLookSwimDeg,
+        headDownDegrees,g_liveControls.xrBodyFreeLookDeg,g_liveControls.xrBodyFreeLookDownDeg,bodyBend);
+    const float step=s_yawFollower.Step(hmdYaw,CyberpunkVR_BodyYawFollowDeadDeg*.01745329252f,now,origin);
+    PublishFollowerState();
+    if(step!=0)CVR_DIAGNOSTIC(++CyberpunkVR_DebugBodyFollowApplied);
     return step;
 }
 
@@ -295,31 +376,17 @@ extern "C" void BodyYawFollowTick(float engineZ, float engineW, const float* eng
     const float yaw = 2.0f * std::atan2(wz, ww);
     const float h = yaw * 0.5f;
     const float currentEntityQuat[4] = { 0.0f, 0.0f, std::sin(h), std::cos(h) };
-
-    // At this point in frame N, LocateCamera has only published frame N-1. Pair that camera with
-    // the entity saved by this callback in frame N-1, then roll the saved entity forward. Both
-    // inputs advance on the engine frame clock; no CET/Lua update or slew-filter state participates.
-    static bool s_previousEntityValid = false;
-    static float s_previousEntityPos[3] = {};
-    static float s_previousEntityQuat[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    static uint32_t s_previousEntityEpoch = 0;
-    static uint32_t s_lastPairedCameraSeq = 0;
-    const uint32_t currentEpoch = g_VrikFrameEpoch.load(std::memory_order_relaxed);
-    cvr::camera::LocatedCameraFrame camera{};
-    if (s_previousEntityValid && cvr::camera::LocatedCameraFrameRead(&camera) &&
-        camera.sequence != s_lastPairedCameraSeq) {
-        if (camera.frameEpoch == s_previousEntityEpoch) {
-            PublishNativePair(camera, s_previousEntityPos, s_previousEntityQuat, currentEpoch);
-        } else {
-            ++CyberpunkVR_DebugVrikNativePairPhaseMiss;
-        }
-        s_lastPairedCameraSeq = camera.sequence;
+    {
+        std::lock_guard lock(s_currentBodyFrame.mutex);
+        for(int k=0;k<3;++k)s_currentBodyFrame.position[k]=enginePos[k];
+        for(int k=0;k<4;++k)s_currentBodyFrame.rotation[k]=currentEntityQuat[k];
+        s_currentBodyFrame.trackingYaw=yaw-BodyYawFollowOffset();
+        s_currentBodyFrame.owner=cvr::roomscale::PlayerIdentity();
+        s_currentBodyFrame.stamp=GetTickCount64();
     }
-    for (int i = 0; i < 3; ++i) s_previousEntityPos[i] = enginePos[i];
-    for (int i = 0; i < 4; ++i) s_previousEntityQuat[i] = currentEntityQuat[i];
-    s_previousEntityEpoch = currentEpoch;
-    s_previousEntityValid = true;
 
+    // Camera/owner pairing is published by the completed camera write itself.
+    // This callback only publishes the current engine body orientation/position.
     CyberpunkVR_BodyYawFinalRad = yaw;
     CyberpunkVR_BodyYawFinalValid = 1;
     CyberpunkVR_PlayerEntityPos[0] = enginePos[0];

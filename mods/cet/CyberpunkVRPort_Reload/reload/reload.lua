@@ -715,6 +715,54 @@ local exitAt = '-'           -- where M.frame last returned, for the diagnostic 
 -- a fresh one gripped in the same breath. At most two exist at once -- one falling, one held.
 local magS = { state = 'in', hand = nil, off = { 0, 0, 0 }, t = 0, dist = -1, btnWas = false }
 
+-- THE BELT, IF THERE IS ONE. A fresh magazine used to be conjured wherever the hand happened to be --
+-- "берётся из воздуха" -- because there was nowhere to take it FROM. There is now: the tactical belt
+-- carries that weapon's own magazine in a pouch, per weapon, and the hand can go and get it.
+--
+-- CET gives one mod another's return value, which is the whole channel: no shared slot, no redscript
+-- field, nothing per frame on disk. It is resolved lazily and re-tried, because load order between two
+-- CET mods is not ours to fix, and EVERY use degrades to the old behaviour when it is missing -- a
+-- weapon the belt has no pouch for, or a player who does not run the belt at all, must not become
+-- unreloadable.
+local beltMod, beltAt = nil, -99.0
+local function belt()
+    local now = (os and os.clock and os.clock()) or 0.0
+    if beltMod == nil and (now - beltAt) > 2.0 then
+        beltAt = now
+        if type(GetMod) == 'function' then
+            pcall(function() beltMod = GetMod('CyberpunkVRPort_TacticalBelt') end)
+        end
+    end
+    return beltMod
+end
+
+-- The pouch this weapon's magazine comes out of, and how far the hand is from it. nil means "there is
+-- no pouch for this weapon" -- not "it is far away" -- and the caller keeps the old behaviour.
+local function beltMagDist(side)
+    local b = belt()
+    if b == nil or type(b.magKey) ~= 'function' then return nil end
+    local k = nil
+    pcall(function() k = b.magKey() end)
+    if k == nil then return nil end
+    local d = nil
+    pcall(function() d = b.magDist(side) end)
+    return d or 99.0
+end
+
+local function beltMagRadius()
+    local b = belt()
+    local r = nil
+    if b ~= nil and type(b.magRadius) == 'function' then pcall(function() r = b.magRadius() end) end
+    return r or 0.12
+end
+
+-- Said every frame with the current truth rather than on transitions: a missed edge would leave the
+-- pouch permanently empty, and the player would have nothing to reach for ever again.
+local function beltMagTaken(on)
+    local b = belt()
+    if b ~= nil and type(b.magTaken) == 'function' then pcall(function() b.magTaken(on) end) end
+end
+
 -- THE FRAME OF TRAVEL A WORLD-PLACED ENTITY IS OTHERWISE BEHIND BY.
 --
 -- Everything this module computes is MODEL space, and that space is self-consistent by construction: the base and
@@ -1055,6 +1103,10 @@ local function magHome()
     end
     magS.magnet = 0
     magS.state, magS.hand, magS.t, magS.armed = 'in', nil, 0, false
+    -- ...and the belt gets its magazine back. Holstering mid-grab used to be enough to leave the pouch
+    -- empty with nothing in the hand to show for it.
+    magS.fromBelt = false
+    beltMagTaken(false)
     magS.slotComp = nil            -- the cached slot component belongs to the player object that is going away
     -- ...and so do the carriers. A handle kept across a load or a respawn points at a player that no longer
     -- exists, and the next Toggle would be written into it; the same rule the slot component above already has.
@@ -2057,6 +2109,11 @@ function M.frame(weapon, slotComp, holder, dt)
     -- stripped to a plain entMeshComponent on the real magazine mesh. The game's version draws it with a SKINNED
     -- mesh needing a live skeleton, so spawned standalone only its companion _shadow mesh appears -- the "I only
     -- see a shadow" in the headset.
+    -- THE POUCH IS EMPTY WHILE THE MAGAZINE IS IN A HAND. Said every frame rather than on the two
+    -- transitions, because a missed edge would leave the belt bare for the rest of the session and the
+    -- player with nothing left to reach for.
+    beltMagTaken(magS.state == 'hand' and magS.fromBelt == true)
+
     local mc = (cfg.mag and cfg.mag.enabled) and cfg.mag or nil
     if mc and mc.entity then
             -- WHERE THE MAGAZINE SITS IN THE HAND, per stage. It is not one relation: measured off the take, the
@@ -3340,9 +3397,14 @@ function M.frame(weapon, slotComp, holder, dt)
             local catchW = snapW
             local takeAnywhere = false
             if magS.state == 'gone' then
+                -- OFF THE BELT WHEN THE BELT HAS ONE. The distance is the pouch's, so the fingers fade in as
+                -- the hand goes down to the hip and the grip only bites there -- the same gesture as taking a
+                -- grenade, and the pouch is already lit by then.
+                local beltD = beltMagDist(free)
                 local gx, gy, gz = magFromRaw(free)          -- from the RAW hand: a weight must never feed itself
                 local goneD = gx and len3(gx - wx, gy - wy, gz - wz) or -1
-                catchW = pullW(goneD, mc.seatSnapRadius or 0.12)
+                if beltD ~= nil then goneD = beltD end
+                catchW = pullW(goneD, beltD ~= nil and beltMagRadius() or (mc.seatSnapRadius or 0.12))
                 -- the same rule, and it matters more here: with the well empty a squeeze conjures a magazine
                 -- ANYWHERE, so without this a hand on the slide of a dry gun got a magazine instead of a rack
                 local slD2 = slideS.dist or -1
@@ -3350,7 +3412,10 @@ function M.frame(weapon, slotComp, holder, dt)
                              or (magS.slideHasPose and slD2 >= 0 and goneD >= 0 and slD2 < goneD)
                 if busy then catchW = 0.0 end
                 magS.insD = goneD
-                takeAnywhere = not busy
+                -- ...and with a pouch there is no "anywhere" any more: the hand has to be AT it. Without one
+                -- nothing changes -- a squeeze conjures a magazine as it always did.
+                magS.fromBelt = (beltD ~= nil)
+                takeAnywhere = (not busy) and (beltD == nil)
             end
 
             if magS.state == 'in' or magS.state == 'gone' then
@@ -3574,6 +3639,9 @@ function M.frame(weapon, slotComp, holder, dt)
                                        or ((math.random(2) == 2) and 2 or 1)
                         -- ...and which way up, if this magazine can be held both ways
                         magS.roll, magS.insW = pickRoll(free), 0.0
+                        -- A magazine pulled OUT OF THE GUN did not come off the belt, whatever the last
+                        -- frame in `gone` decided -- and the pouch must not go empty because of it.
+                        if magS.state == 'in' then magS.fromBelt = false end
                         magS.state, magS.hand = 'hand', free
                         magS.armed = false                   -- the well cannot pull until this has left the well
                         magFade(true, free)

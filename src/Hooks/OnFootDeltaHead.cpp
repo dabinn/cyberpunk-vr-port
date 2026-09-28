@@ -8,7 +8,10 @@
 #include "Camera/CameraState.hpp"   // CyberpunkVR_BodyYawFollow: the mirror set below
 #include "Core/Telemetry.hpp"
 #include "Hooks/Hook.hpp"
+#include "Hooks/RoomscaleMove.hpp"
 #include "Hooks/Trampoline.hpp"
+#include "Hooks/TurnInput.hpp"
+#include "Hooks/LadderInput.hpp"
 #include "Runtimes/OpenXRManager.hpp"
 #include "Utils/AobScanner.hpp"
 #include "Utils/MemorySafe.hpp"
@@ -35,21 +38,21 @@ extern "C" void __fastcall OnOnFootDeltaHeadCallback(float* deltaHead) {
         ++g_telemetry->deltaHeadHits;
         g_telemetry->deltaHeadRcx = reinterpret_cast<uintptr_t>(deltaHead);
     }
-    if (!deltaHead) return;
-    if (g_isInVehicle) {
-        // MOUNTED: the follower issues nothing, so the realign it accumulated on foot must not be
-        // left standing -- PatchCamera subtracts it from the CAR's heading and the drive ends up
-        // that many degrees off the road. See BodyYawFollowRelease.
+    if (!deltaHead || !cvr::roomscale::IsPlayerProvider(
+            reinterpret_cast<const uint8_t*>(deltaHead) - 0x9C)) return;
+    const bool bodyRot=BodyYawFollowActive();
+    if (cvr::input::NativeOwnsTurn(g_isInVehicle,g_vehicleState.load(std::memory_order_relaxed),cvr::ladder::Active())) {
+        InterlockedExchange(&g_pendingSnapYawDeltaBits,0);
+        // Native vehicle/ladder heading must not inherit a pending on-foot snap
+        // or the physical follower's previous realign offset.
         BodyYawFollowRelease();
         return;
     }
 
     // Physical body rotation (F10 -> VRIK). OFF (default): no continuous body-yaw
     // tracking from the HMD -- only the discrete snap-turn is applied (classic heading).
-    // ONE GATE for the whole feature. The plugin-side mirror is what the camera write and the pose
-    // path test on their hot paths, and it is set from here so the two can never disagree.
-    const bool bodyRot = g_liveControls.xrPhysicalBodyRotation != 0;
-    CyberpunkVR_BodyYawFollow = bodyRot ? 1 : 0;
+    // Eligibility also follows the VRIK suspend gate. Camera readers refresh
+    // the same state when a scripted scene stops invoking this callback.
 
     // MEASUREMENT ONLY. Cancelling the weapon's camera kick HERE was built and taken out again on the
     // user's call: hiding it in the view leaves the game still applying it to the character, and the
@@ -70,9 +73,9 @@ extern "C" void __fastcall OnOnFootDeltaHeadCallback(float* deltaHead) {
         }
     }
 
-    int idx = GetSnapTurnYawIndex();
-    if (idx < 0) idx = 0;
-    if (idx > 3) idx = 3;
+    // RE: the trampoline passes P+0x9C. This is the DEGREE delta consumed
+    // below; indices 1/2 are the accumulator and last delta, not input channels.
+    constexpr int idx = 0;
 
     // 2. Aggiungi lo snap yaw se presente
     const LONG bits = InterlockedExchange(&g_pendingSnapYawDeltaBits, 0);
@@ -145,7 +148,7 @@ extern "C" void __fastcall OnOnFootDeltaHeadCallback(float* deltaHead) {
     //
     // The loop, the cone and the realign accumulator live in src/Hooks/BodyYawFollow.cpp;
     // this file is only the door into the engine's heading.
-    if (g_menuModeValue == 0) {
+    if (cvr::roomscale::PhysicalBodyAllowed()) {
         const float step = BodyYawFollowStep();         // radians, 0 when inside the cone
         if (step != 0.0f) deltaHead[idx] += step * 57.2957795f;
     }

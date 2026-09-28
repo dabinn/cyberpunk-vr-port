@@ -372,9 +372,20 @@ local RAW = {}
 -- hand releases, the weapon/body query toggles and the solve. Those stayed in that mod.
 local dbgNote2 = '-'
 
+-- ONLY CLEAR WHAT THIS MODULE CLAIMED. The slot is shared -- the belt's grenade takes a wrist to hold
+-- a pin with, and it is the only other claimant -- so publishing -1 unconditionally every frame is
+-- this module cancelling somebody else's hold, from a module that is not holding anything at all.
+--
+-- Writing only on a change also means the far more common case, a reload owning no hand, costs nothing
+-- and says nothing.
+local lastOwned = nil
 local function publishOwnedHand(hand)
     if type(SetVRReloadOwnedHand) ~= 'function' then return end
-    pcall(function() SetVRReloadOwnedHand((hand == 0 or hand == 1) and hand or -1) end)
+    local v = (hand == 0 or hand == 1) and hand or nil
+    if v == nil and lastOwned == nil then return end
+    if v == lastOwned then return end
+    lastOwned = v
+    pcall(function() SetVRReloadOwnedHand(v == nil and -1 or v) end)
 end
 
 registerForEvent('onUpdate', function(dt)

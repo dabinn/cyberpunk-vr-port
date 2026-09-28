@@ -1,7 +1,14 @@
+#include "Utils/DebugGate.hpp"
+#include "Render/CommandResources.hpp"
+#include "Render/GpuStageProfile.hpp"
 // openxr_frameloop.cpp - the XR frame loop (PumpInlineFrame / FrameThreadMain).
 // Split verbatim from openxr_manager.cpp; this is an OpenXRManager method. Shared
 // module state/helpers come from openxr_internal.h (inline, single instance).
 #include "Runtimes/OpenXRManager.hpp"
+#include "Camera/ImagePoseIdentity.hpp"
+#include "Runtimes/RoomscaleTracking.hpp"
+#include "Runtimes/SimulatorRecenter.hpp"
+#include "Hooks/CyberwareChord.hpp"
 #include "Runtimes/OpenXRInternal.hpp"
 #include "Anim/CharacterRig.hpp"   // VRIK_NoteShake: the shake census, stage 3
 #include "Utils/XrMath.hpp"
@@ -22,6 +29,9 @@
 #include <atomic>
 #include <dxgi1_4.h>
 #include "Utils/LogThrottle.hpp"
+
+// Shared physical-body heading in tracking space; the getter refreshes suspension state.
+extern float BodyYawFollowOffset();
 
 // Run the XR cycle on every display frame and let xrWaitFrame pace it, re-submitting the
 // last snapshot with ITS OWN pose when the game has not produced a new one. 0 restores the
@@ -266,33 +276,9 @@ extern "C" __declspec(dllexport) std::atomic<unsigned long long> CyberpunkVR_Deb
 extern "C" __declspec(dllexport) std::atomic<unsigned long long> CyberpunkVR_DebugXrEndsWithLayer  = 0;
 extern "C" __declspec(dllexport) std::atomic<unsigned long long> CyberpunkVR_DebugXrEndsEmpty      = 0;
 extern "C" __declspec(dllexport) std::atomic<unsigned long long> CyberpunkVR_DebugXrEndFailed      = 0;
-// 1 = print the [xr*] block once a second. Deliberately NOT registered in debug_gate.cpp's
-// kFlags table: that table forces every flag it lists to 0 unless the launcher DEBUG box is
-// ticked, and this is the measurement the port exists to make -- it has to be readable in an
-// ordinary session. Six lines a second costs nothing next to the log's 300-line flush budget.
+// XR reports and deep timing are both controlled by the launcher DEBUG gate.
+// RuntimeDiagnostics gates the independent export-only counters and snapshots.
 extern "C" __declspec(dllexport) int CyberpunkVR_XrRateLog = 1;
-
-// THE DEEP FRAME DIAGNOSTICS -- and unlike the flag above, this one IS registered in kFlags, so it
-// is silent unless the launcher DEBUG box is ticked.
-//
-// It covers everything the second-eye hunt added: [xrwarp], [xrsrc], [xrage], [xreye], [xrgap],
-// [xrcap] -- the printing AND the per-frame sampling behind it. Those six lines answered one
-// question (why one eye jumped every few seconds; the answer was a missing texture pool, see the
-// note on m_vrcamEyePool) and that question is closed. They are scaffolding now: together they
-// roughly doubled this block's log volume, and each costs a clock read on every present or submit.
-//
-// THE SPLIT AGAINST XrRateLog IS DELIBERATE, not an oversight repeated. [xrrate] and [xrloop] are
-// the port's headline measurement and its frame-loop contract -- two lines that have to be readable
-// in an ordinary session, which is the documented reason that flag stays out of the gate. These six
-// are for diagnosis, so they go behind the box.
-//
-// WHAT THIS DOES NOT GATE: any counter that records a FAULT. The capture path's five skip counters,
-// the bounded fence wait, and the unpaired-eye count keep incrementing with this off, because they
-// only cost anything when something is already wrong -- and a fault counter reading zero because it
-// was switched off is a diagnostic that lies. Only the measurement of HEALTHY frames is gated: an
-// age, a rate, a spread. Those are meaningless without the line that prints them.
-//
-// Source default is 1, the "on" value, per the rule in src/Utils/DebugGate.cpp.
 extern "C" __declspec(dllexport) int CyberpunkVR_XrDeepDiag = 1;
 
 // OUT OF THE ANONYMOUS NAMESPACE BELOW, deliberately: OpenXRCapture.cpp stamps each captured
@@ -347,11 +333,13 @@ char g_xrPattern[kXrPatternLen] = {};
 std::atomic<unsigned> g_xrPatternAt{0};
 
 inline void XrMark(char c) {
+    if(!CyberpunkVR_XrRateLog)return;
     const unsigned i = g_xrPatternAt.fetch_add(1, std::memory_order_relaxed);
     g_xrPattern[i % kXrPatternLen] = c;
 }
 
 void XrBucketCadence(long long periodNs) {
+    if(!CyberpunkVR_XrRateLog)return;
     const double nowMs = XrDiagNowMs();
     // The period the runtime itself reported is the yardstick, never a constant -- 72 Hz and
     // 90 Hz headsets would otherwise read as different cadences for identical behaviour.
@@ -367,6 +355,7 @@ void XrBucketCadence(long long periodNs) {
 }
 
 void XrAccumulateCycle(double waitEnterMs, double waitMs, long long periodNs) {
+    if(!CyberpunkVR_XrRateLog)return;
     const double periodMs = periodNs > 0 ? static_cast<double>(periodNs) / 1.0e6 : 13.89;
     const double workMs = XrDiagNowMs() - waitEnterMs - waitMs;
     std::lock_guard<std::mutex> lock(g_xrDiagMutex);
@@ -445,6 +434,9 @@ extern "C" __declspec(dllexport) unsigned int       CyberpunkVR_DebugFinalTies;
 extern "C" __declspec(dllexport) unsigned long long CyberpunkVR_DebugFinalExact;
 extern "C" __declspec(dllexport) unsigned long long CyberpunkVR_DebugFinalApprox;
 extern "C" __declspec(dllexport) unsigned long long CyberpunkVR_DebugFinalExactTies;
+extern "C" __declspec(dllexport) std::atomic<uint64_t> CyberpunkVR_PlacedPoseMatch;
+extern "C" __declspec(dllexport) std::atomic<uint64_t> CyberpunkVR_PlacedPoseMiss;
+extern "C" __declspec(dllexport) std::atomic<uint64_t> CyberpunkVR_PlacedPoseAmbiguous;
 extern "C" __declspec(dllexport) unsigned long long CyberpunkVR_DebugFinalTieHits;
 extern "C" __declspec(dllexport) unsigned long long CyberpunkVR_DebugPoseReadBack;
 extern "C" __declspec(dllexport) unsigned int      CyberpunkVR_DebugFitSlopeUs = 0;
@@ -641,8 +633,8 @@ void OpenXRManager::ReportXrFrameRates() {
         // Reset the extremes for the next window. Done AFTER printing, and with a plain store
         // rather than an exchange: a submit landing between the read and this store loses one
         // sample from one window, which is not worth a lock on a 72 Hz path.
-        CyberpunkVR_DebugSubmitAgeMinUs.store(0, std::memory_order_relaxed);
-        CyberpunkVR_DebugSubmitAgeMaxUs.store(0, std::memory_order_relaxed);
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugSubmitAgeMinUs.store(0, std::memory_order_relaxed));
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugSubmitAgeMaxUs.store(0, std::memory_order_relaxed));
     }
 
     // HOW OLD IS THE SECOND EYE'S CONTENT, per window -- the only asymmetric quantity here.
@@ -683,7 +675,7 @@ void OpenXRManager::ReportXrFrameRates() {
                 dc ? (double)ds / (double)dc / 1000.0 : 0.0, (double)mx / 1000.0,
                 db[0], db[1], db[2], db[3], dn, dc, CyberpunkVR_StereoEyeMaxAgeMs);
         }
-        CyberpunkVR_DebugEyeAgeMaxMs.store(0, std::memory_order_relaxed);
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugEyeAgeMaxMs.store(0, std::memory_order_relaxed));
     }
 
     // DID THE SECOND EYE GET ITS OWN IMAGE, per window.
@@ -733,7 +725,7 @@ void OpenXRManager::ReportXrFrameRates() {
                 "| worst %.2f ms  (n=%llu)\n",
                 dg[0], dg[1], dg[2], dg[3], (double)gmax / 1000.0, tot);
         }
-        CyberpunkVR_DebugPresentGapUsMax.store(0, std::memory_order_relaxed);
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugPresentGapUsMax.store(0, std::memory_order_relaxed));
     }
 
     // WHY A PRESENT DID NOT PRODUCE A CAPTURE, per window.
@@ -771,7 +763,7 @@ void OpenXRManager::ReportXrFrameRates() {
             d[0], d[1], d[2], d[3], d[4], d[5], waitsN,
             waitsN ? (double)waitUs / (double)waitsN / 1000.0 : 0.0,
             (double)c[8] / 1000.0);
-        CyberpunkVR_DebugCapFenceUsMax.store(0, std::memory_order_relaxed);
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugCapFenceUsMax.store(0, std::memory_order_relaxed));
     }
 
     // THE CONTRACT, ON ITS OWN LINE. Printing the totals next to each other is the difference
@@ -1014,7 +1006,7 @@ DWORD OpenXRManager::FrameThreadMain() {
         //
         // The old wait is kept behind the flag: its comment was written when the pose WAS
         // re-located per submit, and under that condition it was right.
-        if (!CyberpunkVR_XrPaceByRuntime &&
+        if (!CyberpunkVR_XrPaceByRuntime && !cvr::framegen::Enabled() &&
             m_monoSubmitEnabled.load(std::memory_order_relaxed) &&
             m_monoPresentEvent) {
             uint64_t latestMonoSerial = 0;
@@ -1061,8 +1053,8 @@ DWORD OpenXRManager::FrameThreadMain() {
         // it holds the previous composition, which is exactly what a freeze in the headset
         // looks like while the game itself keeps running. Naming that number turns "sometimes
         // it freezes" into something measurable.
-        ++CyberpunkVR_DebugXrCycles;
-        if ((CyberpunkVR_DebugXrCycles % 600) == 0) {
+        CVR_DIAGNOSTIC(++CyberpunkVR_DebugXrCycles);
+        if (cvr::RuntimeDiagnosticsEnabled() && (CyberpunkVR_DebugXrCycles % 600) == 0) {
             Log("XR pacing: cycles=%llu submits=%llu missed=%llu (%.1f%%)\n",
                 (unsigned long long)CyberpunkVR_DebugXrCycles,
                 (unsigned long long)CyberpunkVR_DebugMonoSubmits,
@@ -1073,13 +1065,13 @@ DWORD OpenXRManager::FrameThreadMain() {
                     : 0.0);
         }
         XrMark('W');
-        CyberpunkVR_DebugXrWaits.fetch_add(1, std::memory_order_relaxed);
-        const double waitEnterMs = XrDiagNowMs();
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugXrWaits.fetch_add(1, std::memory_order_relaxed));
+        const double waitEnterMs = CyberpunkVR_XrRateLog ? XrDiagNowMs() : 0;
         XrResult res = xrWaitFrame(m_session, &waitInfo, &frameState);
-        const double waitMs = XrDiagNowMs() - waitEnterMs;
-        CyberpunkVR_DebugXrWaitsReturned.fetch_add(1, std::memory_order_relaxed);
+        const double waitMs = CyberpunkVR_XrRateLog ? XrDiagNowMs() - waitEnterMs : 0;
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugXrWaitsReturned.fetch_add(1, std::memory_order_relaxed));
         if (XR_FAILED(res)) {
-            CyberpunkVR_DebugXrWaitFailed.fetch_add(1, std::memory_order_relaxed);
+            CVR_DIAGNOSTIC(CyberpunkVR_DebugXrWaitFailed.fetch_add(1, std::memory_order_relaxed));
             if (m_frameSyncEvent) {
                 SetEvent(m_frameSyncEvent);
             }
@@ -1091,11 +1083,12 @@ DWORD OpenXRManager::FrameThreadMain() {
         // is computed from QPC capture timestamps, not this counter.
         ++displayFrameIndex;
         if (frameState.predictedDisplayPeriod > 0) {
+            cvr::framegen::DisplayPeriod(frameState.predictedDisplayPeriod);
             m_predictedDisplayPeriodNs.store(frameState.predictedDisplayPeriod, std::memory_order_relaxed);
         }
 
         XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
-        CyberpunkVR_DebugXrBegins.fetch_add(1, std::memory_order_relaxed);
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugXrBegins.fetch_add(1, std::memory_order_relaxed));
         const XrResult beginRes = xrBeginFrame(m_session, &beginInfo);
         // XR_FRAME_DISCARDED is a SUCCESS code, not an error: the runtime is saying it threw the
         // PREVIOUS frame away, not that this call failed. Counted on its own line because a
@@ -1103,7 +1096,7 @@ DWORD OpenXRManager::FrameThreadMain() {
         // totals as a loop that is behaving -- and looks, in the headset, like half rate.
         // Nothing branches on it: the control flow here is unchanged, only observed.
         if (beginRes == XR_FRAME_DISCARDED) {
-            CyberpunkVR_DebugXrBeginDiscarded.fetch_add(1, std::memory_order_relaxed);
+            CVR_DIAGNOSTIC(CyberpunkVR_DebugXrBeginDiscarded.fetch_add(1, std::memory_order_relaxed));
         }
 
         // ONE instant for every locate in this cycle, aimed at the frame that will USE the pose.
@@ -1147,9 +1140,9 @@ DWORD OpenXRManager::FrameThreadMain() {
                 fitted < frameState.predictedDisplayTime + per * 4) {
                 const double raw = static_cast<double>(fitted - frameState.predictedDisplayTime);
                 s_aimOffsetNs = s_aimOffsetNs * 0.90 + raw * 0.10;   // slow, so it cannot jitter
-                ++CyberpunkVR_DebugFitUsed;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugFitUsed);
             } else {
-                ++CyberpunkVR_DebugFitMissed;                        // keep the last offset
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugFitMissed);                        // keep the last offset
             }
             CyberpunkVR_DebugFitSlopeUs = static_cast<unsigned int>(FitSlopeNs() / 1000.0);
             locateTime = frameState.predictedDisplayTime +
@@ -1167,15 +1160,17 @@ DWORD OpenXRManager::FrameThreadMain() {
         // The controllers use the same target as the head. See the note at the top of this file.
         const XrTime handLocateTime = locateTime;
 
+        PollSimulatorRecenterHook();
+        const uint64_t externalResetSerial = m_externalPoseReset.Serial();
         uint32_t viewCountOutput = 0;
         const bool monoEnabled = m_monoSubmitEnabled.load(std::memory_order_relaxed);
         const bool menuRectActive = (GetMenuRectMode() != 0) || (GetMenuMode() != 0);
         // Menu closed -> drop the latched panel anchors so the NEXT menu re-anchors in
         // front of wherever the player is looking at open time.
         if (!menuRectActive) {
-            m_menuAnchorValid = false;
+            m_menuFollow.Reset();
+            m_menuClock.Reset();
             m_menuEyeAnchorValid = false;
-            m_menuFollowing = false;
         }
         const bool monoReady = monoEnabled && EnsureMonoSubmitResources() && !m_eyeSwapchains.empty();
         if (monoReady && !m_views.empty()) {
@@ -1245,16 +1240,22 @@ DWORD OpenXRManager::FrameThreadMain() {
                          (handHeadLoc.locationFlags & kNeed) == kNeed;
         }
         const XrPosef handHeadPose = handHeadOk ? handHeadLoc.pose : location.pose;
-        const bool headPoseLocated = XR_SUCCEEDED(res) &&
+        // A reset between xrLocateSpace and publication invalidates this sample.
+        // The UI callback never holds this lock while calling the runtime.
+        std::unique_lock externalResetLock(m_externalResetMutex);
+        const bool resetStable = m_externalPoseReset.Ready(externalResetSerial);
+        const bool headPoseLocated = resetStable && XR_SUCCEEDED(res) &&
             (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
             (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
+        if (!headPoseLocated) externalResetLock.unlock();
 
         if (headPoseLocated) {
             XrPosef basePose{};
             bool baseReset = false;
             {
                 std::lock_guard<std::mutex> renderLock(m_renderPoseMutex);
-                if (!m_basePoseSet || m_recenterRequested.exchange(false, std::memory_order_relaxed)) {
+                if (!m_basePoseSet || m_recenterRequested.exchange(false, std::memory_order_relaxed) ||
+                    m_externalPoseReset.Pending()) {
                     // YAW-ONLY BASE (native-VR recenter semantics). The old code captured the
                     // FULL HMD orientation -- whatever pitch/roll the user's head held at that
                     // moment got baked into the base, and conj(base)*pose then TILTED THE WORLD
@@ -1277,6 +1278,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                     m_basePose.position = location.pose.position;
                     m_basePose.orientation = XrQuaternionf{0.0f, sinf(yaw*0.5f), 0.0f, cosf(yaw*0.5f)};
                     m_basePoseSet = true;
+                    m_trackingOriginSerial.fetch_add(1, std::memory_order_acq_rel);
                     baseReset = true;
                     Log("OpenXRManager: Base pose captured (yaw-only, %.1f deg).\n", yaw * 57.29578f);
                 }
@@ -1293,6 +1295,18 @@ DWORD OpenXRManager::FrameThreadMain() {
             relPosWorld.z = location.pose.position.z - basePose.position.z;
             XrVector3f relPos = RotateVector(baseInv, relPosWorld);
             XrQuaternionf relOri = MultiplyQuat(baseInv, location.pose.orientation);
+            {
+                // Raw runtime tracking validity/origin/age. Movement is selected
+                // from the camera's latched frame pose in GetRoomscaleSample so
+                // raw physics and a filtered view cannot describe different heads.
+                std::lock_guard lock(m_roomscaleSampleMutex);
+                m_roomscaleSample.head = {relPos.x, -relPos.z};
+                ++m_roomscaleSample.sequence;
+                m_roomscaleSample.origin = m_trackingOriginSerial.load(std::memory_order_acquire);
+                m_roomscaleSample.stampUs = XrDiagNowUs();
+                m_roomscaleSample.valid = cvr::roomscale::HeadTrackingUsable(
+                    m_sessionState, location.locationFlags);
+            }
             XrPosef filteredHeadPose{};
             filteredHeadPose.position = relPos;
             filteredHeadPose.orientation = relOri;
@@ -1302,9 +1316,9 @@ DWORD OpenXRManager::FrameThreadMain() {
                 m_handAimYawFilter[1].initialized = false;
                 // Recenter (or first base capture) -> re-anchor the menu panel so it
                 // snaps back dead-center in front of the new forward.
-                m_menuAnchorValid = false;
+                m_menuFollow.Reset();
+                m_menuClock.Reset();
                 m_menuEyeAnchorValid = false;
-                m_menuFollowing = false;
             }
             // HEAD SMOOTHING IS OFF BY DEFAULT, AND THAT IS NOT A TASTE CALL.
             //
@@ -1386,6 +1400,16 @@ DWORD OpenXRManager::FrameThreadMain() {
             m_oriZ.store(filteredHeadPose.orientation.z, std::memory_order_relaxed);
             m_oriW.store(filteredHeadPose.orientation.w, std::memory_order_relaxed);
             m_poseValid.store(true, std::memory_order_relaxed);
+            {
+                std::lock_guard lock(m_roomscaleSampleMutex);
+                m_coherentHeadPose = {filteredHeadPose.position.x, filteredHeadPose.position.y,
+                    filteredHeadPose.position.z, filteredHeadPose.orientation.x,
+                    filteredHeadPose.orientation.y, filteredHeadPose.orientation.z,
+                    filteredHeadPose.orientation.w, true,
+                    m_trackingOriginSerial.load(std::memory_order_acquire)};
+            }
+            m_externalPoseReset.Applied(externalResetSerial);
+            externalResetLock.unlock();
 
             // [HANDS] Sync actions and locate hands
             static int s_handLogCounter = 0;
@@ -1410,6 +1434,9 @@ DWORD OpenXRManager::FrameThreadMain() {
                 // for-byte identical to the pre-Controls-tab behaviour.
                 const bool gameplayInputActive = (GetInputActionsEnabled() != 0) && (m_thumbstickAction != XR_NULL_HANDLE);
                 VRControllerState ctrl{};
+                cvr::vrui::Tracking uiTracking{};
+                uiTracking.time=frameState.predictedDisplayTime;uiTracking.origin=GetTrackingOriginSerial();
+                uiTracking.head=location.pose;uiTracking.valid=headPoseLocated;
                 // D-PAD chord state (left hand is processed first, right second):
                 // HOLD the LEFT stick click, pick the direction with the RIGHT stick.
                 bool leftStickClicked  = false;
@@ -1434,6 +1461,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                     m_handSampleHeadPos[1] = dof3 ? 0.0f : m_posY.load(std::memory_order_relaxed);
                     m_handSampleHeadPos[2] = dof3 ? 0.0f : m_posZ.load(std::memory_order_relaxed);
                     m_handSampleHeadValid = true;
+                    m_handSampleOrigin = m_trackingOriginSerial.load(std::memory_order_acquire);
                 }
 
                 // THE HEAD A HAND OFFSET IS MEASURED FROM MUST BE THE HEAD IT IS RE-ANCHORED ON.
@@ -1630,8 +1658,18 @@ DWORD OpenXRManager::FrameThreadMain() {
                     float sx = 0.0f, sy = 0.0f;
                     getVec2(m_thumbstickAction, sx, sy);
                     const bool sclick = getBool(m_thumbstickClickAction);
+                    auto& uiHand=uiTracking.hands[i];
+                    uiHand.stickClick=sclick;uiHand.trigger=trig;uiHand.grip=grip;uiHand.stickY=sy;
+                    uiHand.valid=poseValid;
+                    if((cvr::vrui::Visible() || cvr::vrui::CapturesInput() || sclick) && m_handAimSpaces[i]!=XR_NULL_HANDLE){
+                        uiHand.valid=false;
+                        XrSpaceLocation aim{XR_TYPE_SPACE_LOCATION};
+                        constexpr auto need=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+                        if(XR_SUCCEEDED(xrLocateSpace(m_handAimSpaces[i],m_localSpace,frameState.predictedDisplayTime,&aim)) && (aim.locationFlags&need)==need){uiHand.aim=aim.pose;uiHand.valid=true;}
+                    }
                     const bool prim   = getBool(m_primaryButtonAction);
                     const bool sec    = getBool(m_secondaryButtonAction);
+                    const bool frameBumper=m_steamFrameActions.bumper!=XR_NULL_HANDLE && getBool(m_steamFrameActions.bumper);
 
                     // XInput-compatible button bits so the hook can OR them into
                     // XINPUT_GAMEPAD.wButtons directly (XINPUT_GAMEPAD_*).
@@ -1656,11 +1694,9 @@ DWORD OpenXRManager::FrameThreadMain() {
                         ctrl.leftThumbY  = sy;
                         if (prim)   ctrl.buttons |= XB_X;
                         if (sec)    ctrl.buttons |= XB_Y;
-                        // NOT mapped to LB here any more. In gameplay LB is the SCANNER, and the left grip is
-                        // the hand that grabs a magazine, so every reach for the mag popped the scanner open.
-                        // LB is now emitted menu-only, in vr_core's XInput merge, exactly the way the right
-                        // grip's RB already is and for the same reason: menus run no gameplay actions, so a tab
-                        // navigation there is safe while a gameplay binding is not.
+                        if(frameBumper)ctrl.buttons|=XB_LEFT_SHOULDER;
+                        // Only Frame's separate bumper emits LB here. The grip
+                        // remains available for magazine grabs and VR gestures.
 
                         // LEFT stick click = D-Pad modifier (direction picked with the
                         // RIGHT stick, see the right-hand branch). The vanilla L3
@@ -1675,6 +1711,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                         if (sclick) ctrl.buttons |= XB_RIGHT_THUMB;
                         if (prim)   ctrl.buttons |= XB_A;
                         if (sec)    ctrl.buttons |= XB_B;
+                        if(frameBumper)ctrl.buttons|=XB_RIGHT_SHOULDER;
 
                         // D-PAD CHORD: while the LEFT stick click is held, the RIGHT
                         // stick picks the D-Pad direction. The right axes are zeroed for
@@ -1699,6 +1736,16 @@ DWORD OpenXRManager::FrameThreadMain() {
                     }
                 }
 
+                // The overlay reads RAW clicks first: L3+R3 takes priority over
+                // cyberware even when the left grip is held too.
+                cvr::vrui::UpdateTracking(uiTracking);
+                const bool cyberwareClaim=cvr::input::UpdateCyberwareChord(leftStickClicked,ctrl.leftGrip,
+                    uiTracking.hands[1].stickClick,gameplayInputActive);
+                if(cyberwareClaim) {
+                    ctrl.leftGrip=0.f;
+                    ctrl.buttons &= static_cast<uint16_t>(~0x000f); // no D-pad from the same chord
+                }
+
                 // DEFERRED L3 (sprint): the left stick click doubles as the D-Pad
                 // modifier. Emit the vanilla stick-click press only when the click is
                 // RELEASED without any D-Pad direction having been used during the hold
@@ -1706,6 +1753,8 @@ DWORD OpenXRManager::FrameThreadMain() {
                 {
                     static bool s_l3Held = false;
                     static bool s_l3UsedForDpad = false;
+                    if(cyberwareClaim)s_l3UsedForDpad=true;
+                    if(uiTracking.hands[0].stickClick && uiTracking.hands[1].stickClick)s_l3UsedForDpad=true;
                     if (leftStickClicked) {
                         if (dpadUsedThisFrame) s_l3UsedForDpad = true;
                         s_l3Held = true;
@@ -1717,16 +1766,19 @@ DWORD OpenXRManager::FrameThreadMain() {
                     }
                 }
 
+                auto getGlobalBool=[&](XrAction action) -> bool {
+                    if(action==XR_NULL_HANDLE)return false;
+                    XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+                    gi.action=action;gi.subactionPath=XR_NULL_PATH;
+                    XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
+                    return XR_SUCCEEDED(xrGetActionStateBoolean(m_session,&gi,&st)) && st.isActive && st.currentState;
+                };
+                if(gameplayInputActive)ctrl.buttons|=m_steamFrameActions.GlobalButtons(getGlobalBool);
+                // The extra physical Frame buttons obey the same overlay capture
+                // as Touch controls. Menu/Start retains the existing escape path.
+                if(cvr::vrui::CapturesInput())ctrl={};
                 if (gameplayInputActive) {
-                    // Menu button is single (no per-hand binding) on Touch/Index/Vive/WMR.
-                    if (m_menuButtonAction != XR_NULL_HANDLE) {
-                        XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
-                        gi.action = m_menuButtonAction;
-                        gi.subactionPath = XR_NULL_PATH;
-                        XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
-                        if (XR_SUCCEEDED(xrGetActionStateBoolean(m_session, &gi, &st)) && st.isActive && st.currentState)
-                            ctrl.buttons |= 0x0010; // XINPUT_GAMEPAD_START
-                    }
+                    if(getGlobalBool(m_menuButtonAction))ctrl.buttons|=0x0010; // XINPUT_GAMEPAD_START
 
                     // Publish the snapshot for the XInput hook.
                     std::lock_guard<std::mutex> inLock(m_inputMutex);
@@ -1754,33 +1806,53 @@ DWORD OpenXRManager::FrameThreadMain() {
         } else {
             m_headFilterState.initialized = false;
             m_velValid.store(false, std::memory_order_relaxed);
+            std::lock_guard lock(m_roomscaleSampleMutex);
+            m_roomscaleSample.valid = false;
+            if (resetStable) m_coherentHeadPose.valid = false;
         }
 
         if (monoReady && viewCountOutput == m_eyeSwapchains.size()) {
             {
                 ID3D12Resource* monoSource = nullptr;
                 ID3D12Resource* monoDepthSource = nullptr;
+                ID3D12Resource* vrcamEye=nullptr;
+                uint64_t capturedReadFence=0;
                 uint64_t presentSerial = 0;
                 uint64_t monoDepthFence = 0;   // writer-queue fence guarding monoDepthSource
                 XrPosef monoPoses[2]{};
+                uint64_t monoPoseIds[2]{};
                 double monoCaptureMs = 0.0;   // when the frame below was captured; see the age counters
                 XrFovf monoFovs[2]{};
                 bool monoHasView[2] = {};
                 bool monoHasDepth = false;
+                cvr::framegen::Frame fgFrame;
+                cvr::framegen::Selection fgSelection;
+                bool fgSelected=false;
                 {
                     std::lock_guard<std::mutex> lock(m_presentMutex);
                     if (m_monoCapturedFrame.texture &&
                         m_monoCapturedFrame.serial != 0 &&
                         m_monoCapturedFrame.hasView[0] &&
-                        m_monoCapturedFrame.hasView[1]) {
+                        m_monoCapturedFrame.hasView[1] &&
+                        m_captureLeases.Pin(reinterpret_cast<uintptr_t>(m_monoCapturedFrame.texture))) {
                         monoSource = m_monoCapturedFrame.texture;
                         monoSource->AddRef();
                         presentSerial = m_monoCapturedFrame.serial;
                         monoCaptureMs = m_monoCapturedFrame.captureMs;
                         for (int eye = 0; eye < 2; ++eye) {
+                            if(!cvr::framegen::Enabled())m_monoCapturedFrame.framegenInputs[eye].reset();
                             monoPoses[eye] = m_monoCapturedFrame.poses[eye];
+                            monoPoseIds[eye]=m_monoCapturedFrame.poseIds[eye];
                             monoFovs[eye] = m_monoCapturedFrame.fovs[eye];
                             monoHasView[eye] = m_monoCapturedFrame.hasView[eye];
+                            fgFrame.inputs[eye]=m_monoCapturedFrame.framegenInputs[eye];
+                        }
+                        if(CyberpunkVR_StereoSubmit && viewCountOutput>=2) {
+                            const auto eye=CyberpunkVR_MainIsRightEye ? 0u : 1u;
+                            bool reused=false;
+                            vrcamEye=AcquireCapturedVrcamLocked(presentSerial,CyberpunkVR_VrcamEyeReuseMax,
+                                &monoPoses[eye],&monoFovs[eye],&monoPoseIds[eye],&reused);
+                            if(reused)CVR_DIAGNOSTIC(CyberpunkVR_DebugVrcamEyeReused.fetch_add(1,std::memory_order_relaxed));
                         }
                         // Accept a slightly older depth snapshot instead of dropping the
                         // layer for that frame.
@@ -1854,74 +1926,58 @@ DWORD OpenXRManager::FrameThreadMain() {
                 // so it must stop when nothing consumes it. sync_stereo ORs this with its own
                 // mirror-window request, so turning stereo off does not break the mirror.
                 CyberpunkVR_StereoEyeCapture = CyberpunkVR_StereoSubmit ? 1 : 0;
-                ID3D12Resource* vrcamEye = nullptr;
-                if (CyberpunkVR_StereoSubmit && viewCountOutput >= 2) {
-                    std::lock_guard<std::mutex> lock(m_presentMutex);
-                    // TAKE THE SLOT THAT HOLDS THIS FRAME, not the newest image.
-                    //
-                    // This used to read a single m_vrcamEyeTex whose serial matched, and the serial is
-                    // stamped on the CPU under this same lock -- so it kept matching while the capture
-                    // had already blitted the NEXT frame into those very pixels on the GPU. One eye then
-                    // carried newer content than the other, which is why the artefact was second-eye
-                    // only and why it needed the threaded submit to show: 72 copies out per second
-                    // against 52 blits in, instead of one each per frame on one thread.
-                    for (int i = 0; i < kVrcamEyeSlots; ++i) {
-                        if (m_vrcamEyePool[i] && m_vrcamEyePoolSerial[i] == presentSerial) {
-                            vrcamEye = m_vrcamEyePool[i];
-                            vrcamEye->AddRef();   // the capture may recreate the pool on a resize
-                            break;
+                // Keep the existing capture pins. Generation's pending real endpoint
+                // takes one additional lease; ordinary submission cleanup stays intact.
+                if(monoSource && vrcamEye && viewCountOutput==2) {
+                    const unsigned mainEye=CyberpunkVR_MainIsRightEye ? 1u : 0u;
+                    fgFrame.color[mainEye]=monoSource;fgFrame.color[mainEye^1]=vrcamEye;
+                    fgFrame.identity.serial=presentSerial;fgFrame.identity.origin=GetTrackingOriginSerial();
+                    fgFrame.identity.capturedMs=monoCaptureMs;fgFrame.identity.stereo=true;
+                    fgFrame.identity.inputs=fgFrame.inputs[0] && fgFrame.inputs[1] &&
+                        fgFrame.inputs[0]->frameId==fgFrame.inputs[1]->frameId;
+                    for(unsigned eye=0;eye<2;++eye) {
+                        fgFrame.pose[eye]=monoPoses[eye];fgFrame.fov[eye]=monoFovs[eye];fgFrame.identity.pose[eye]=monoPoseIds[eye];
+                        if(fgFrame.inputs[eye]) {
+                            fgFrame.identity.nativeFrame=fgFrame.inputs[eye]->frameId;
+                            fgFrame.identity.inputs=fgFrame.identity.inputs && fgFrame.inputs[eye]->poseId==monoPoseIds[eye] &&
+                                fgFrame.inputs[eye]->origin==fgFrame.identity.origin;
+                            fgFrame.identity.reset=fgFrame.identity.reset || fgFrame.inputs[eye]->camera.reset;
                         }
                     }
-                    // NO SLOT FOR THIS FRAME: TAKE THIS EYE'S MOST RECENT IMAGE, NEVER MAIN'S.
-                    //
-                    // Falling through with vrcamEye == nullptr hands this eye MAIN's picture and MAIN's
-                    // frustum for the cycle -- an image from a viewpoint one IPD away, in one eye only.
-                    // MAIN cannot show that by construction, because MAIN is what the pairing is keyed
-                    // to, so this is where a one-eye jerk comes from and why the other eye stays clean.
-                    //
-                    // An own-viewpoint image a frame or two old is a much smaller error: keeping both
-                    // eyes on the same geometry is what matters, and absorbing a frame of age is what
-                    // the compositor's reprojection is for. Only slots at or before this frame are
-                    // considered -- a NEWER slot would put content in this eye that MAIN has not shown
-                    // yet, which is the very fault the pool was introduced to end.
-                    if (!vrcamEye && CyberpunkVR_VrcamEyeReuseMax > 0) {
-                        int best = -1;
-                        uint64_t bestSerial = 0;
-                        for (int i = 0; i < kVrcamEyeSlots; ++i) {
-                            if (!m_vrcamEyePool[i] || m_vrcamEyePoolSerial[i] == 0) continue;
-                            if (m_vrcamEyePoolSerial[i] > presentSerial) continue;
-                            if (m_vrcamEyePoolSerial[i] > bestSerial) {
-                                bestSerial = m_vrcamEyePoolSerial[i];
-                                best = i;
+                    if(cvr::framegen::Enabled() && fgFrame.identity.inputs) {
+                        auto lease=std::make_shared<cvr::framegen::ReadLease>();lease->owner=this;
+                        lease->release=[](void* owner,ID3D12Resource* resource,uint64_t fence) {
+                            static_cast<OpenXRManager*>(owner)->ReleaseCapturedRead(resource,fence);
+                        };
+                        {std::lock_guard lock(m_presentMutex);
+                            for(unsigned eye=0;eye<2;++eye)if(m_captureLeases.Pin(reinterpret_cast<uintptr_t>(fgFrame.color[eye]))) {
+                                lease->resources[eye]=fgFrame.color[eye];fgFrame.color[eye]->AddRef();
                             }
                         }
-                        if (best >= 0 &&
-                            (presentSerial - bestSerial) <= CyberpunkVR_VrcamEyeReuseMax) {
-                            vrcamEye = m_vrcamEyePool[best];
-                            vrcamEye->AddRef();
-                            CyberpunkVR_DebugVrcamEyeReused.fetch_add(1, std::memory_order_relaxed);
-                        }
+                        if(lease->resources[0] && lease->resources[1])fgFrame.lease=std::move(lease);
                     }
-
-                    // See the counters' note: an unpaired cycle changes this eye's IMAGE SOURCE and
-                    // its FRUSTUM together, so its rate is the rate of one-eye jumps.
-                    //
-                    // THE FALLBACK IS NOT GATED, the paired count is. A fallback is a fault: it costs
-                    // nothing to count because it only fires when one happens, and it must stay
-                    // truthful with the diagnostics off, so a live reader in x64dbg never sees a zero
-                    // that means "not counting". The paired count is only the healthy-frame
-                    // denominator, so it follows the flag.
-                    if (vrcamEye) {
-                        if (CyberpunkVR_XrDeepDiag) {
-                            CyberpunkVR_DebugVrcamEyePaired.fetch_add(1, std::memory_order_relaxed);
-                        }
-                    } else {
-                        CyberpunkVR_DebugVrcamEyeUnpaired.fetch_add(1, std::memory_order_relaxed);
+                    fgSelection=m_framegen.Select(m_d3dDevice,m_d3dQueue,std::move(fgFrame),
+                        !menuRectActive && m_sessionRunning.load(std::memory_order_relaxed));
+                    fgSelected=true;
+                    for(unsigned eye=0;eye<2;++eye) {
+                        monoPoses[eye]=fgSelection.frame.pose[eye];monoFovs[eye]=fgSelection.frame.fov[eye];
+                        monoPoseIds[eye]=fgSelection.frame.identity.pose[eye];
                     }
+                    // Keep the runtime's reprojection mode constant across the pair.
+                    // These mono hint depths cannot describe synthetic stereo pixels.
+                    if(cvr::framegen::Enabled() || fgSelection.synthetic || m_framegen.Pending())monoHasDepth=false;
+                } else m_framegen.Reset();
+                // The image, its own pose, and its read reservation were acquired
+                // together with MAIN above. Reused VRCAM slots keep their own label.
+                if(CyberpunkVR_StereoSubmit && viewCountOutput>=2) {
+                    if(vrcamEye) {
+                        if(CyberpunkVR_XrDeepDiag)CVR_DIAGNOSTIC(CyberpunkVR_DebugVrcamEyePaired.fetch_add(1,std::memory_order_relaxed));
+                    } else CVR_DIAGNOSTIC(CyberpunkVR_DebugVrcamEyeUnpaired.fetch_add(1,std::memory_order_relaxed));
                 }
 
                 if (monoSource && monoHasView[0] && monoHasView[1] &&
                     SUCCEEDED(currentAllocator->Reset()) && SUCCEEDED(m_cmdList->Reset(currentAllocator, nullptr))) {
+                    auto gpuProfile = cvr::gpu::profile::Begin(m_cmdList);
                     bool copyReady = true;
                     bool useDepthLayer = monoHasDepth && m_depthLayerSupported;
                     std::vector<bool> acquiredEyes(viewCountOutput, false);
@@ -1965,6 +2021,8 @@ DWORD OpenXRManager::FrameThreadMain() {
                             break;
                         }
 
+                        {
+                        cvr::gpu::profile::Scope colorScope(gpuProfile, cvr::gpu::profile::Stage::SubmitColor);
                         // CAS sharpen: when xr_sharpness>0, draw
                         // the sharpened mono source straight into the swapchain image.
                         // monoSource is always COMMON here (no synth scratch in mono).
@@ -2046,7 +2104,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                                 toCopyDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
                                 m_cmdList->ResourceBarrier(1, &toCopyDest);
 
-                                m_cmdList->CopyResource(texture, vrcamEye);
+                                m_cmdList->CopyResource(texture,fgSelected ? fgSelection.frame.color[eye] : vrcamEye);
 
                                 D3D12_RESOURCE_BARRIER toCommon{};
                                 toCommon.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -2055,7 +2113,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                                 toCommon.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
                                 toCommon.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
                                 m_cmdList->ResourceBarrier(1, &toCommon);
-                                ++CyberpunkVR_DebugStereoEyeSubmits;
+                                CVR_DIAGNOSTIC(++CyberpunkVR_DebugStereoEyeSubmits);
                             }
                         }
                         if (!(doMonoSharpen ||
@@ -2068,7 +2126,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                             toCopyDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
                             m_cmdList->ResourceBarrier(1, &toCopyDest);
 
-                            m_cmdList->CopyResource(texture, monoSource);
+                            m_cmdList->CopyResource(texture,fgSelected ? fgSelection.frame.color[eye] : monoSource);
 
                             D3D12_RESOURCE_BARRIER toCommon{};
                             toCommon.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -2079,6 +2137,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                             m_cmdList->ResourceBarrier(1, &toCommon);
                         }
 
+                        }
                         projectionViews[eye].pose = monoPoses[eye];
                         projectionViews[eye].fov = monoFovs[eye];
 
@@ -2283,6 +2342,12 @@ DWORD OpenXRManager::FrameThreadMain() {
                                 break;
                             }
 
+                            if (!cvr::gpu::KeepCommandResources(m_cmdList, {monoDepthSource, depthTexture})) {
+                                useDepthLayer = false;
+                                break;
+                            }
+
+                            cvr::gpu::profile::Scope depthScope(gpuProfile, cvr::gpu::profile::Stage::SubmitDepth);
                             D3D12_RESOURCE_BARRIER toCopyDest{};
                             toCopyDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
                             toCopyDest.Transition.pResource = depthTexture;
@@ -2378,14 +2443,18 @@ DWORD OpenXRManager::FrameThreadMain() {
                         m_d3dQueue->ExecuteCommandLists(1, cmdLists);
                         
                         ++m_fenceValue;
-                        m_d3dQueue->Signal(m_fence, m_fenceValue);
+                        if (SUCCEEDED(m_d3dQueue->Signal(m_fence, m_fenceValue)))
+                            cvr::gpu::profile::Submitted(gpuProfile, m_d3dQueue, m_fence, m_fenceValue);
+                        capturedReadFence=m_fenceValue;
                     } else {
                         m_cmdList->Close();
                         ID3D12CommandList* cmdLists[] = {m_cmdList};
                         m_d3dQueue->ExecuteCommandLists(1, cmdLists);
                         
                         ++m_fenceValue;
-                        m_d3dQueue->Signal(m_fence, m_fenceValue);
+                        if (SUCCEEDED(m_d3dQueue->Signal(m_fence, m_fenceValue)))
+                            cvr::gpu::profile::Submitted(gpuProfile, m_d3dQueue, m_fence, m_fenceValue);
+                        capturedReadFence=m_fenceValue;
 
                         bool releaseOk = true;
                         for (uint32_t eye = 0; eye < viewCountOutput; ++eye) {
@@ -2420,7 +2489,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                         if (releaseOk) {
                             XrCompositionLayerProjection layerProj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
                             XrCompositionLayerQuad layerQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-                            const XrCompositionLayerBaseHeader* layers[1] = {nullptr};
+                            const XrCompositionLayerBaseHeader* layers[1+2*cvr::hud::ChannelCount+3] = {};
 
                             if (menuRectActive) {
                                 layerQuad.space = m_localSpace;
@@ -2429,7 +2498,7 @@ DWORD OpenXRManager::FrameThreadMain() {
 
                             // LAZY-FOLLOW panel: stays put within the dead-zone, eases
                             // to the head past the threshold (see ComputeMenuQuadPose).
-                            layerQuad.pose = ComputeMenuQuadPose(headPoseLocated, location.pose);
+                            layerQuad.pose = ComputeMenuQuadPose(headPoseLocated, location.pose, frameState.predictedDisplayTime);
 
                                 float quadWidth = 2.0f * 1.5f * tanf(GetMenuFov() * 3.14159f / 180.0f * 0.5f);
                                 layerQuad.size = {quadWidth, quadWidth};
@@ -2444,10 +2513,61 @@ DWORD OpenXRManager::FrameThreadMain() {
                             XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
                             endInfo.displayTime = frameState.predictedDisplayTime;
                             endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-                            endInfo.layerCount = 1;
+                            XrSpaceLocation hudHead{XR_TYPE_SPACE_LOCATION};
+                            XrView hudViews[2]={{XR_TYPE_VIEW},{XR_TYPE_VIEW}};
+                            XrVector3f eyeOffsets[2]{};
+                            bool hudTracked=false, hudEyes=false;
+                            if(headPoseLocated && (!menuRectActive || cvr::framegen::GetSettings().overlay)) {
+                                constexpr auto valid=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
+                                hudTracked=XR_SUCCEEDED(xrLocateSpace(m_viewSpace,m_localSpace,
+                                    frameState.predictedDisplayTime,&hudHead)) && (hudHead.locationFlags&valid)==valid;
+                                XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+                                locate.viewConfigurationType=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+                                locate.displayTime=frameState.predictedDisplayTime;locate.space=m_localSpace;
+                                XrViewState state{XR_TYPE_VIEW_STATE};uint32_t count=0;
+                                hudEyes=hudTracked && XR_SUCCEEDED(xrLocateViews(m_session,&locate,&state,2,&count,hudViews)) &&
+                                    count==2 && (state.viewStateFlags&XR_VIEW_STATE_POSITION_VALID_BIT);
+                                if(hudEyes) for(int i=0;i<2;++i) eyeOffsets[i]={hudViews[i].pose.position.x-hudHead.pose.position.x,
+                                    hudViews[i].pose.position.y-hudHead.pose.position.y,hudViews[i].pose.position.z-hudHead.pose.position.z};
+                            }
+                            float hudBodyYaw=0;
+                            { std::lock_guard lock(m_renderPoseMutex);
+                              if(m_basePoseSet) {const auto& q=m_basePose.orientation;
+                                  hudBodyYaw=atan2f(2*(q.w*q.y+q.x*q.z),1-2*(q.x*q.x+q.y*q.y));} }
+                            hudBodyYaw+=BodyYawFollowOffset();
+                            layers[1]=m_hudQuad.Prepare(m_session,m_localSpace,m_d3dDevice,m_d3dQueue,
+                                !menuRectActive,hudTracked,hudHead.pose,GetTrackingOriginSerial(),
+                                frameState.predictedDisplayTime,hudEyes?eyeOffsets:nullptr,hudBodyYaw);
+                            if(layers[1]) layers[2]=m_hudQuad.SecondEye();
+                            endInfo.layerCount = layers[2] ? 3 : (layers[1] ? 2 : 1);
+                            if(const auto* interactions=m_interactionQuad.Prepare(m_session,m_localSpace,m_d3dDevice,m_d3dQueue,
+                                !menuRectActive,hudTracked,hudHead.pose,GetTrackingOriginSerial(),
+                                frameState.predictedDisplayTime,hudEyes?eyeOffsets:nullptr,hudBodyYaw)){
+                                layers[endInfo.layerCount++]=interactions;
+                                if(const auto* other=m_interactionQuad.SecondEye())layers[endInfo.layerCount++]=other;
+                            }
+                            if(const auto* basilisk=m_basiliskQuad.Prepare(m_session,m_localSpace,m_d3dDevice,m_d3dQueue,
+                                !menuRectActive,hudTracked,hudHead.pose,GetTrackingOriginSerial(),
+                                frameState.predictedDisplayTime,hudEyes?eyeOffsets:nullptr,hudBodyYaw)){
+                                layers[endInfo.layerCount++]=basilisk;
+                                if(const auto* other=m_basiliskQuad.SecondEye())layers[endInfo.layerCount++]=other;
+                            }
+                            if(const auto* surveillance=m_surveillanceQuad.Prepare(m_session,m_localSpace,m_d3dDevice,m_d3dQueue,
+                                !menuRectActive,hudTracked,hudHead.pose,GetTrackingOriginSerial(),
+                                frameState.predictedDisplayTime,hudEyes?eyeOffsets:nullptr,hudBodyYaw)){
+                                layers[endInfo.layerCount++]=surveillance;
+                                if(const auto* other=m_surveillanceQuad.SecondEye())layers[endInfo.layerCount++]=other;
+                            }
+                            if(const auto* metrics=m_framegenOverlay.Prepare(m_session,m_viewSpace,m_d3dDevice,m_d3dQueue,
+                                m_localSpace,hudTracked?&hudHead.pose:nullptr,GetTrackingOriginSerial(),frameState.predictedDisplayTime))
+                                layers[endInfo.layerCount++]=metrics;
                             endInfo.layers = layers;
-                            CyberpunkVR_DebugXrEnds.fetch_add(1, std::memory_order_relaxed);
-                            CyberpunkVR_DebugXrEndsWithLayer.fetch_add(1, std::memory_order_relaxed);
+                            if(const auto* panel=m_settingsPanel.Prepare(m_session,m_localSpace,m_d3dDevice,m_d3dQueue)){
+                                layers[endInfo.layerCount++]=panel;
+                                if(const auto* ray=m_settingsPanel.Ray())layers[endInfo.layerCount++]=ray;
+                            }
+                            CVR_DIAGNOSTIC(CyberpunkVR_DebugXrEnds.fetch_add(1, std::memory_order_relaxed));
+                            CVR_DIAGNOSTIC(CyberpunkVR_DebugXrEndsWithLayer.fetch_add(1, std::memory_order_relaxed));
                             // HOW OLD IS THE IMAGE WE ARE SUBMITTING. Recorded here rather than at the
                             // capture, because only here is it known which cycle actually carried it --
                             // and a resubmit of the same capture is precisely the case that matters.
@@ -2460,8 +2580,8 @@ DWORD OpenXRManager::FrameThreadMain() {
                                 if (ageMs >= 0.0 && ageMs < 1000.0) {
                                     const unsigned long long ageUs =
                                         (unsigned long long)(ageMs * 1000.0);
-                                    CyberpunkVR_DebugSubmitAgeCount.fetch_add(1, std::memory_order_relaxed);
-                                    CyberpunkVR_DebugSubmitAgeSumUs.fetch_add(ageUs, std::memory_order_relaxed);
+                                    CVR_DIAGNOSTIC(CyberpunkVR_DebugSubmitAgeCount.fetch_add(1, std::memory_order_relaxed));
+                                    CVR_DIAGNOSTIC(CyberpunkVR_DebugSubmitAgeSumUs.fetch_add(ageUs, std::memory_order_relaxed));
                                     unsigned long long prev =
                                         CyberpunkVR_DebugSubmitAgeMaxUs.load(std::memory_order_relaxed);
                                     while (ageUs > prev &&
@@ -2481,13 +2601,15 @@ DWORD OpenXRManager::FrameThreadMain() {
                                     int bucket = (int)(ageMs / periodMs);
                                     if (bucket < 0) bucket = 0;
                                     if (bucket > 3) bucket = 3;
-                                    CyberpunkVR_DebugSubmitAgeBuckets[bucket].fetch_add(1, std::memory_order_relaxed);
+                                    CVR_DIAGNOSTIC(CyberpunkVR_DebugSubmitAgeBuckets[bucket].fetch_add(1, std::memory_order_relaxed));
                                 }
                             }
                             const XrResult endRes = xrEndFrame(m_session, &endInfo);
                             XrAccumulateCycle(waitEnterMs, waitMs,
                                               frameState.predictedDisplayPeriod);
                             if (XR_SUCCEEDED(endRes)) {
+                                for(int eye=0;eye<2;++eye)
+                                    CVR_DIAGNOSTIC(CyberpunkVR_PoseIdLastSubmit[eye].store(monoPoseIds[eye],std::memory_order_relaxed));
                                 XrMark('E');
                                 XrBucketCadence(frameState.predictedDisplayPeriod);
                                 // DIAG: the angular gap between the SUBMITTED render pose
@@ -2508,7 +2630,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                                 // report the spread over a window rather than single samples --
                                 // spread near zero while turning means the pose stream is clean
                                 // and the cause is elsewhere; a wide spread names it here.
-                                {
+                                if(cvr::RuntimeDiagnosticsEnabled()) {
                                     const XrQuaternionf& a = monoPoses[0].orientation;
                                     const XrQuaternionf& b = location.pose.orientation;
                                     float dot = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
@@ -2564,11 +2686,15 @@ DWORD OpenXRManager::FrameThreadMain() {
                                             CyberpunkVR_DebugFinalAge,
                                             OpenXRManager::Get().RenderedFrameQueueDepth(),
                                             (unsigned long long)CyberpunkVR_DebugPoseReadBack);
+                                        LOG_THROTTLED(30000, "POSEDIAG: placed-camera match=%llu miss=%llu ambiguous=%llu\n",
+                                            (unsigned long long)CyberpunkVR_PlacedPoseMatch.load(std::memory_order_relaxed),
+                                            (unsigned long long)CyberpunkVR_PlacedPoseMiss.load(std::memory_order_relaxed),
+                                            (unsigned long long)CyberpunkVR_PlacedPoseAmbiguous.load(std::memory_order_relaxed));
                                         s_gapN = 0; s_gapSum = 0.0f;
                                         s_gapMin = 1e9f; s_gapMax = -1e9f;
                                     }
                                 }
-                                if ((presentSerial % 300) == 1) {
+                                if (cvr::RuntimeDiagnosticsEnabled() && (presentSerial % 300) == 1) {
                                     Log("OpenXRManager: Mono frame submitted. serial=%llu fresh=%d views=%u shouldRender=%d depth=%d\n",
                                         static_cast<unsigned long long>(presentSerial),
                                         presentSerial != m_lastSubmittedSerial ? 1 : 0,
@@ -2576,7 +2702,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                                         frameState.shouldRender ? 1 : 0,
                                         useDepthLayer ? 1 : 0);
                                 }
-                                ++CyberpunkVR_DebugMonoSubmits;
+                                CVR_DIAGNOSTIC(++CyberpunkVR_DebugMonoSubmits);
                                 // Feed the regression, but ONLY on a frame the game actually
                                 // produced. A resubmitted stale snapshot carries its old serial
                                 // against this cycle's display time, and those points do not lie
@@ -2586,9 +2712,11 @@ DWORD OpenXRManager::FrameThreadMain() {
                                 if (presentSerial != m_lastSubmittedSerial) {
                                     FitAddDisplayTime(presentSerial, frameState.predictedDisplayTime);
                                 }
+                                if(fgSelected)m_framegen.Submitted(fgSelection,m_fence,capturedReadFence,true);
+                                else if(cvr::framegen::MetricsEnabled())cvr::framegen::OnSubmitted(presentSerial,false,presentSerial==m_lastSubmittedSerial,cvr::framegen::NowMs());
                                 m_lastSubmittedSerial = presentSerial;
-                                monoSource->Release();
-                                if (vrcamEye) vrcamEye->Release();
+                                ReleaseCapturedRead(monoSource,capturedReadFence);
+                                if (vrcamEye)ReleaseCapturedRead(vrcamEye,capturedReadFence);
                                 if (monoDepthSource) monoDepthSource->Release();
                                 if (m_frameSyncEvent) {
                                     SetEvent(m_frameSyncEvent);
@@ -2596,7 +2724,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                                 continue;
                             }
 
-                            CyberpunkVR_DebugXrEndFailed.fetch_add(1, std::memory_order_relaxed);
+                            CVR_DIAGNOSTIC(CyberpunkVR_DebugXrEndFailed.fetch_add(1, std::memory_order_relaxed));
                             // NOTE, and it is not a bug in the counter: control now falls through
                             // to the layerCount-0 xrEndFrame at the tail of this cycle, so a
                             // failed submit is counted once here and once as an EMPTY end. Ends
@@ -2606,17 +2734,18 @@ DWORD OpenXRManager::FrameThreadMain() {
                     }
                 }
 
+                if(fgSelected)m_framegen.Submitted(fgSelection,m_fence,capturedReadFence,false);
                 if (monoSource) {
-                    monoSource->Release();
+                    ReleaseCapturedRead(monoSource,capturedReadFence);
                 }
                 if (vrcamEye) {
-                    vrcamEye->Release();
+                    ReleaseCapturedRead(vrcamEye,capturedReadFence);
                 }
                 if (monoDepthSource) {
                     monoDepthSource->Release();
                 }
             }
-        } else if (monoEnabled && ((++monoWaitLogCounter % 300) == 1)) {
+        } else if (cvr::RuntimeDiagnosticsEnabled() && monoEnabled && ((++monoWaitLogCounter % 300) == 1)) {
             Log("OpenXRManager: %s submit waiting. ready=%d views=%zu shouldRender=%d\n",
                 "Mono",
                 monoReady ? 1 : 0,
@@ -2633,8 +2762,8 @@ DWORD OpenXRManager::FrameThreadMain() {
         // it composed last, which is precisely what "the headset runs at half the rate" looks
         // like from the inside. Counted apart from the real submit so the two never average
         // together into a number that says nothing.
-        CyberpunkVR_DebugXrEnds.fetch_add(1, std::memory_order_relaxed);
-        CyberpunkVR_DebugXrEndsEmpty.fetch_add(1, std::memory_order_relaxed);
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugXrEnds.fetch_add(1, std::memory_order_relaxed));
+        CVR_DIAGNOSTIC(CyberpunkVR_DebugXrEndsEmpty.fetch_add(1, std::memory_order_relaxed));
         XrMark('e');
         xrEndFrame(m_session, &endInfo);
         XrAccumulateCycle(waitEnterMs, waitMs, frameState.predictedDisplayPeriod);

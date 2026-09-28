@@ -1,4 +1,5 @@
-﻿// OrientationProvider -- lifted out of src/Natives/Natives.cpp, where it was one of four instrumentation
+#include "Utils/DebugGate.hpp"
+// OrientationProvider -- lifted out of src/Natives/Natives.cpp, where it was one of four instrumentation
 // subsystems sharing the tail of an 8,400-line file behind nothing but a banner comment.
 //
 // Instruments GetOrientation through the provider VMT -- standing at the
@@ -325,7 +326,7 @@ static bool ProvIsPlayersAttack(int aClass, uintptr_t aProvider) {
         if (!ProvPlausiblePtr(src)) return false;
         const uintptr_t atk = *reinterpret_cast<uintptr_t*>(src + 0x10);
         if (!ProvPlausiblePtr(atk)) return false;
-        InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugAtkCalls));
+        CVR_DIAGNOSTIC(InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugAtkCalls)));
         const uintptr_t* words = reinterpret_cast<const uintptr_t*>(atk);
         // NOTHING IS DEREFERENCED HERE BUT THE ATTACK ITSELF, and only at the four handle offsets,
         // all inside gameIAttack (0x128) which every attack object has. An earlier version walked
@@ -341,10 +342,10 @@ static bool ProvIsPlayersAttack(int aClass, uintptr_t aProvider) {
         }
         if (found) {
             mine = true;
-            InterlockedOr64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugAtkMask),
-                            static_cast<LONG64>(found));
+            CVR_DIAGNOSTIC(InterlockedOr64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugAtkMask),
+                            static_cast<LONG64>(found)));
         } else {
-            InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugAtkNoMatch));
+            CVR_DIAGNOSTIC(InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&CyberpunkVR_DebugAtkNoMatch)));
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     return mine;
@@ -355,7 +356,7 @@ template <int C, int S>
 static uintptr_t __fastcall ProvStub(uintptr_t rcx, uintptr_t rdx, uintptr_t r8, uintptr_t r9) {
     g_provCalls[C][S]++;
     // Slots 30..45 of the entFunc class, mirrored out. S is already the slot minus kProvSlotLo.
-    if (C == 2 && S >= 30 && S < 46) ++CyberpunkVR_DebugProvEntFunc[S - 30];
+    if (C == 2 && S >= 30 && S < 46) CVR_DIAGNOSTIC(++CyberpunkVR_DebugProvEntFunc[S - 30]);
     using Fn = uintptr_t(__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t);
     Fn orig = reinterpret_cast<Fn>(g_provOrig[C][S]);
     uintptr_t ret = orig ? orig(rcx, rdx, r8, r9) : 0;
@@ -974,5 +975,4 @@ void ResetVRProvCounts(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void
     g_provOverrides = 0;
     for (int i = 0; i < 4; ++i) { g_provLastQ[i]=0; g_provOrigQ[i]=0; g_provCtrlQ[i]=0; g_provHmdQ[i]=0; }
 }
-
 

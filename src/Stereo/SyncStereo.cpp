@@ -1,4 +1,6 @@
-﻿// Path B (Sync Sequential)  M-B1 observational CALLER1 hook. See sync_stereo.h.
+#include "Utils/DebugGate.hpp"
+#include "Stereo/RenderParity.hpp"
+// Path B (Sync Sequential)  M-B1 observational CALLER1 hook. See sync_stereo.h.
 
 #include "Stereo/SyncStereo.hpp"
 #include "Utils/StereoLog.hpp"
@@ -680,41 +682,19 @@ static S70Res g_s70res[20] = {};
 static volatile long g_s70res_n = 0;
 
 
-// SAME-FRAME DE-ALIAS (path-A root fix, doc 23). Proven via [s70res]: within ONE frame the
-// vrcam post-color is resolved by node377 at RET-RVA 0x378178 -> a STABLE correct physical
-// (31691, vrcam's own), and by the DLSS temporal pass sub_140378224 at RET-RVA 0x3783CF ->
-// the DISPLAYED physical that FLAPS (dark=31691 vrcam / bright=main-range, aliased from the
-// shared transient pool). Both resolves are the SAME id in the SAME frame => both physicals
-// are LIVE this frame => forcing the flapping (displayed) resolve to the stable one is
-// CRASH-SAFE (unlike the cross-frame pin that used freed indices). Refreshed every frame
-// (0x378178 is stable per scene), recency-guarded so a missed cache just falls back to
-// natural (flap, no crash) rather than using a stale index.
-constexpr uint32_t POST_STABLE_RET_RVA = 0x378178u;  // node377 stable post-color resolve
-constexpr uint32_t POST_FLAP_RET_RVA   = 0x3783CFu;  // sub_140378224 resolve = displayed
-extern "C" __declspec(dllexport) int32_t  CyberpunkVR_DealiasPostColor = 1;   // default ON
+// Legacy export compatibility only. TE6 separates the graph cache by view;
+// it removes this post-color handle substitution. A resolve-count window did
+// not prove resource lifetime and must not override the newly isolated graph.
+extern "C" __declspec(dllexport) int32_t  CyberpunkVR_DealiasPostColor = 0;
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugDealiasHits = 0;
-static std::atomic<uint32_t> g_post_stable_idx{0};
-static std::atomic<uint32_t> g_post_stable_seq{0};
-static std::atomic<uint32_t> g_dealias_seq{1};
 static __int64 __fastcall Detour_Resolve3D20(__int64 reg, uint32_t* out,
         uint32_t* idp, __int64 r9) {
     const void* ra = _ReturnAddress();
     const __int64 r = g_orig_resolve3d20(reg, out, idp, r9);
     if (!out || !idp) return r;
+    cvr::stereo::SynchronizeFogHistory(static_cast<uintptr_t>(reg),out,idp[0],reinterpret_cast<uintptr_t>(ra));
     const uint32_t id = idp[0];
     if ((id & 0x00FFFFFFu) != POSTCOLOR_LOW) return r;      // post-color ids only
-    // --- SAME-FRAME DE-ALIAS of vrcam post-color: cache node377's STABLE resolve (0x378178);
-    // the DISPLAYED resolve is the mirror-blit consumer (in_fin, salt71) which flaps -> we
-    // override THAT below to the cached stable physical (same-frame => live => crash-safe).
-    if (id == 0x3C7E6258u) {
-        const uint32_t rva = (uint32_t)(reinterpret_cast<uintptr_t>(ra)
-            - reinterpret_cast<uintptr_t>(g_exe_base));
-        const uint32_t s = g_dealias_seq.fetch_add(1, std::memory_order_relaxed);
-        if (rva == POST_STABLE_RET_RVA) {
-            g_post_stable_idx.store(*out, std::memory_order_release);
-            g_post_stable_seq.store(s, std::memory_order_release);
-        }
-    }
     const bool in_fin = t_mirror_copy_node_active;          // vrcam Final2D consumer
     const bool in_tm  = t_vrcam_node_active && t_current_node_work ==
         reinterpret_cast<uintptr_t>(g_exe_base) + TONEMAP_WORK_RVA;
@@ -761,8 +741,8 @@ static __int64 __fastcall Detour_Resolve3D20(__int64 reg, uint32_t* out,
         }
     }
     if (!in_fin && !in_tm) return r;                        // vrcam post nodes only
-    InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(
-        &CyberpunkVR_DebugResolveHits));
+    CVR_DIAGNOSTIC(InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(
+        &CyberpunkVR_DebugResolveHits)));
     uint32_t v7 = 0;
     if (reg) {
         __try { v7 = *reinterpret_cast<uint32_t*>(reg + 24064ull * (uint8_t)r9 + 64); }
@@ -785,25 +765,6 @@ static __int64 __fastcall Detour_Resolve3D20(__int64 reg, uint32_t* out,
         tl_last_tm_gen = v7;
     } else {  // in_fin consumer (the mirror-blit / displayed resolve)
         CyberpunkVR_DebugFinNatural = *out;
-        // SAME-FRAME DE-ALIAS: the displayed resolve flaps (dark=vrcam-own / bright=main
-        // aliased). Force it to node377's stable resolve (0x378178) captured THIS frame
-        // (same frame => live => crash-safe). Recency guard => fallback to natural on miss.
-        if (CyberpunkVR_DealiasPostColor && id == 0x3C7E6258u) {
-            const uint32_t si = g_post_stable_idx.load(std::memory_order_acquire);
-            const uint32_t ss = g_post_stable_seq.load(std::memory_order_acquire);
-            const uint32_t ds = g_dealias_seq.load(std::memory_order_relaxed);
-            // Wide recency window: node377's 0x378178 resolve runs EVERY frame before the
-            // mirror blit (proven: s70res missing-378178=0), so `si` is always same-frame
-            // fresh -> a large window is safe (staleness only if 378178 stops for many
-            // frames, e.g. DLSS off/menu, after which override self-disables). The async
-            // per-frame variation in the resolve-count gap (was occasionally >48 -> rare
-            // bright flash on static scenes) is covered here.
-            if (si && si != *out && (ds - ss) < 512u) {
-                *out = si;
-                InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(
-                    &CyberpunkVR_DebugDealiasHits));
-            }
-        }
         if (CyberpunkVR_FixPostVersion) {
             const uint32_t tmidx = g_tm_post_idx.load(std::memory_order_acquire);
             const uint32_t tmseq = g_tm_post_seq.load(std::memory_order_acquire);
@@ -811,8 +772,8 @@ static __int64 __fastcall Detour_Resolve3D20(__int64 reg, uint32_t* out,
             // valid => crash-safe substitution (proven: match-tm never crashed).
             if (tmidx && (seq - tmseq) < 8u && tmidx != *out) {
                 *out = tmidx;
-                InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(
-                    &CyberpunkVR_DebugPinApplied));
+                CVR_DIAGNOSTIC(InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(
+                    &CyberpunkVR_DebugPinApplied)));
             }
         }
         CyberpunkVR_DebugFinPinned = *out;

@@ -13,12 +13,15 @@
 #include "Core/LiveControls.hpp"
 #include "Camera/CameraState.hpp"   // CyberpunkVR_BodyYawRealignRad
 #include "Runtimes/OpenXRManager.hpp"
+#include "Hooks/LadderInput.hpp"
 
 #include <windows.h>
 #include <cstdint>
 #include <cstddef>
 
 extern "C" void OnOnFootMoveXYCallback(void* moveStruct) {
+    cvr::swimming::BindNativeInput(moveStruct);
+    if(cvr::ladder::Active())return; // ladder MoveY is up/down, independent of gaze yaw
     int src = g_liveControls.xrMovementSource;
 
     // Physical body rotation (F10 -> VRIK): when ON, the heading no longer tracks the
@@ -28,7 +31,7 @@ extern "C" void OnOnFootMoveXYCallback(void* moveStruct) {
     // HMD-relative on foot. The move vector is heading-relative and hmdYawRel is
     // head-vs-heading, so the rotated vector equals the gaze direction exactly, even
     // mid-realign (heading and hmdYawRel change by opposite amounts). OFF keeps classic.
-    if (g_liveControls.xrPhysicalBodyRotation) {
+    if (BodyYawFollowActive()) {
         if (g_isAiming || g_hasWeaponEquipped) src = 1;
         if (src <= 0) src = 1;
     }
@@ -55,7 +58,7 @@ extern "C" void OnOnFootMoveXYCallback(void* moveStruct) {
     // It used to cancel by itself: the old realign rotated the recenter base by the same angle, which
     // moved base-relative and heading-relative into step. That base rotation is gone (it landed a
     // frame late and swung the view), so the subtraction is explicit now. Zero when the feature is off.
-    yaw -= CyberpunkVR_BodyYawRealignRad;
+    yaw -= BodyYawFollowOffset();
     float c = cosf(yaw);
     float s = sinf(yaw);
     p[0] = x * c - y * s;

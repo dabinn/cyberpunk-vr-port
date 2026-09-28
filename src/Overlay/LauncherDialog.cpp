@@ -3,6 +3,15 @@
 #include <commctrl.h>
 #include <iterator>
 #include <string>
+#include <atomic>
+#include <algorithm>
+
+extern HWND g_gameHwnd;
+extern void Log(const char*,...);
+static std::atomic<bool> g_launcherOpen{};
+static bool g_restoreGameFocus{};
+
+int IsLauncherOpen(){return g_launcherOpen.load(std::memory_order_acquire)?1:0;}
 
 extern "C" void SetWindowResolutionAndPersist(int width, int height);
 extern "C" int GetCurrentWindowWidth();
@@ -121,6 +130,19 @@ static const ResolutionPreset kPico4UltraResolutions[] = {
     {2560, 2560, L"2560 x 2560"},
     {3072, 3072, L"3072 x 3072"},
     {4096, 4096, L"4096 x 4096"},
+    {5000, 5000, L"5000 x 5000"},
+    {6000, 6000, L"6000 x 6000"},
+};
+
+// Steam Frame preset from Crazymoniker's native-controller support. All sizes
+// already have square VRCAM assets; projection still follows the runtime FOV.
+static const ResolutionPreset kSteamFrameResolutions[] = {
+    {2160, 2160, L"2160 x 2160 (Native panel)"},
+    {1920, 1920, L"1920 x 1920 (Performance)"},
+    {2048, 2048, L"2048 x 2048"},
+    {2560, 2560, L"2560 x 2560 (Balanced)"},
+    {3072, 3072, L"3072 x 3072 (High)"},
+    {4096, 4096, L"4096 x 4096 (Ultra)"},
     {5000, 5000, L"5000 x 5000"},
     {6000, 6000, L"6000 x 6000"},
 };
@@ -261,6 +283,8 @@ static const HmdPreset kHmdPresets[] = {
     {10,L"PDA",   L"Pimax Dream Air", kPimaxDreamAirResolutions, _countof(kPimaxDreamAirResolutions)},
     {11,L"PSVR2", L"PlayStation VR2", kPlayStationVr2Resolutions, _countof(kPlayStationVr2Resolutions)},
     {12,L"BSB2",  L"Bigscreen Beyond 2/2e", kBigscreenBeyond2Resolutions, _countof(kBigscreenBeyond2Resolutions)},
+    {13,L"SFRAME",L"Steam Frame", kSteamFrameResolutions, _countof(kSteamFrameResolutions)},
+    {14,L"RG2",   L"HP Reverb G2", kPico4Resolutions, _countof(kPico4Resolutions)},
 };
 
 struct RuntimeOption {
@@ -467,42 +491,108 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     }
                 }
             }
+            g_restoreGameFocus=GetForegroundWindow()==hwnd;
+            DestroyWindow(hwnd);
+        } else if(id==IDCANCEL) {
+            g_restoreGameFocus=GetForegroundWindow()==hwnd;
             DestroyWindow(hwnd);
         }
         break;
     }
+    case WM_CLOSE:
+        g_restoreGameFocus=GetForegroundWindow()==hwnd;
+        DestroyWindow(hwnd);
+        return 0;
     case WM_DESTROY:
         if (g_fontHeader) { DeleteObject(g_fontHeader); g_fontHeader = nullptr; }
         if (g_fontSub)    { DeleteObject(g_fontSub);    g_fontSub = nullptr; }
         if (g_fontBody)   { DeleteObject(g_fontBody);   g_fontBody = nullptr; }
-        PostQuitMessage(0);
         break;
     default:
-        return DefWindowProc(hwnd, msg, wParam, lParam);
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
     return 0;
 }
 
+void WaitForLauncherStartup(unsigned int milliseconds) {
+    if (!milliseconds) return;
+    if (milliseconds > 10000) milliseconds = 10000;
+    const ULONGLONG deadline = GetTickCount64() + milliseconds;
+    // The visible launcher naturally pumps startup/resize messages. Preserve
+    // that opportunity in unattended mode instead of sleeping the UI thread.
+    while (GetTickCount64() < deadline) {
+        MSG message{};
+        for (unsigned int n = 0; n < 64 && PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE); ++n) {
+            if (message.message == WM_QUIT) {
+                PostQuitMessage(static_cast<int>(message.wParam));
+                return;
+            }
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+            if (GetTickCount64() >= deadline) return;
+        }
+        const auto now = GetTickCount64();
+        if (now >= deadline) return;
+        const DWORD remaining = static_cast<DWORD>(deadline - now);
+        if (MsgWaitForMultipleObjectsEx(0, nullptr, remaining, QS_ALLINPUT, MWMO_INPUTAVAILABLE) == WAIT_FAILED)
+            Sleep(remaining < 10 ? remaining : 10);
+    }
+}
+
 void ShowLauncherDialog() {
+    if(g_launcherOpen.exchange(true,std::memory_order_acq_rel))return;
+    g_restoreGameFocus=false;
+    struct StartupWindow {
+        HWND game{};bool visible{};bool sameThread{};unsigned cursorShows{};
+        StartupWindow() {
+            DWORD pid{};
+            const auto thread=GetWindowThreadProcessId(g_gameHwnd,&pid);
+            if(thread && pid==GetCurrentProcessId())game=g_gameHwnd;
+            sameThread=thread==GetCurrentThreadId();
+            visible=game && IsWindowVisible(game) && !IsIconic(game);
+            // Unmap the fullscreen owner while waiting. Hiding preserves its
+            // size, unlike minimizing, and releases Wine/X11 fullscreen grabs.
+            if(visible) {if(sameThread)ShowWindow(game,SW_HIDE);else ShowWindowAsync(game,SW_HIDE);}
+            ClipCursor(nullptr);ReleaseCapture();
+            do {++cursorShows;}while(ShowCursor(TRUE)<0 && cursorShows<16);
+        }
+        ~StartupWindow() {
+            g_launcherOpen.store(false,std::memory_order_release);
+            if(visible && IsWindow(game)) {
+                if(sameThread)ShowWindow(game,SW_SHOWNA);else ShowWindowAsync(game,SW_SHOWNA);
+                if(g_restoreGameFocus)SetForegroundWindow(game);
+            }
+            while(cursorShows){--cursorShows;ShowCursor(FALSE);}
+        }
+    } startup;
     g_brushBg = CreateSolidBrush(kColBg);
     WNDCLASSW wc = {};
     wc.lpfnWndProc = LauncherWndProc;
-    wc.hInstance = GetModuleHandle(nullptr);
+    wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = L"CyberpunkVRPortLauncherClass";
     wc.hbrBackground = g_brushBg;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    RegisterClassW(&wc);
+    const auto registered=RegisterClassW(&wc);
+    if(!registered && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) {
+        Log("Launcher: RegisterClassW failed (%lu)\n",GetLastError());
+        DeleteObject(g_brushBg);g_brushBg=nullptr;return;
+    }
 
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    const DWORD extended=WS_EX_TOPMOST|WS_EX_APPWINDOW;
     RECT rc = {0, 0, kClientW, kClientH};
-    AdjustWindowRect(&rc, style, FALSE);
+    AdjustWindowRectEx(&rc, style, FALSE, extended);
     const int winW = rc.right - rc.left;
     const int winH = rc.bottom - rc.top;
-    const int xPos = (GetSystemMetrics(SM_CXSCREEN) - winW) / 2;
-    const int yPos = (GetSystemMetrics(SM_CYSCREEN) - winH) / 2;
+    MONITORINFO monitor{sizeof(monitor)};
+    RECT work{};
+    if(GetMonitorInfoW(MonitorFromWindow(startup.game,MONITOR_DEFAULTTONEAREST),&monitor))work=monitor.rcWork;
+    else SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);
+    const int xPos=work.left+std::max(0L,(work.right-work.left-winW)/2);
+    const int yPos=work.top+std::max(0L,(work.bottom-work.top-winH)/2);
 
     HWND hwnd = CreateWindowExW(
-        0,
+        extended,
         L"CyberpunkVRPortLauncherClass",
         L"CyberpunkVRPort Configuration",
         style,
@@ -511,21 +601,30 @@ void ShowLauncherDialog() {
     );
 
     if (hwnd == nullptr) {
+        Log("Launcher: CreateWindowExW failed (%lu)\n",GetLastError());
+        if(registered)UnregisterClassW(wc.lpszClassName,wc.hInstance);
         if (g_brushBg) { DeleteObject(g_brushBg); g_brushBg = nullptr; }
         return;
     }
 
     ShowWindow(hwnd, SW_SHOW);
+    SetWindowPos(hwnd,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE);
+    SetForegroundWindow(hwnd);
+    SetFocus(g_hHmd);
     UpdateWindow(hwnd);
 
-    MSG msg = {};
-    while (GetMessage(&msg, nullptr, 0, 0)) {
-        if (IsDialogMessage(hwnd, &msg)) {
-            continue;
+    bool quit=false;int quitCode=0;
+    while(IsWindow(hwnd) && !quit) {
+        if(MsgWaitForMultipleObjectsEx(0,nullptr,INFINITE,QS_ALLINPUT,MWMO_INPUTAVAILABLE)==WAIT_FAILED)break;
+        MSG msg{};
+        while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) {
+            if(msg.message==WM_QUIT){quit=true;quitCode=static_cast<int>(msg.wParam);break;}
+            if(!IsDialogMessageW(hwnd,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}
+            if(!IsWindow(hwnd))break;
         }
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
     }
-
+    if(IsWindow(hwnd))DestroyWindow(hwnd);
+    if(quit)PostQuitMessage(quitCode);
+    if(registered)UnregisterClassW(wc.lpszClassName,wc.hInstance);
     if (g_brushBg) { DeleteObject(g_brushBg); g_brushBg = nullptr; }
 }

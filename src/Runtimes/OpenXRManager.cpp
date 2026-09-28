@@ -1,5 +1,12 @@
+#include "Utils/DebugGate.hpp"
+#include "Core/LiveControls.hpp"
+#include "Runtimes/HybridBodyYaw.hpp"
 #include "Anim/WheelGrab.hpp"   // the wheel-grab blends, for the hand smoothing below
 #include "Runtimes/OpenXRManager.hpp"
+#include "Hooks/RoomscaleMove.hpp"
+#include "Camera/CameraLink.hpp"
+#include "Runtimes/SimulatorRecenter.hpp"
+#include "Runtimes/TrackingFilter.hpp"
 #include "Utils/SharedSlots.hpp"   // CyberpunkVR_Hands_Shared slot map (single source of truth)
 #include "Hooks/Ngx.hpp"
 #include "Runtimes/RuntimeFovCorrection.hpp"
@@ -600,9 +607,9 @@ bool OpenXRManager::Init() {
     std::vector<const char*> extensions = {
         XR_KHR_D3D12_ENABLE_EXTENSION_NAME
     };
+    bool steamFrameEnabled=false;
 
-    // Depth-layer support: submitting the game depth as XR_KHR_composition_layer_depth
-    // gives the runtime depth for correct reprojection (kills the flat-color tearing).
+    // Optional depth submission and native Steam Frame controller bindings.
     {
         uint32_t extCount = 0;
         xrEnumerateInstanceExtensionProperties(nullptr, 0, &extCount, nullptr);
@@ -613,11 +620,14 @@ bool OpenXRManager::Init() {
                 if (strcmp(p.extensionName, XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME) == 0) {
                     m_depthLayerSupported = true;
                     extensions.push_back(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
-                    break;
+                } else if(strcmp(p.extensionName,cvr::input::SteamFrameExtension)==0) {
+                    steamFrameEnabled=true;
+                    extensions.push_back(cvr::input::SteamFrameExtension);
                 }
             }
         }
         Log("OpenXRManager: depth-layer (XR_KHR_composition_layer_depth) supported=%d\n", m_depthLayerSupported ? 1 : 0);
+        Log("OpenXRManager: Steam Frame controller (%s) supported=%d\n",cvr::input::SteamFrameExtension,steamFrameEnabled?1:0);
     }
 
     XrInstanceCreateInfo createInfo{XR_TYPE_INSTANCE_CREATE_INFO};
@@ -736,6 +746,7 @@ bool OpenXRManager::Init() {
             makeAction(m_primaryButtonAction,   XR_ACTION_TYPE_BOOLEAN_INPUT,  "primary_button",   "Primary Button (A/X)", true);
             makeAction(m_secondaryButtonAction, XR_ACTION_TYPE_BOOLEAN_INPUT,  "secondary_button", "Secondary Button (B/Y)", true);
             makeAction(m_menuButtonAction,      XR_ACTION_TYPE_BOOLEAN_INPUT,  "menu",             "Menu Button",          false);
+            if(steamFrameEnabled)m_steamFrameActions.Create(makeAction);
         }
         Log("OpenXRManager[Input]: gameplay action set %s (xr_input_actions=%d)\n",
             inputActionsEnabled ? "ENABLED" : "DISABLED (pose-only)", (int)inputActionsEnabled);
@@ -776,7 +787,39 @@ bool OpenXRManager::Init() {
                                           "/interaction_profiles/khr/simple_controller" }) {
                 suggest(profile, poseOnly);
             }
+            if(steamFrameEnabled)suggest(cvr::input::SteamFrameProfile,poseOnly);
             goto bindings_done;
+        }
+
+        // Frame has all four face buttons on the right, a left D-pad, and
+        // separate bumpers. Keep grips reserved for the existing VR gestures.
+        if(steamFrameEnabled) {
+            suggest(cvr::input::SteamFrameProfile, {
+                { m_handPoseAction,           "/user/hand/left/input/grip/pose" },
+                { m_handPoseAction,           "/user/hand/right/input/grip/pose" },
+                { m_handAimPoseAction,        "/user/hand/left/input/aim/pose" },
+                { m_handAimPoseAction,        "/user/hand/right/input/aim/pose" },
+                { m_thumbstickAction,         "/user/hand/left/input/thumbstick" },
+                { m_thumbstickAction,         "/user/hand/right/input/thumbstick" },
+                { m_thumbstickClickAction,    "/user/hand/left/input/thumbstick/click" },
+                { m_thumbstickClickAction,    "/user/hand/right/input/thumbstick/click" },
+                { m_triggerAction,           "/user/hand/left/input/trigger/value" },
+                { m_triggerAction,           "/user/hand/right/input/trigger/value" },
+                { m_gripAction,              "/user/hand/left/input/squeeze/value" },
+                { m_gripAction,              "/user/hand/right/input/squeeze/value" },
+                { m_primaryButtonAction,     "/user/hand/right/input/a/click" },
+                { m_secondaryButtonAction,   "/user/hand/right/input/b/click" },
+                { m_steamFrameActions.x,     "/user/hand/right/input/x/click" },
+                { m_steamFrameActions.y,     "/user/hand/right/input/y/click" },
+                { m_menuButtonAction,        "/user/hand/right/input/menu/click" },
+                { m_steamFrameActions.up,    "/user/hand/left/input/dpad_up/click" },
+                { m_steamFrameActions.down,  "/user/hand/left/input/dpad_down/click" },
+                { m_steamFrameActions.left,  "/user/hand/left/input/dpad_left/click" },
+                { m_steamFrameActions.right, "/user/hand/left/input/dpad_right/click" },
+                { m_steamFrameActions.view,  "/user/hand/left/input/view/click" },
+                { m_steamFrameActions.bumper,"/user/hand/left/input/bumper/click" },
+                { m_steamFrameActions.bumper,"/user/hand/right/input/bumper/click" },
+            });
         }
 
         // -- Oculus Touch (Quest/Rift): X/Y on left, A/B on right, menu = left menu button --
@@ -1053,11 +1096,65 @@ void OpenXRManager::PollEvents() {
 
 // [PumpInlineFrame() moved to openxr_frameloop.cpp]
 
+bool OpenXRManager::ResolveRenderedPose(const OpenXRHeadPose& pose,XrPosef* out) const {
+    if(!out || !pose.valid || ExternalPoseResetPending())return false;
+    std::lock_guard lock(const_cast<std::mutex&>(m_renderPoseMutex));
+    if(!m_basePoseSet || pose.originSerial!=GetTrackingOriginSerial())return false;
+    const XrVector3f delta=RotateVector(m_basePose.orientation,{pose.posX,pose.posY,pose.posZ});
+    out->orientation=MultiplyQuat(m_basePose.orientation,{pose.oriX,pose.oriY,pose.oriZ,pose.oriW});
+    out->position={m_basePose.position.x+delta.x,m_basePose.position.y+delta.y,m_basePose.position.z+delta.z};
+    return true;
+}
+
+bool OpenXRManager::GetNativeFrameHead(OpenXRHeadPose* out,uint64_t* sequence,uint64_t* stampUs,XrTime* aim,cvr::roomscale::Vec2* consumed) const {
+    if(!out || !cvr::roomscale::PoseFrameAllowed() || ExternalPoseResetPending())return false;
+    const auto origin=GetTrackingOriginSerial();
+    std::lock_guard lock(const_cast<std::mutex&>(m_handMutex));
+    if(!m_handPublicationGate.NativeOwns(XrDiagNowUs(),origin) ||
+       !m_publishedHandHead.valid || m_publishedHandHead.originSerial!=origin || m_publishedHandAim<=0)return false;
+    *out=m_publishedHandHead;
+    if(sequence)*sequence=m_publishedHandSequence | (uint64_t{1}<<63);
+    if(stampUs)*stampUs=m_publishedHandStampUs;
+    if(aim)*aim=m_publishedHandAim;
+    if(consumed)*consumed=m_publishedHandConsumed;
+    return true;
+}
+
+bool OpenXRManager::AcquireCameraPoseFrame(OpenXRHeadPose* head,cvr::roomscale::Vec2* consumed,uint64_t* sequence) {
+    if(!head || !consumed)return false;
+    if(GetNativeFrameHead(head,sequence,nullptr,nullptr,consumed))return true;
+    if(!AcquireFrameHeadSample(head,sequence,nullptr,nullptr,false))return false;
+    *consumed=cvr::roomscale::CameraConsumed(head->originSerial);
+    return true;
+}
+
+bool OpenXRManager::GetPublishedHandFrame(OpenXRHeadPose* head,OpenXRHeadPose hands[2]) const {
+    if(!head || !hands || ExternalPoseResetPending())return false;
+    const auto origin=GetTrackingOriginSerial();
+    std::lock_guard lock(const_cast<std::mutex&>(m_handMutex));
+    const auto now=XrDiagNowUs();
+    if(!m_publishedHandHead.valid || m_publishedHandHead.originSerial!=origin ||
+       !m_publishedHandStampUs || now<m_publishedHandStampUs || now-m_publishedHandStampUs>250000)return false;
+    *head=m_publishedHandHead;hands[0]=m_publishedHands[0];hands[1]=m_publishedHands[1];
+    return true;
+}
+
 bool OpenXRManager::GetHandPose(int handIndex, OpenXRHeadPose* out) const {
     if (!out || handIndex < 0 || handIndex > 1) return false;
     std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(m_handMutex));
     *out = m_hands[handIndex];
     return out->valid;
+}
+
+bool OpenXRManager::GetGestureHandFrame(OpenXRHeadPose* head,OpenXRHeadPose hands[2],uint64_t* sequence,uint64_t* stampUs) const {
+    if(!head || !hands || !sequence || !stampUs || ExternalPoseResetPending())return false;
+    const auto origin=GetTrackingOriginSerial();
+    std::lock_guard lock(const_cast<std::mutex&>(m_handMutex));
+    const auto now=XrDiagNowUs();
+    if(!m_publishedHandHead.valid || m_publishedHandHead.originSerial!=origin || !m_publishedHandStampUs ||
+       now<m_publishedHandStampUs || now-m_publishedHandStampUs>250000)return false;
+    *head=m_publishedHandHead;hands[0]=m_publishedGestureHands[0];hands[1]=m_publishedGestureHands[1];
+    *sequence=m_publishedHandSequence;*stampUs=m_publishedHandStampUs;return true;
 }
 
 void OpenXRManager::SetWeaponOffsets(float pitch, float yaw, float roll, float dx, float dy, float dz) {
@@ -1121,11 +1218,28 @@ bool OpenXRManager::GetBodyYawFromHands(float* outYaw) const {
     return true;
 }
 
-XrPosef OpenXRManager::ComputeMenuQuadPose(bool headPoseLocated, const XrPosef& headPose) {
+bool OpenXRManager::GetBodyTrackingFrame(cvr::body::TrackingFrame* out) const {
+    if(!out || ExternalPoseResetPending())return false;
+    const auto origin=GetTrackingOriginSerial();
+    {
+        std::lock_guard lock(m_roomscaleSampleMutex);
+        const auto now=XrDiagNowUs();
+        if(!m_roomscaleSample.valid || m_roomscaleSample.origin!=origin ||
+           now<m_roomscaleSample.stampUs || now-m_roomscaleSample.stampUs>150000)return false;
+    }
+    std::lock_guard lock(const_cast<std::mutex&>(m_handMutex));
+    const auto now=XrDiagNowUs();
+    if(!cvr::body::TrackingFrameFresh(m_bodyTrackingFrame,origin,now))return false;
+    *out=m_bodyTrackingFrame;return true;
+}
+
+XrPosef OpenXRManager::ComputeMenuQuadPose(bool headPoseLocated, const XrPosef& headPose, XrTime displayTime) {
     // Head tracking dropped this frame: hold the last pose (don't jump to the base pose
     // -- that snapped the panel sideways / to the floor origin on brief tracking gaps).
     if (!headPoseLocated) {
-        if (m_menuAnchorValid) return m_menuQuadPose;
+        m_menuFollow.ResetDelay();
+        m_menuClock.Reset();
+        if (m_menuFollow.valid) return m_menuQuadPose;
     }
 
     // Reference head pose (live head, or the recenter base only for the FIRST anchor).
@@ -1140,59 +1254,18 @@ XrPosef OpenXRManager::ComputeMenuQuadPose(bool headPoseLocated, const XrPosef& 
 
     // Live head yaw, flattened to pure yaw (keeps the panel vertical).
     const XrQuaternionf o = ref.orientation;
-    const float fx = -2.0f * (o.x * o.z + o.y * o.w);
-    const float fz = 2.0f * (o.x * o.x + o.y * o.y) - 1.0f;
-    const float headYaw = atan2f(-fx, -fz);
-
-    auto wrapPi = [](float a) {
-        while (a >  3.14159265f) a -= 6.28318531f;
-        while (a < -3.14159265f) a += 6.28318531f;
-        return a;
-    };
-
-    // dt for the ease.
-    LARGE_INTEGER qf, qn;
-    QueryPerformanceFrequency(&qf);
-    QueryPerformanceCounter(&qn);
-    float dt = 0.0f;
-    if (m_menuLastQpc != 0) dt = static_cast<float>(qn.QuadPart - m_menuLastQpc) / static_cast<float>(qf.QuadPart);
-    m_menuLastQpc = qn.QuadPart;
-    if (dt < 0.0f) dt = 0.0f;
-    if (dt > 0.05f) dt = 0.05f;
-
-    if (!m_menuAnchorValid) {
-        m_menuYaw = headYaw;
-        m_menuFollowing = false;
-        m_menuAnchorValid = true;
-    }
-
-    // Follow the head TRANSLATION every frame (walking/leaning keeps the panel ahead);
-    // only the YAW is lazy (yaw tracking is what caused the swim / motion sickness).
-    m_menuPivot = ref.position;
-
-    float startRad = GetMenuFollowDeg() * 0.01745329252f;
-    if (startRad < 0.0872f)  startRad = 0.0872f;   // clamp 5..90 deg
-    if (startRad > 1.5708f)  startRad = 1.5708f;
-    constexpr float kStopRad = 0.0349f;   // 2 deg: re-centered, stop
-    constexpr float kRate    = 3.0f;      // rad/s ease toward the head (~170 deg/s)
-
-    float offset = wrapPi(headYaw - m_menuYaw);
-    if (!m_menuFollowing && fabsf(offset) > startRad) m_menuFollowing = true;
-    if (m_menuFollowing) {
-        float step = kRate * dt;
-        if (step > fabsf(offset)) step = fabsf(offset);
-        m_menuYaw += (offset < 0.0f) ? -step : step;
-        offset = wrapPi(headYaw - m_menuYaw);
-        if (fabsf(offset) < kStopRad) m_menuFollowing = false;
-    }
-
-    const XrQuaternionf qYaw = {0.0f, sinf(m_menuYaw * 0.5f), 0.0f, cosf(m_menuYaw * 0.5f)};
+    const float headYaw=cvr::hud::HeadYaw(o.x,o.y,o.z,o.w,m_menuFollow.valid?m_menuFollow.yaw:0.0f);
+    m_menuClock.Step(displayTime);
+    const float cone=std::clamp(GetMenuFollowDeg(),5.0f,90.0f)*0.01745329252f;
+    const float yaw=m_menuFollow.Update(headYaw,cone,m_menuClock.elapsed,true);
+    // Translation continues to follow the head; only yaw has a free-look cone.
+    const XrQuaternionf qYaw = {0.0f, sinf(yaw * 0.5f), 0.0f, cosf(yaw * 0.5f)};
     const XrVector3f rotatedFwd = RotateVector(qYaw, XrVector3f{0.0f, 0.0f, -1.5f});
     XrPosef pose{};
     pose.orientation = qYaw;
-    pose.position.x = m_menuPivot.x + rotatedFwd.x;
-    pose.position.y = m_menuPivot.y + rotatedFwd.y;
-    pose.position.z = m_menuPivot.z + rotatedFwd.z;
+    pose.position.x = ref.position.x + rotatedFwd.x;
+    pose.position.y = ref.position.y + rotatedFwd.y;
+    pose.position.z = ref.position.z + rotatedFwd.z;
     m_menuQuadPose = pose;
     return pose;
 }
@@ -1228,6 +1301,8 @@ bool OpenXRManager::LocateHeadPoseAt(XrTime displayTime, OpenXRHeadPose* out) {
         return false;
     }
     if (displayTime <= 0 || !m_sessionRunning.load(std::memory_order_relaxed)) return false;
+    const auto externalReset = m_externalPoseReset.Serial();
+    if (ExternalPoseResetPending()) return GetHeadPose(out);
 
     XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
     if (CyberpunkVR_PoseFromCycle) {
@@ -1243,6 +1318,9 @@ bool OpenXRManager::LocateHeadPoseAt(XrTime displayTime, OpenXRHeadPose* out) {
         if ((loc.locationFlags & wanted) != wanted) return false;
     }
 
+    std::unique_lock externalResetLock(m_externalResetMutex);
+    if (!m_externalPoseReset.Ready(externalReset) || ExternalPoseResetPending())
+        return GetHeadPose(out);
     // Same recenter transform the frame loop applies, so this pose is interchangeable with
     // GetHeadPose()'s: relOri = conj(base.ori) * raw, relPos = conj(base.ori) * (raw - base.pos).
     XrPosef base{};
@@ -1250,6 +1328,7 @@ bool OpenXRManager::LocateHeadPoseAt(XrTime displayTime, OpenXRHeadPose* out) {
         std::lock_guard<std::mutex> lock(m_renderPoseMutex);
         if (!m_basePoseSet) return false;
         base = m_basePose;
+        out->originSerial = m_trackingOriginSerial.load(std::memory_order_acquire);
     }
     const XrQuaternionf baseInv = ConjugateQuat(base.orientation);
     const XrVector3f relWorld{ loc.pose.position.x - base.position.x,
@@ -1275,10 +1354,9 @@ bool OpenXRManager::LocateHeadPoseAt(XrTime displayTime, OpenXRHeadPose* out) {
     // Its own state, not the head filter's -- this runs on the game thread at the game's rate,
     // the other on the XR thread at the headset's. Guarded because AcquireFrameHeadSample can
     // reach here from either camera hook.
-    // The horizon measurement, taken on every locate whatever the filter mode is -- it describes
-    // the engine's phase, not our arithmetic, so it must not sit inside a branch.
-    {
-        const uint64_t stamp = m_frameAimStampUs.load(std::memory_order_acquire);
+    // Phase diagnostics are independent of the active tracking filter.
+    if(cvr::RuntimeDiagnosticsEnabled()) {
+        const uint64_t stamp = m_frameAim.Read().stampUs;
         if (stamp != 0) {
             const uint64_t nowUs = XrDiagNowUs();
             const uint32_t lagUs = (nowUs > stamp) ? static_cast<uint32_t>(nowUs - stamp) : 0u;
@@ -1286,9 +1364,9 @@ bool OpenXRManager::LocateHeadPoseAt(XrTime displayTime, OpenXRHeadPose* out) {
             if (lagUs < CyberpunkVR_DebugAimLagMinUs) CyberpunkVR_DebugAimLagMinUs = lagUs;
             if (lagUs > CyberpunkVR_DebugAimLagMaxUs) CyberpunkVR_DebugAimLagMaxUs = lagUs;
             CyberpunkVR_DebugAimLagSumUs += lagUs;
-            ++CyberpunkVR_DebugAimLagCount;
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugAimLagCount);
             const uint32_t bin = lagUs / 2000u;
-            ++CyberpunkVR_DebugAimLagHist[bin < 11u ? bin : 11u];
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugAimLagHist[bin < 11u ? bin : 11u]);
         }
     }
 
@@ -1297,9 +1375,12 @@ bool OpenXRManager::LocateHeadPoseAt(XrTime displayTime, OpenXRHeadPose* out) {
         static bool s_init = false;
         static XrVector3f s_pos{};
         static XrQuaternionf s_ori{0.0f, 0.0f, 0.0f, 1.0f};
+        static uint64_t s_origin=0, s_lastUs=0;
         const float strength = GetHmdTrackingSmooth();
         std::lock_guard<std::mutex> lock(s_mtx);
-        if (!s_init || (CyberpunkVR_PredictFilter == 1 && strength <= 0.001f)) {
+        const bool rebased=cvr::tracking::RebaseTrackingFilter(
+            out->originSerial,XrDiagNowUs(),relPos,relOri,s_init,s_origin,s_lastUs,s_pos,s_ori);
+        if (rebased || (CyberpunkVR_PredictFilter == 1 && strength <= 0.001f)) {
             s_init = true;
             s_pos = relPos;
             s_ori = relOri;
@@ -1313,7 +1394,6 @@ bool OpenXRManager::LocateHeadPoseAt(XrTime displayTime, OpenXRHeadPose* out) {
             // per-call constant would make the effective time constant wander with load, which is
             // the very defect being fixed. Clamped so a hitch or a menu pause cannot hand the
             // filter a step of several seconds and snap the view.
-            static uint64_t s_lastUs = 0;
             const uint64_t nowUs = XrDiagNowUs();
             float dt = 0.0139f;
             if (s_lastUs != 0 && nowUs > s_lastUs) dt = static_cast<float>(nowUs - s_lastUs) * 1e-6f;
@@ -1352,9 +1432,9 @@ bool OpenXRManager::LocateHeadPoseAt(XrTime displayTime, OpenXRHeadPose* out) {
             const float thrPos = CyberpunkVR_DeadbandPosMm * 0.001f;
             if (posDelta >= thrPos) {
                 s_pos = relPos;
-                ++CyberpunkVR_DebugDeadbandStepPos;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugDeadbandStepPos);
             } else {
-                ++CyberpunkVR_DebugDeadbandHeldPos;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugDeadbandHeldPos);
             }
             float dotDb = s_ori.x * relOri.x + s_ori.y * relOri.y +
                           s_ori.z * relOri.z + s_ori.w * relOri.w;
@@ -1364,9 +1444,9 @@ bool OpenXRManager::LocateHeadPoseAt(XrTime displayTime, OpenXRHeadPose* out) {
             const float thrAng = CyberpunkVR_DeadbandAngDeg * 0.01745329252f;
             if (angDelta >= thrAng) {
                 s_ori = relOri;
-                ++CyberpunkVR_DebugDeadbandStepOri;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugDeadbandStepOri);
             } else {
-                ++CyberpunkVR_DebugDeadbandHeldOri;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugDeadbandHeldOri);
             }
         } else {
             // 1/(1+20*strength) of the step while still, rising to the whole step once it passes
@@ -1410,6 +1490,7 @@ bool OpenXRManager::LocateHeadPoseAt(XrTime displayTime, OpenXRHeadPose* out) {
 
 bool OpenXRManager::GetHeadPose(OpenXRHeadPose* out) const {
     if (!out) return false;
+    out->originSerial = m_trackingOriginSerial.load(std::memory_order_acquire);
 
     const bool useSyncedPose = GetSyncSequential() != 0 && m_syncedPoseValid.load(std::memory_order_relaxed);
     out->valid = useSyncedPose ? true : m_poseValid.load(std::memory_order_relaxed);
@@ -1420,6 +1501,11 @@ bool OpenXRManager::GetHeadPose(OpenXRHeadPose* out) const {
     out->oriY = useSyncedPose ? m_syncedOriY.load(std::memory_order_relaxed) : m_oriY.load(std::memory_order_relaxed);
     out->oriZ = useSyncedPose ? m_syncedOriZ.load(std::memory_order_relaxed) : m_oriZ.load(std::memory_order_relaxed);
     out->oriW = useSyncedPose ? m_syncedOriW.load(std::memory_order_relaxed) : m_oriW.load(std::memory_order_relaxed);
+    if (!useSyncedPose) {
+        std::lock_guard lock(m_roomscaleSampleMutex);
+        *out = m_coherentHeadPose;
+    }
+    out->valid = out->valid && m_sessionRunning.load(std::memory_order_acquire);
 
     // MOTION PREDICTION REMOVED (xr_motion_predict_ms).
     //
@@ -1441,6 +1527,50 @@ bool OpenXRManager::GetHeadPose(OpenXRHeadPose* out) const {
         out->posX = 0.0f;
         out->posY = 0.0f;
         out->posZ = 0.0f;
+    }
+    return out->valid;
+}
+
+bool OpenXRManager::GetRoomscaleSample(cvr::roomscale::Sample* out, OpenXRHeadPose* frameHead,
+                                      XrTime* frameTime) {
+    if (!out) return false;
+    if (frameHead) *frameHead={};
+    if (frameTime) *frameTime=0;
+    cvr::roomscale::Sample tracking{};
+    {
+        std::lock_guard lock(m_roomscaleSampleMutex);
+        tracking=m_roomscaleSample;
+    }
+    if (!tracking.valid || !m_sessionRunning.load(std::memory_order_acquire) || ExternalPoseResetPending()) {
+        *out=tracking;
+        out->valid=false;
+        return false;
+    }
+    // The raw XR pose qualifies tracking, but is NOT the displacement source.
+    // Otherwise CCT/body moves ahead of the filtered frame the cameras render:
+    // PID19332 measured up to11.5cm between them during80cm/0.5s HMD translation,
+    // while WASD was stable. Use the camera's existing latch, not a second filter
+    // or a body/root correction. Its publication ID prevents repeat consumption.
+    OpenXRHeadPose head{};
+    uint64_t sequence{},sampledUs{};
+    XrTime aim{};
+    // The native tick starts a NEW pose transaction; it must sample XR rather
+    // than read the controller packet from the preceding native tick.
+    const bool haveFrame=AcquireFrameHeadSample(&head,&sequence,&sampledUs,&aim,false);
+    {
+        std::lock_guard lock(m_roomscaleSampleMutex);
+        tracking=m_roomscaleSample;
+    }
+    tracking.valid=tracking.valid && m_sessionRunning.load(std::memory_order_acquire) && !ExternalPoseResetPending();
+    // A hip hinge is room-fixed upper-body motion, not a request to walk CCT.
+    // Full optical head motion is still retained in head for camera/hands.
+    if(cvr::swimming::Active())head.bodyBend={};
+    const cvr::roomscale::Sample frame{{head.posX-head.bodyBend.right,-head.posZ-head.bodyBend.forward},sequence,head.originSerial,sampledUs,
+                                       haveFrame && head.valid};
+    *out=cvr::roomscale::MovementFrameSample(tracking,frame);
+    if (out->valid) {
+        if (frameHead) *frameHead=head;
+        if (frameTime) *frameTime=aim;
     }
     return out->valid;
 }
@@ -1513,25 +1643,27 @@ void OpenXRManager::StoreRenderEyePose(int eye, const OpenXRHeadPose& pose, uint
 // once per tick and replayed exactly for that tick's remaining passes.
 
 // Filled by the camera locate; see the comment there. Same DLL, so these are read directly.
-extern volatile float g_anchorOff[3];
-extern volatile float g_anchorCy, g_anchorSy, g_anchorScale;
-extern volatile int   g_anchorRecipeValid;
 extern "C" __declspec(dllexport) int CyberpunkVR_CoherentHandAnchor;
 // Defined in VrCore.cpp -- see the note where [108..110] is published.
 extern "C" __declspec(dllexport) int CyberpunkVR_HeadTranslationInPatch;
 
-bool OpenXRManager::GetCoherentViewAnchor(float out[3]) const {
+bool OpenXRManager::GetCoherentViewAnchor(float out[3],const OpenXRHeadPose* reference,
+                                          const cvr::roomscale::Vec2* pairedConsumed) const {
     if (!out) return false;
-    if (!g_anchorRecipeValid || !CyberpunkVR_CoherentHandAnchor || !m_handSampleHeadValid) {
+    cvr::camera::AnchorRecipe anchor{};
+    if (!CyberpunkVR_CoherentHandAnchor || !(reference ? reference->valid : m_handSampleHeadValid) || !cvr::camera::AnchorRecipeRead(&anchor)) {
         return false;
     }
-    const float sc = g_anchorScale;
-    const float lr =  m_handSampleHeadPos[0] * sc + g_anchorOff[0];
-    const float lf = -m_handSampleHeadPos[2] * sc + g_anchorOff[1];
-    const float lu =  m_handSampleHeadPos[1] * sc + g_anchorOff[2];
-    out[0] = g_anchorCy * lr - g_anchorSy * lf;
-    out[1] = g_anchorSy * lr + g_anchorCy * lf;
-    out[2] = lu;
+    const float sc = anchor.scale;
+    const auto consumed = pairedConsumed ? *pairedConsumed :
+        cvr::roomscale::CameraConsumed(reference ? reference->originSerial : m_handSampleOrigin);
+    const float x=reference ? reference->posX : m_handSampleHeadPos[0];
+    const float y=reference ? reference->posY : m_handSampleHeadPos[1];
+    const float z=reference ? reference->posZ : m_handSampleHeadPos[2];
+    const auto delta=cvr::camera::ComposeAnchorTranslation(
+        {(x-consumed.x)*sc,(-z-consumed.y)*sc,y*sc},
+        anchor.trackingOffset,anchor.modelOffset,anchor.trackingYaw,anchor.modelYaw);
+    out[0]=delta.x; out[1]=delta.y; out[2]=delta.z;
     return true;
 }
 
@@ -1541,11 +1673,9 @@ bool OpenXRManager::GetCoherentViewAnchor(float out[3]) const {
 // The per-frame hand locate, defined in OpenXRFrameLoop.cpp -- see the note there.
 extern "C" __declspec(dllexport) extern int CyberpunkVR_HandLocatePerFrame;
 extern "C" __declspec(dllexport) extern float CyberpunkVR_HandLerpSpeed;
-// HAND SMOOTHING WHILE A HAND IS ON THE STEERING WHEEL. 150 with a ~11 ms frame gives an interpolation
-// factor of 1.67, which clamps to 1 -- so this does not make the smoother fast, it switches it off.
-// That is the intent: the steering angle is measured from the published hand poses, so every bit of
-// smoothing is lag between the player's hands and the car's wheel, and the drawn hand is the driving
-// animation's at that moment anyway. Exported so it can be tuned live without a rebuild.
+// A positive value bypasses hand smoothing while holding the wheel. Previously
+// rate 150 only bypassed it when dt >= 1/150 s, so extra publications restored
+// lag. Keep the export for compatibility; zero opts into the base hand filter.
 extern "C" __declspec(dllexport) float CyberpunkVR_WheelHandLerpSpeed = 150.0f;
 
 // THE FILTER'S SPEED FOLLOWS WHAT IS IN THE HAND, and that is the honest axis for it: the filter trades
@@ -1612,7 +1742,15 @@ struct HandLerpState { XrPosef pose{}; bool init = false; };
 HandLerpState g_handLerp[2];
 }  // namespace
 
-void OpenXRManager::FlushHandsToShared() {
+extern "C" {
+__declspec(dllexport) std::atomic<uint64_t> CyberpunkVR_NativeHandPublishes{0};
+__declspec(dllexport) std::atomic<uint64_t> CyberpunkVR_PresentHandPublishSkipped{0};
+__declspec(dllexport) std::atomic<uint64_t> CyberpunkVR_FrameHandReferenceRejected{0};
+}
+
+void OpenXRManager::FlushHandsToShared(const OpenXRHeadPose* frameHead, XrTime frameTime,
+                                      const cvr::roomscale::Vec2* frameConsumed) {
+    std::lock_guard<std::mutex> lock(m_handMutex);
     static HANDLE s_hMapFile2 = NULL;
     static float* sShared = nullptr;
     if (!s_hMapFile2) {
@@ -1620,7 +1758,28 @@ void OpenXRManager::FlushHandsToShared() {
         if (s_hMapFile2) sShared = (float*)MapViewOfFile(s_hMapFile2, FILE_MAP_ALL_ACCESS, 0, 0, 1024);
     }
     if (!sShared) return;
-    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(m_handMutex));
+    const uint64_t publishUs=XrDiagNowUs();
+    const uint64_t origin=GetTrackingOriginSerial();
+    if (!frameHead && m_handPublicationGate.NativeOwns(publishUs,origin,cvr::roomscale::PoseFrameAllowed())) {
+        CVR_DIAGNOSTIC(CyberpunkVR_PresentHandPublishSkipped.fetch_add(1,std::memory_order_relaxed));
+        return;
+    }
+    OpenXRHeadPose reference{};
+    if (frameHead) reference=*frameHead;
+    else GetHeadPose(&reference);
+    if (!reference.valid || reference.originSerial!=origin ||
+        (frameHead && frameTime<=0) || ExternalPoseResetPending()) {
+        CVR_DIAGNOSTIC(CyberpunkVR_FrameHandReferenceRejected.fetch_add(1,std::memory_order_relaxed));
+        return;
+    }
+    const auto referenceConsumed=frameConsumed ? *frameConsumed
+        : cvr::roomscale::CameraConsumed(reference.originSerial);
+    XrPosef referenceBase{};
+    {
+        std::lock_guard baseLock(m_renderPoseMutex);
+        if (!m_basePoseSet || reference.originSerial!=GetTrackingOriginSerial()) return;
+        referenceBase=m_basePose;
+    }
 
     // Publish hands + HMD orientation to the VRIK plugin, ALWAYS from the live pose.
     //
@@ -1632,31 +1791,29 @@ void OpenXRManager::FlushHandsToShared() {
     // AnimPose). Freezing on top of that only added a second, differently-clocked snapshot of
     // the same head -- which is exactly the "two seqlocks, two instants" this cleanup removes.
     OpenXRHeadPose srcHands[2];
+    cvr::body::TrackingFrame bodyFrame{};
     float hmdOri[4];
-    // THE HEAD THE OFFSETS ARE ANCHORED ON, hoisted so the filter below can undo and redo the
-    // head-localisation around itself. Built exactly as the per-frame branch builds its own copy:
-    // m_basePose composed with the filtered head that m_pos*/m_ori* hold. Same head, so the round
-    // trip is exact rather than approximately exact.
+    // One head reference for localisation, filtering and publication. On the
+    // native path this is the exact latch used by CCT and the camera, not the
+    // XR thread's independently filtered m_pos* cache.
     XrPosef headAnchorPose{};
     {
         headAnchorPose.orientation = MultiplyQuat(
-            m_basePose.orientation,
-            XrQuaternionf{ m_oriX.load(std::memory_order_relaxed),
-                           m_oriY.load(std::memory_order_relaxed),
-                           m_oriZ.load(std::memory_order_relaxed),
-                           m_oriW.load(std::memory_order_relaxed) });
+            referenceBase.orientation,
+            XrQuaternionf{ reference.oriX,reference.oriY,reference.oriZ,reference.oriW });
         const XrVector3f hp = RotateVector(
-            m_basePose.orientation,
-            XrVector3f{ m_posX.load(std::memory_order_relaxed),
-                        m_posY.load(std::memory_order_relaxed),
-                        m_posZ.load(std::memory_order_relaxed) });
-        headAnchorPose.position.x = m_basePose.position.x + hp.x;
-        headAnchorPose.position.y = m_basePose.position.y + hp.y;
-        headAnchorPose.position.z = m_basePose.position.z + hp.z;
+            referenceBase.orientation,
+            XrVector3f{ reference.posX,reference.posY,reference.posZ });
+        headAnchorPose.position.x = referenceBase.position.x + hp.x;
+        headAnchorPose.position.y = referenceBase.position.y + hp.y;
+        headAnchorPose.position.z = referenceBase.position.z + hp.z;
     }
     {
         srcHands[0] = m_hands[0];
         srcHands[1] = m_hands[1];
+        // Cached offsets belong to the XR-thread reference. A native frame must
+        // get fresh controllers against its own reference, or mark them absent.
+        if (frameHead) { srcHands[0].valid=false; srcHands[1].valid=false; }
         // LOCATED FOR THIS FRAME, rather than copied from the newest 72 Hz sample.
         //
         // The publish below was always once per frame; the value in it was not. It came off the XR
@@ -1666,33 +1823,29 @@ void OpenXRManager::FlushHandsToShared() {
         // as a trail, not as motion. Measured: 3-6 mm of second difference at the producer against
         // 6-13 mm as the solve read it, a factor of two with nothing but resampling in between.
         //
-        // The head reference is the SAME one the offset is re-anchored on (see
-        // CyberpunkVR_HandRelToFilteredHead): m_basePose composed with the filtered head, which is what
-        // m_pos*/m_ori* hold. Measuring from anything else puts the difference of two heads into every
-        // hand position, which was the other half of this shake.
-        if (CyberpunkVR_HandLocatePerFrame && m_session != XR_NULL_HANDLE &&
+        // All consumers in this publication use headAnchorPose. Re-reading
+        // m_pos* here or at the seqlock tail can change the basis mid-packet.
+        if ((frameHead || CyberpunkVR_HandLocatePerFrame) && m_session != XR_NULL_HANDLE &&
             m_localSpace != XR_NULL_HANDLE && m_sessionRunning.load(std::memory_order_relaxed)) {
-            // ...Now(), not GetFrameAimTime(): the plain aim steps at the XR rate, so a per-frame
-            // reader lands on a target that jumps one or two whole cycles by phase. Carried forward to
-            // now it advances by this frame's own duration. See the header.
-            XrTime aim = GetFrameAimTimeNow();
+            // Native hands use the exact XR time stored alongside their head
+            // latch. Present's fallback keeps its existing moving prediction.
+            XrTime aim = frameHead ? frameTime : GetFrameAimTimeNow();
             if (aim > 0) {
-                XrPosef headRef{};
-                headRef.orientation = MultiplyQuat(
-                    m_basePose.orientation,
-                    XrQuaternionf{ m_oriX.load(std::memory_order_relaxed),
-                                   m_oriY.load(std::memory_order_relaxed),
-                                   m_oriZ.load(std::memory_order_relaxed),
-                                   m_oriW.load(std::memory_order_relaxed) });
-                const XrVector3f fp = RotateVector(
-                    m_basePose.orientation,
-                    XrVector3f{ m_posX.load(std::memory_order_relaxed),
-                                m_posY.load(std::memory_order_relaxed),
-                                m_posZ.load(std::memory_order_relaxed) });
-                headRef.position.x = m_basePose.position.x + fp.x;
-                headRef.position.y = m_basePose.position.y + fp.y;
-                headRef.position.z = m_basePose.position.z + fp.z;
-                const XrQuaternionf headInv = ConjugateQuat(headRef.orientation);
+                const XrPosef headRef=headAnchorPose;
+                XrPosef bodyHeadPose{};
+                if(cvr::body::NeedsBodyTracking(static_cast<cvr::body::RotationMode>(g_liveControls.xrBodyRotationMode)) && frameHead){
+                    // Use raw HMD tracking at the SAME aim time as the raw
+                    // controllers, even when optional view smoothing is enabled.
+                    XrSpaceLocation bodyHead{XR_TYPE_SPACE_LOCATION};
+                    constexpr auto need=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|
+                        XR_SPACE_LOCATION_POSITION_TRACKED_BIT|XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+                    bodyFrame.valid=XR_SUCCEEDED(xrLocateSpace(m_viewSpace,m_localSpace,aim,&bodyHead)) &&
+                        (bodyHead.locationFlags&need)==need;
+                    bodyHeadPose=bodyHead.pose;bodyFrame.origin=reference.originSerial;
+                    bodyFrame.head=MultiplyQuat(ConjugateQuat(referenceBase.orientation),bodyHeadPose.orientation);
+                    bodyFrame.headPosition=RotateVector(ConjugateQuat(referenceBase.orientation),
+                        {bodyHeadPose.position.x-referenceBase.position.x,bodyHeadPose.position.y-referenceBase.position.y,bodyHeadPose.position.z-referenceBase.position.z});
+                }
                 for (int h = 0; h < 2; ++h) {
                     if (m_handSpaces[h] == XR_NULL_HANDLE) continue;
                     XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
@@ -1700,44 +1853,59 @@ void OpenXRManager::FlushHandsToShared() {
                     constexpr XrSpaceLocationFlags kNeed =
                         XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
                     if ((loc.locationFlags & kNeed) != kNeed) continue;
-                    const XrVector3f d{ loc.pose.position.x - headRef.position.x,
-                                        loc.pose.position.y - headRef.position.y,
-                                        loc.pose.position.z - headRef.position.z };
-                    const XrVector3f rel = RotateVector(headInv, d);
-                    const XrQuaternionf relOri = MultiplyQuat(headInv, loc.pose.orientation);
+                    constexpr XrSpaceLocationFlags kTracked=XR_SPACE_LOCATION_POSITION_TRACKED_BIT|XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+                    if(bodyFrame.valid){
+                        const auto raw=RelativePose(bodyHeadPose,loc.pose);
+                        bodyFrame.hands[h]=raw.position;bodyFrame.rotations[h]=raw.orientation;
+                        bodyFrame.tracked[h]=(loc.locationFlags & kTracked)==kTracked;
+                    }
+                    const auto headLocal=RelativePose(headRef,loc.pose);
+                    const auto& rel=headLocal.position;
+                    const auto& relOri=headLocal.orientation;
                     srcHands[h].valid = true;
                     srcHands[h].posX = rel.x; srcHands[h].posY = rel.y; srcHands[h].posZ = rel.z;
                     srcHands[h].oriX = relOri.x; srcHands[h].oriY = relOri.y;
                     srcHands[h].oriZ = relOri.z; srcHands[h].oriW = relOri.w;
-                    ++CyberpunkVR_DebugHandPerFrameLocates;
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugHandPerFrameLocates);
                 }
             }
         }
-        hmdOri[0] = m_oriX.load(std::memory_order_relaxed);
-        hmdOri[1] = m_oriY.load(std::memory_order_relaxed);
-        hmdOri[2] = m_oriZ.load(std::memory_order_relaxed);
-        hmdOri[3] = m_oriW.load(std::memory_order_relaxed);
+        hmdOri[0] = reference.oriX;
+        hmdOri[1] = reference.oriY;
+        hmdOri[2] = reference.oriZ;
+        hmdOri[3] = reference.oriW;
     }
+    // Body inference must not see the head-local hand filter: that filter lags
+    // during head turns and can turn stationary world-space hands into a false
+    // torso turn. bodyFrame above retains its own coherent raw reference.
     // Applied AFTER the source is chosen, so it smooths whatever is actually about to be published.
     {
+        static uint64_t s_filterOrigin=0;
+        if (s_filterOrigin!=reference.originSerial) {
+            for (auto& state:g_handLerp) state.init=false;
+            s_filterOrigin=reference.originSerial;
+        }
         static uint64_t s_lastUs = 0;
         const uint64_t nowUs = XrDiagNowUs();
         const float dt = (s_lastUs != 0 && nowUs > s_lastUs)
                              ? static_cast<float>(static_cast<double>(nowUs - s_lastUs) * 1e-6)
                              : 0.0f;
         s_lastUs = nowUs;
-        const float speed = EffectiveHandLerpSpeed();
-        const float lerpSpeed = speed * dt;   // the default; each hand may override it below
-        (void)lerpSpeed;
+        const bool bypassHandLerp = cvr::framegen::Enabled();
+        const float speed = bypassHandLerp ? 0.0f : EffectiveHandLerpSpeed();
         for (int h = 0; h < 2; ++h) {
-            if (!srcHands[h].valid) { g_handLerp[h].init = false; continue; }
+            // Bypass every hand rate (base, weapon and wheel) during framegen.
+            // Keep the configured rates and discard history so switching FG off
+            // seeds from the current pose instead of reviving an old filter tail.
+            if (bypassHandLerp || !srcHands[h].valid) { g_handLerp[h].init = false; continue; }
             // A HAND ON THE WHEEL IS NOT SMOOTHED. Read by NAME, not by index: this file numbers the
             // left hand 0 and the wheel module numbers the right hand 0.
             const float wheelHold = (h == 0)
                 ? cvr::anim::g_wheelBlendLeft.load(std::memory_order_relaxed)
                 : cvr::anim::g_wheelBlendRight.load(std::memory_order_relaxed);
             const bool onWheel = (wheelHold > 0.01f) && (CyberpunkVR_WheelHandLerpSpeed > 0.0f);
-            const float speedH = onWheel ? CyberpunkVR_WheelHandLerpSpeed : speed;
+            if(onWheel) {g_handLerp[h].init=false;continue;}
+            const float speedH = speed;
             const float lerpSpeedH = speedH * dt;
             // FILTER OUTSIDE THE HEAD FRAME. See the note at the top of this change: smoothing a
             // head-local offset smooths head rotation as if it were hand motion, and the offset is
@@ -1776,7 +1944,14 @@ void OpenXRManager::FlushHandsToShared() {
                 const float dz = cur.position.z - st.pose.position.z;
                 float len = std::sqrt(dx * dx + dy * dy + dz * dz);
                 if (len < 1.0f) len = 1.0f;                       // UEVR: max(1, length)
-                float tp = lerpSpeedH * len;
+                // Native roomscale's head uses an exponential time response.
+                // The old linear hand factor snapped at25ms for melee rate40:
+                // PID20596 measured the resulting25-33mm relative hand steps.
+                // Use elapsed-time response here as well; retain the configured
+                // hand rate, distance gain and legacy behavior.
+                const bool timedNative=frameHead;
+                float tp = timedNative ? cvr::tracking::ExponentialFollow(speedH*len,dt)
+                                       : lerpSpeedH*len;
                 if (tp > 1.0f) tp = 1.0f;
                 st.pose.position.x += dx * tp;
                 st.pose.position.y += dy * tp;
@@ -1787,7 +1962,8 @@ void OpenXRManager::FlushHandsToShared() {
                           st.pose.orientation.w * cur.orientation.w;
                 if (d < 0.0f) d = -d;
                 if (d > 1.0f) d = 1.0f;
-                float tr = lerpSpeedH * d;                         // UEVR: speed * spherical distance
+                float tr = timedNative ? cvr::tracking::ExponentialFollow(speedH*d,dt)
+                                       : lerpSpeedH*d;
                 if (tr > 1.0f) tr = 1.0f;
                 st.pose.orientation = NlerpQuat(st.pose.orientation, cur.orientation, tr);
             }
@@ -1813,7 +1989,8 @@ void OpenXRManager::FlushHandsToShared() {
         }
     }
 
-    const float baseY = m_posY.load(std::memory_order_relaxed);
+    const float baseY = reference.posY;
+    if (reference.originSerial!=GetTrackingOriginSerial() || ExternalPoseResetPending()) return;
 
     // ===== SEQLOCK BEGIN (torn-read fix) =====
     // The VRIK plugin reads these pose slots from the engine's animation JOB threads
@@ -1880,7 +2057,12 @@ void OpenXRManager::FlushHandsToShared() {
         // camera it was handed. With CyberpunkVR_HeadTranslationInPatch the component already
         // carries it, so publishing it here would count it twice -- see the note at [108..110].
         float anchor[3];
-        if (CyberpunkVR_HeadTranslationInPatch == 0 && GetCoherentViewAnchor(anchor)) {
+        if(frameHead && CyberpunkVR_HeadTranslationInPatch) {
+            sShared[112]=referenceConsumed.x;sShared[113]=referenceConsumed.y;
+            sShared[114]=reference.bodyBend.angle;sShared[115]=2.0f;
+            // Native v2: consumed tracking XY + physical bend angle from this
+            // exact head sample. Legacy v1 keeps its XYZ anchor unchanged.
+        } else if (CyberpunkVR_HeadTranslationInPatch == 0 && GetCoherentViewAnchor(anchor,&reference,&referenceConsumed)) {
             sShared[112] = anchor[0];
             sShared[113] = anchor[1];
             sShared[114] = anchor[2];
@@ -1892,7 +2074,8 @@ void OpenXRManager::FlushHandsToShared() {
     // [67] the sample stamp, INSIDE the seqlock so it travels with the pose it belongs to.
     // Outside it the reader would pick up the newest stamp against an older pose and report an
     // age that is too small -- the one number this census exists to get right.
-    sShared[67] = m_handSampleMs.load(std::memory_order_relaxed);
+    sShared[67] = frameHead ? static_cast<float>(std::fmod(XrDiagNowMs(),100000.0))
+                           : m_handSampleMs.load(std::memory_order_relaxed);
     // HMD relative orientation [16-19]
     sShared[16] = hmdOri[0];
     sShared[17] = hmdOri[1];
@@ -1917,9 +2100,9 @@ void OpenXRManager::FlushHandsToShared() {
     // real head TRANSLATION (the ~5-10cm eye/neck lever on head turns, leaning, physical
     // crouch) is part of the hand target -- hands stay room-fixed when the head moves, matching
     // the render view which gets the same translation from dxgi's posScale path.
-    sShared[124] = m_posX.load(std::memory_order_relaxed);
+    sShared[124] = reference.posX;
     sShared[125] = baseY;
-    sShared[126] = m_posZ.load(std::memory_order_relaxed);
+    sShared[126] = reference.posZ;
 
     // ===== SEQLOCK END =====
     // All payload slots are written; publish an EVEN sequence (= complete) so readers
@@ -1927,14 +2110,37 @@ void OpenXRManager::FlushHandsToShared() {
     // the frame. Release fence first so the payload stores are visible before seq.
     std::atomic_thread_fence(std::memory_order_release);
     *seqSlot = seqStart + 1u;   // seqStart IS odd -> +1 = EVEN = complete, and never repeats
+    m_publishedHandHead=reference;
+    m_publishedGestureHands[0]=srcHands[0];m_publishedGestureHands[1]=srcHands[1];
+    m_publishedHands[0]=srcHands[0];m_publishedHands[1]=srcHands[1];
+    m_publishedHands[1].posX=sShared[9];m_publishedHands[1].posY=sShared[10];m_publishedHands[1].posZ=sShared[11];
+    m_publishedHands[1].oriX=sShared[12];m_publishedHands[1].oriY=sShared[13];
+    m_publishedHands[1].oriZ=sShared[14];m_publishedHands[1].oriW=sShared[15];
+    m_publishedHandSequence=seqStart+1u;m_publishedHandStampUs=XrDiagNowUs();
+    bodyFrame.sequence=m_publishedHandSequence;bodyFrame.stampUs=m_publishedHandStampUs;
+    m_bodyTrackingFrame=bodyFrame;
+    m_publishedHandAim=frameHead ? frameTime : 0;
+    m_publishedHandConsumed=referenceConsumed;
+    if (frameHead) {
+        m_handPublicationGate.PublishedNative(XrDiagNowUs(),reference.originSerial);
+        if(cvr::RuntimeDiagnosticsEnabled()) {
+        const auto count=CyberpunkVR_NativeHandPublishes.fetch_add(1,std::memory_order_relaxed)+1;
+        if (count%300==1) Log("HandFrame: native=%llu presentSkipped=%llu rejected=%llu filter=exponential\n",
+            static_cast<unsigned long long>(count),
+            static_cast<unsigned long long>(CyberpunkVR_PresentHandPublishSkipped.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(CyberpunkVR_FrameHandReferenceRejected.load(std::memory_order_relaxed)));
+        }
+    }
 }
 
 // [OnPresent() moved to openxr_present.cpp]
 
 
 void OpenXRManager::Shutdown() {
+    RemoveSimulatorRecenterHook();
     std::lock_guard<std::mutex> initLock(m_initMutex);
     m_stopFrameThread.store(true, std::memory_order_relaxed);
+    m_depthStageCaptureAllowed.store(false, std::memory_order_release);
     // ASK THE RUNTIME TO END THE SESSION FIRST (dabinn, TofuExpress fbe336fa). A frame loop parked
     // inside xrWaitFrame is not woken by our own event; xrRequestExitSession is what makes the
     // runtime return from it, so without this the thread was still inside the runtime when the
@@ -1963,6 +2169,18 @@ void OpenXRManager::Shutdown() {
     // the action set outlives neither. What stood here destroyed the spaces and the SESSION first and
     // the swapchains afterwards -- i.e. it handed the runtime handles whose parent was already gone.
     // (dabinn, TofuExpress fbe336fa)
+    m_framegen.Reset();
+    m_framegenOverlay.Shutdown(true);
+    m_settingsPanel.Shutdown();
+    cvr::framegen::StopHardwareTelemetry();
+    m_hudQuad.Shutdown();
+    m_interactionQuad.Shutdown();
+    m_basiliskQuad.Shutdown();
+    m_surveillanceQuad.Shutdown();
+    cvr::hud::Shutdown();
+    cvr::hud::Shutdown(cvr::hud::Channel::Interaction);
+    cvr::hud::Shutdown(cvr::hud::Channel::Basilisk);
+    cvr::hud::Shutdown(cvr::hud::Channel::Surveillance);
     EndSession();
 
     for (auto& eye : m_eyeSwapchains) {
@@ -2015,6 +2233,7 @@ void OpenXRManager::Shutdown() {
     m_primaryButtonAction = XR_NULL_HANDLE;
     m_secondaryButtonAction = XR_NULL_HANDLE;
     m_menuButtonAction = XR_NULL_HANDLE;
+    m_steamFrameActions = {};
 
     m_views.clear();
     m_viewConfigViews.clear();
@@ -2083,6 +2302,13 @@ void OpenXRManager::Shutdown() {
     if (m_depthSnapshot) {
         m_depthSnapshot->Release();
         m_depthSnapshot = nullptr;
+    }
+    {
+        std::lock_guard stageLock(m_depthStageMutex);
+        if (m_depthStage) { m_depthStage->Release(); m_depthStage = nullptr; }
+        m_depthStageW = m_depthStageH = m_depthStageFmt = 0;
+        m_depthStageSerial = 0;
+        m_depthStageFrame.store(~0ull, std::memory_order_release);
     }
     // The whole pool, not one texture -- see the field's note for why it became a pool.
     for (int i = 0; i < kVrcamEyeSlots; ++i) {

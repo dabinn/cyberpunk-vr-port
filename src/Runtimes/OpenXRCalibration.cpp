@@ -5,6 +5,8 @@
 #include "Runtimes/OpenXRInternal.hpp"
 #include "Utils/XrMath.hpp"
 #include "Utils/SharedSlots.hpp"
+#include "Camera/NeckCameraMount.hpp"
+#include "Overlay/LiveControlsUi.hpp"
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -36,6 +38,17 @@ void OpenXRManager::RotateBaseYaw(float radians) {
 
 void OpenXRManager::RequestRecenter() {
     m_recenterRequested.store(true, std::memory_order_relaxed);
+}
+
+void OpenXRManager::BeginExternalPoseReset() {
+    std::lock_guard lock(m_externalResetMutex);
+    m_externalPoseReset.Begin();
+}
+
+void OpenXRManager::EndExternalPoseReset() {
+    std::lock_guard lock(m_externalResetMutex);
+    m_externalPoseReset.End();
+    Log("OpenXRManager: runtime Reset View completed; rebase before publishing another pose.\n");
 }
 
 // ==== AUTO-CALIBRATION ====
@@ -252,26 +265,22 @@ static void GetCalibFilePath(char* out, size_t outSize) {
     _snprintf_s(out, outSize, _TRUNCATE, "%s\\vrik_calibration.ini", dir);
 }
 
+void OpenXRManager::GetCameraOffset(float* out) const {
+    cvr::camera::AnchorVector mount{};
+    cvr::camera::ReadNeckCameraMount(&mount);
+    out[0]=mount.x+m_camBakeOffset[0].load(std::memory_order_relaxed);
+    out[1]=mount.y+m_camBakeOffset[1].load(std::memory_order_relaxed);
+    out[2]=mount.z+m_camBakeOffset[2].load(std::memory_order_relaxed);
+}
+
 void OpenXRManager::BakeCameraOffset() {
-    // The plugin publishes the (head bone - camera) offset into shared [85..87] (game-local
-    // right/forward/up) with [88]=valid. Capture it as the baked camera offset so LocateCamera
-    // shifts the FPP view back onto the avatar's head. SET semantics (not accumulate): the FPP
-    // camera component the plugin samples does NOT include this LocateCamera offset, so the
-    // published value stays the true mount and re-baking is idempotent.
-    float* sh = m_sharedHandsPtr;
-    if (!sh) return;
-    if (sh[88] == 0.0f) {
-        Log("BakeCameraOffset: no published offset yet (start VR tracking + calibrate first).\n");
-        return;
-    }
-    float x = sh[85], y = sh[86], z = sh[87];
-    // Clamp to a sane range so a bad frame can't fling the camera.
-    auto clamp = [](float v) { return v < -0.8f ? -0.8f : (v > 0.8f ? 0.8f : v); };
-    m_camBakeOffset[0].store(clamp(x), std::memory_order_relaxed);
-    m_camBakeOffset[1].store(clamp(y), std::memory_order_relaxed);
-    m_camBakeOffset[2].store(clamp(z), std::memory_order_relaxed);
-    Log("BakeCameraOffset: baked (%.3f, %.3f, %.3f) right/fwd/up.\n", clamp(x), clamp(y), clamp(z));
+    // Reset to the rig's neutral neck mount, never sample an animated stance.
+    ClearCameraOffset();
+    LiveControlsUiState controls{};GetLiveControlsUiState(&controls);
+    controls.xrHeadOffsetX=controls.xrHeadOffsetY=controls.xrHeadOffsetZ=0;
+    SetLiveControlsUiState(&controls,1);
     SaveCalibrationToFile();
+    Log("Camera mount reset: neutral neck + 15cm forward, reference eyes + 10cm up.\n");
 }
 
 bool OpenXRManager::SaveCalibrationToFile() {
@@ -312,6 +321,7 @@ bool OpenXRManager::SaveCalibrationToFile() {
             m_calibExt[3].load(std::memory_order_relaxed),
             m_calibExt[4].load(std::memory_order_relaxed),
             m_calibExt[5].load(std::memory_order_relaxed));
+    fprintf(f, "cameraMountVersion=1\n");
     fprintf(f, "camBakeX=%.4f\ncamBakeY=%.4f\ncamBakeZ=%.4f\n",
             m_camBakeOffset[0].load(std::memory_order_relaxed),
             m_camBakeOffset[1].load(std::memory_order_relaxed),
@@ -362,12 +372,13 @@ bool OpenXRManager::LoadCalibrationFromFile() {
         m_camBakeOffset[1].load(std::memory_order_relaxed),
         m_camBakeOffset[2].load(std::memory_order_relaxed),
     };
-    int version = 0;
+    int version = 0, cameraMountVersion = 0;
     char line[128];
     while (fgets(line, sizeof(line), f)) {
         char key[32]; float val;
         if (sscanf_s(line, "%31[^=]=%f", key, (unsigned)_countof(key), &val) != 2) continue;
         if (strcmp(key, "version") == 0) version = static_cast<int>(val);
+        if (strcmp(key, "cameraMountVersion") == 0) cameraMountVersion=static_cast<int>(val);
         #define M(name, idx) if (strcmp(key, name) == 0) v[idx] = val;
         #define E(name, idx) if (strcmp(key, name) == 0) e[idx] = val;
         #define C(name, idx) if (strcmp(key, name) == 0) cb[idx] = val;
@@ -388,6 +399,8 @@ bool OpenXRManager::LoadCalibrationFromFile() {
         #undef C
     }
     fclose(f);
+    // Old values are feet-based absolute bakes, not trims of the neck mount.
+    if(cameraMountVersion<1)cb[0]=cb[1]=cb[2]=0;
     if (version < 2) {
         v[2] = 0.0f;
         v[3] = 0.0f;

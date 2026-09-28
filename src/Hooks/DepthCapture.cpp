@@ -1,3 +1,6 @@
+#include "Utils/DebugGate.hpp"
+#include "Render/RenderProbeScope.hpp"
+#include "Render/StereoSceneState.hpp"
 // DepthCapture -- finding the game's depth buffer, and the queue synchronisation that makes it usable.
 //
 // The depth buffer is not handed to anyone: it is bound. So the way to find it is to watch what the
@@ -77,6 +80,7 @@ bool PatchVtableMethod(void** vtable, size_t slot, void* hook) {
 }
 
 static void RecordEclQueue(void* queue) {
+    if(!cvr::RuntimeDiagnosticsEnabled())return;
     for (uint32_t i = 0; i < 16; ++i) {
         void* seen = g_eclSeenQueues[i].load(std::memory_order_relaxed);
         if (seen == queue) return;
@@ -147,6 +151,8 @@ void STDMETHODCALLTYPE HookedCreateDepthStencilView(ID3D12Device* device, ID3D12
     if (originalFn) {
         originalFn(device, resource, desc, dest);
     }
+    if(cvr::stereo::probe::internalCommands)return;
+    cvr::stereo::scene_state::DsvCreated(resource,desc,dest);
     if (resource && dest.ptr) {
         D3D12_RESOURCE_DESC rd = resource->GetDesc();
         DepthDsvInfo info{};
@@ -168,7 +174,8 @@ void STDMETHODCALLTYPE HookedOMSetRenderTargets(ID3D12GraphicsCommandList* list,
     if (originalFn) {
         originalFn(list, numRTVs, rtvs, singleHandle, dsv);
     }
-    g_omSetRtCalls.fetch_add(1, std::memory_order_relaxed);
+    CVR_DIAGNOSTIC(g_omSetRtCalls.fetch_add(1, std::memory_order_relaxed));
+    if(cvr::stereo::probe::internalCommands)return;
     if (dsv && dsv->ptr) {
         DepthDsvInfo info{};
         bool found = false;
@@ -287,7 +294,7 @@ void STDMETHODCALLTYPE HookedOMSetRenderTargets(ID3D12GraphicsCommandList* list,
                     g_sceneDepthW.store(info.width, std::memory_order_relaxed);
                     g_sceneDepthH.store(info.height, std::memory_order_relaxed);
                     g_sceneDepthFmt.store(info.format, std::memory_order_relaxed);
-                    if (old && old != info.resource) {
+                    if (old) {
                         old->Release();
                     }
                 }
@@ -359,17 +366,20 @@ void InstallDepthCaptureHooks(ID3D12Device* device) {
     }
 }
 
+// Historical cross-queue tracker has no production consumer: depth now copies
+// inline/on its writer queue. Keep it available only for an explicit diagnostic A/B.
+extern "C" __declspec(dllexport) std::atomic<uint32_t> CyberpunkVR_LegacyQueueSignalTracking{0};
 void TryHookQueueSignalVtable(ID3D12CommandQueue* queue); // defined below
+void ClearLegacyQueueSignals();
 
 void STDMETHODCALLTYPE HookedExecuteCommandLists(ID3D12CommandQueue* queue, UINT numLists, ID3D12CommandList* const* lists) {
-    g_eclTotalCalls.fetch_add(1, std::memory_order_relaxed);
-    g_eclTotalLists.fetch_add(numLists, std::memory_order_relaxed);
+    CVR_DIAGNOSTIC(g_eclTotalCalls.fetch_add(1, std::memory_order_relaxed));
+    CVR_DIAGNOSTIC(g_eclTotalLists.fetch_add(numLists, std::memory_order_relaxed));
     RecordEclQueue(queue);
-    // Hook Signal on each distinct queue vtable so we can later GPU-Wait on the
-    // game's most recent fence values (cross-queue sync for depth capture).
-    // ExecuteCommandLists is the perfect discovery point: every queue the game
-    // uses will eventually run something through here.
-    TryHookQueueSignalVtable(queue);
+    if (CyberpunkVR_LegacyQueueSignalTracking.load(std::memory_order_relaxed))
+        TryHookQueueSignalVtable(queue);
+    else
+        ClearLegacyQueueSignals();
     if (lists) {
         ID3D12CommandList* depthBinder = g_sceneDepthBinderList.load(std::memory_order_relaxed);
         for (UINT i = 0; i < numLists; ++i) {
@@ -391,8 +401,8 @@ void STDMETHODCALLTYPE HookedExecuteCommandLists(ID3D12CommandQueue* queue, UINT
             g_distinctCmdVtables.load(std::memory_order_relaxed));
     }
     if (queue == g_presentQueue.load(std::memory_order_relaxed)) {
-        g_eclPresentCalls.fetch_add(1, std::memory_order_relaxed);
-        g_eclPresentLists.fetch_add(numLists, std::memory_order_relaxed);
+        CVR_DIAGNOSTIC(g_eclPresentCalls.fetch_add(1, std::memory_order_relaxed));
+        CVR_DIAGNOSTIC(g_eclPresentLists.fetch_add(numLists, std::memory_order_relaxed));
     }
     void** vtable = *reinterpret_cast<void***>(queue);
     ExecuteCommandListsFn originalFn = GetOriginalMethod<ExecuteCommandListsFn>(vtable, 10);
@@ -410,14 +420,9 @@ void InstallCommandQueueDiagHook(ID3D12CommandQueue* queue) {
     PatchVtableMethod(vtable, 10, reinterpret_cast<void*>(&HookedExecuteCommandLists));
 }
 
-// Cross-queue fence tracker: the game writes scene depth on its own render
-// queue while we want to copy that resource on the swapchain (present) queue.
-// On VDXR + R32_TYPELESS the format guard passes our path through, and without
-// explicit cross-queue sync our copy can race the game's writer → GPU hang.
-// Hook ID3D12CommandQueue::Signal (vtable slot 14) on every distinct queue
-// vtable we see and record (queue → last (fence, value)). Before our depth
-// copy, our queue Waits on each tracked queue's last value — GPU-side, no
-// CPU stall. If the game has not yet signaled anything we just no-op.
+// Legacy diagnostic tracker. The current depth path does not call
+// WaitOnAllGameSignals, so normal rendering neither installs this hook nor
+// retains these fence references. The explicit A/B switch enables the old path.
 using SignalFn = HRESULT(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, ID3D12Fence*, UINT64);
 
 struct QueueSignalState {
@@ -438,6 +443,14 @@ extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugQueueWaitsSkipped = 0
 extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugQueueWaitsDropped = 0;
 std::mutex g_queueSignalMutex;
 std::unordered_map<ID3D12CommandQueue*, QueueSignalState> g_queueLastSignal;
+std::atomic<bool> g_haveLegacyQueueSignals{false};
+void ClearLegacyQueueSignals() {
+    if (!g_haveLegacyQueueSignals.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(g_queueSignalMutex);
+    for (auto& [_, entry] : g_queueLastSignal) if (entry.fence) entry.fence->Release();
+    g_queueLastSignal.clear();
+    g_haveLegacyQueueSignals.store(false, std::memory_order_release);
+}
 // Dedicated mutex for the hooked-vtable set. We CANNOT reuse g_vtableMutex
 // here because PatchVtableMethod itself locks g_vtableMutex, which would
 // cause a recursive lock on a non-recursive std::mutex (= undefined
@@ -450,6 +463,12 @@ HRESULT STDMETHODCALLTYPE HookedQueueSignal(ID3D12CommandQueue* queue, ID3D12Fen
     void** vtable = *reinterpret_cast<void***>(queue);
     SignalFn originalFn = GetOriginalMethod<SignalFn>(vtable, 14);
     const HRESULT hr = originalFn ? originalFn(queue, fence, value) : E_FAIL;
+    // A/B may have installed this hook earlier in the session. With tracking
+    // off it only forwards the signal and retires any diagnostic references.
+    if (!CyberpunkVR_LegacyQueueSignalTracking.load(std::memory_order_relaxed)) {
+        ClearLegacyQueueSignals();
+        return hr;
+    }
     if (SUCCEEDED(hr) && fence) {
         std::lock_guard<std::mutex> lock(g_queueSignalMutex);
         auto& entry = g_queueLastSignal[queue];
@@ -463,6 +482,7 @@ HRESULT STDMETHODCALLTYPE HookedQueueSignal(ID3D12CommandQueue* queue, ID3D12Fen
         }
         entry.value = value;
         entry.tickMs = GetTickCount64();
+        g_haveLegacyQueueSignals.store(true, std::memory_order_release);
     }
     return hr;
 }
@@ -485,7 +505,7 @@ void TryHookQueueSignalVtable(ID3D12CommandQueue* queue) {
 // race game-side depth writes. Tries to wait on every tracked queue's most
 // recent signal; harmless if none tracked yet.
 extern "C" void CyberpunkVRPort_WaitOnAllGameSignals(ID3D12CommandQueue* consumerQueue) {
-    if (!consumerQueue) return;
+    if (!consumerQueue || !CyberpunkVR_LegacyQueueSignalTracking.load(std::memory_order_relaxed)) return;
     // ONLY QUEUES THAT ARE STILL RUNNING. This used to wait on the last signal of every queue the
     // game had ever signalled, and that table was never pruned -- so a queue the engine stops feeding
     // (which is exactly what happens when the pause menu opens) left a Wait on our consumer queue that
@@ -506,7 +526,7 @@ extern "C" void CyberpunkVRPort_WaitOnAllGameSignals(ID3D12CommandQueue* consume
             const uint64_t age = (now >= it->second.tickMs) ? now - it->second.tickMs : 0;
             if (it->second.fence && age > kSignalDeadMs) {
                 it->second.fence->Release();
-                ++CyberpunkVR_DebugQueueWaitsDropped;
+                CVR_DIAGNOSTIC(++CyberpunkVR_DebugQueueWaitsDropped);
                 it = g_queueLastSignal.erase(it);
                 continue;
             }
@@ -515,7 +535,7 @@ extern "C" void CyberpunkVRPort_WaitOnAllGameSignals(ID3D12CommandQueue* consume
                     it->second.fence->AddRef();
                     snapshot.push_back(it->second);
                 } else {
-                    ++CyberpunkVR_DebugQueueWaitsSkipped;
+                    CVR_DIAGNOSTIC(++CyberpunkVR_DebugQueueWaitsSkipped);
                 }
             }
             ++it;
@@ -525,9 +545,9 @@ extern "C" void CyberpunkVRPort_WaitOnAllGameSignals(ID3D12CommandQueue* consume
         // Already complete on the GPU: the copy cannot race it, so do not put a wait in the way.
         if (s.fence->GetCompletedValue() < s.value) {
             consumerQueue->Wait(s.fence, s.value);
-            ++CyberpunkVR_DebugQueueWaitsIssued;
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugQueueWaitsIssued);
         } else {
-            ++CyberpunkVR_DebugQueueWaitsSkipped;
+            CVR_DIAGNOSTIC(++CyberpunkVR_DebugQueueWaitsSkipped);
         }
         s.fence->Release();
     }

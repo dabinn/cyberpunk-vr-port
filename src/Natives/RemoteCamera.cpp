@@ -133,6 +133,24 @@ void VRTakeoverEntity(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFra
         }
     }
     const uint64_t prev = g_takeoverEntityId.exchange(id, std::memory_order_relaxed);
+    // A DIFFERENT OBJECT MEANS THE LATCH MUST GO, and this is the only place that can know.
+    //
+    // The claim is deliberately sticky: the first camera that qualifies keeps it for the whole
+    // takeover, because re-validating it by distance made the lens change identity 154643 times on
+    // the AV turret. It is released when the takeover ENDS -- VRRemoteCamera(0). But hopping
+    // between surveillance cameras never ends the takeover: the script hands over a new entity id
+    // and nothing else changes, so the plugin went on driving the PREVIOUS camera's lens and the
+    // head stopped moving the view. Reported as "на переключениях камеры перестаёт работать".
+    //
+    // So an id change is itself the end of one takeover and the start of the next. The aim,
+    // position and base flags go with the lens: they describe the camera being dropped, and the
+    // new one must latch its own.
+    if (prev != id) {
+        TakeoverLensRelease();
+        g_devCamBaseValid.store(0, std::memory_order_relaxed);
+        g_devCamPosValid.store(0, std::memory_order_relaxed);
+        g_devCamAimValid.store(0, std::memory_order_relaxed);
+    }
     if (prev != id)
         if (g_verboseLog) Log("VRTakeoverEntity: entity id %llu (was %llu)\n",
             static_cast<unsigned long long>(id), static_cast<unsigned long long>(prev));
