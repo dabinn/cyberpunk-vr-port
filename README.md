@@ -2,8 +2,11 @@
 
 # CyberpunkVR Port - Tofu Express X
 
+<p align="center"><img width="100%" alt="Stereo highlight comparison" src="https://github.com/user-attachments/assets/ab199266-da95-4b2b-8e71-6a3b2b6f4e98" /></p>
+<p align="center"><em>TE6 focuses on stereo consistency: highlights and shadows now match much more closely between both eyes.</em></p>
+
 <p align="center"><img height="300" alt="Third-person vehicle VR view" src="https://github.com/user-attachments/assets/b7c7d759-2b73-4997-a48a-2d05e5a35aa5" /></p>
-<p align="center"><em>TE5 now supports third-person vehicle views!</em></p>
+<p align="center"><em>TE5 added proper stereo and full 6DoF head movement to third-person vehicle views.</em></p>
 
 **Tofu Express X** is an alternative fork of CyberpunkVR Port that preserves the original features while providing additional options and settings, giving players more freedom to experience Cyberpunk 2077 in VR in the way they prefer.
 
@@ -11,9 +14,7 @@ The project initially focused on helping fix issues in the early versions and br
 
 The original CyberpunkVR Port by [dariulone](https://github.com/dariulone) has an excellent technical foundation. Its core design provides plenty of room for continued development, experimentation, and new ideas.
 
-
 **Version naming:** Tofu Express X uses an **upstream version + X revision** format. The X number increases with each Tofu Express release, so you can simply compare the X number to tell which version is newer.
-
 
 ## Cyberpunk VR Port Auto Installer
 
@@ -29,6 +30,16 @@ If you prefer to manage all your mods with Vortex, the Tofu Express archive layo
 
 > **Note:** Vortex installation is supported starting with Tofu Express 3 (TE3).
 
+## Stereo Rendering and Display Improvements
+
+Tofu Express continues to use the real second-eye VRCAM architecture from upstream, while adding fixes for cases where the two independently rendered views could still disagree.
+
+- **Matching lighting, highlights, and shadows between both eyes.** VRCAM now keeps the correct compiled frame-graph state instead of accidentally reusing MAIN's cached graph, fixing the large bright/specular differences that could appear in one eye. Temporal shadow history is also paired correctly so night shadows and window occlusion no longer disappear from the left eye.
+- **Correct OpenXR color transfer.** The OpenXR path now preserves the game's display-ready sRGB output when the runtime supports a bit-compatible sRGB swapchain, with an explicit conversion path for UNORM-only runtimes. This avoids the washed-out or over-bright image that could appear with the wrong swapchain interpretation.
+- **Second-eye HUD works at lower render resolutions.** The finished-frame checks now use the selected VRCAM resolution instead of assuming a 2048-pixel minimum, so valid resolutions such as 1920x1920 no longer lose the HUD in one eye.
+- **CET is stereo.** The CET overlay can render in both headset eyes and includes a stereo-visible virtual mouse cursor, including cropped desktop regions that the physical cursor could not previously reach.
+- **Improved desktop mirror and multi-monitor cursor mapping.** The desktop view is center-cropped to the active monitor aspect without stretching the VR image, avoids unnecessary upscaling, and correctly handles monitor changes plus non-zero or negative desktop coordinates.
+
 ## Support for Every Control Style
 
 The mod is not limited to VR controllers. If you prefer a gamepad or even keyboard and mouse, you can choose whichever control scheme suits you best.
@@ -38,7 +49,7 @@ The mod is not limited to VR controllers. If you prefer a gamepad or even keyboa
 **Classic Controller Mapping** is an optional mode for players who prefer traditional Xbox/gamepad-style controls instead of some of the physical and gesture mappings introduced in v0.1.2 and later.
 
 - **On foot:** restores native **B = Dodge** and **R3 = Crouch**, so those buttons no longer control physical reload. Full-stick **LS Sprint** and **RS-Y Dash / Crouch** can also be disabled separately.
-- **In vehicles:** a single **Classic Vehicle Controls** switch bypasses physical wheel grab, controller-tilt steering, hub interaction, and weapon-out trigger/throttle routing as a group. **Swap Triggers / Grips** remains available as a separate driving option.
+- **In vehicles:** a single **Classic Vehicle Controls** switch bypasses physical wheel grab, controller-tilt steering, hub interaction, and weapon-out trigger/throttle routing as a group. **Swap Triggers / Grips** remains available as a separate driving option, with the analog Grip travel preserved correctly for throttle and braking. Holster gestures are disabled while Classic Vehicle Controls are active.
 - **Scanner:** keeps the left-ear Scanner gesture, then uses the game's normal controller bindings while the Scanner is open instead of the VR Port's custom Scanner remapping.
 
 ## VR Controller Improvements
@@ -52,25 +63,35 @@ The mod is not limited to VR controllers. If you prefer a gamepad or even keyboa
 [Watch the vehicle combat demonstration on YouTube](https://www.youtube.com/watch?v=n6bx6JbvSgs)
 
 - **A toggle for full-stick sprint and crouch.** The original mod always sprints when the left stick is pushed fully forward and crouches when the right stick is pushed fully down. These behaviors can now be enabled or disabled from the F10 menu.
-- **Analog locomotion and stick tuning.** Movement can preserve analog left-stick magnitude, with configurable left/right stick deadzones and a maximum input threshold.
+- **Analog locomotion and stick tuning.** Movement can preserve analog left-stick magnitude, with configurable left/right stick deadzones and a maximum input threshold. Full-stick Sprint, Dash, and Crouch continue to use the raw stick travel rather than the remapped output.
 
 <img height="120" alt="Analog locomotion and stick tuning" src="https://github.com/user-attachments/assets/94b40e11-14f8-4895-96e4-2a9dc541e559" />
 
-## View Control and More Reliable Weapon Aiming
+### Tofu Express Special Blend
 
-- **Third-person vehicle view in VR.** Vehicle third-person view now supports stereo rendering and full 6DoF head movement. This new view remains opt-in for now while it receives more testing.
+Fresh installs use a set of Tofu-tuned defaults for features that have become stable enough to recommend:
+
+- **R3** as the default controller chord activator.
+- **Analog locomotion** enabled.
+- **Surface Raycast Laser Dot** with distance scaling.
+- **Physical Body Rotation** enabled.
+
+Newer or still-experimental features are kept conservative: non-first-person VR views remain opt-in, and the VRIK shoulder constraint remains explicitly marked **testing**.
+
+## View Control, VRIK, and More Reliable Weapon Aiming
+
+- **Third-person vehicle view in VR.** Non-first-person camera support can follow the game's active camera in stereo while adding full 6DoF HMD rotation and room-scale translation. Third-person vehicle view is the main use case today and remains opt-in while the generic path receives more testing.
 
 <img height="300" alt="Third-person vehicle VR view" src="https://github.com/user-attachments/assets/b7c7d759-2b73-4997-a48a-2d05e5a35aa5" />
 
 - **Fixed vertical view control.** Turning off **Disable Mouse Y** now correctly restores vertical view control through the mouse or right stick, giving advanced players more control.
 - **Decoupled VR Head Aim** is designed for players who prefer a gamepad. Unlike traditional head aiming—sometimes jokingly called "gun-face"—head and body rotation are independent. You can freely aim the weapon with your head without changing the body's facing direction.
-
-- **Bullets now originate from the live muzzle.** Head Aim no longer uses the original "shooting with your eyes" calculation. Both Head Aim and Hand Aim now use the weapon's current muzzle position and direction, so the laser dot, weapon sight, and actual point of impact share the same firing reference.
+- **Head Aim now uses a stable recenter origin.** HMD orientation stays live while room-scale translation no longer drags the gameplay aiming pivot around, keeping Hip and ADS poses on the same reference frame.
+- **Bullets and projectiles originate from the live weapon.** Head Aim and Hand Aim use the weapon's current muzzle/sight geometry instead of the old "shooting with your eyes" calculation, so the external dot, sight, and actual shot share the same physical reference. Redirected hitscan also keeps impact consumers on the same geometry instead of producing duplicate impacts.
 - **Hip-fire and ADS aim stay aligned.** Raising the weapon into ADS no longer shifts it away from the original aiming point. Even with VRIK disabled, the mod tries to preserve the aiming direction from before entering ADS.
-- **The external muzzle dot is more stable during fast head turns.** Long trails and multiple separated dots are greatly reduced.
-- **Weapon sights stay aligned with the external dot.** Reflex reticles, sniper-scope crosshairs, the external muzzle dot, and the magnified ADS view no longer drift apart as the head turns.
-- **ADS uses the right eye as the aiming eye.** When using Head Aim instead of Hand Aim, ADS automatically moves the weapon sight to the right eye rather than leaving it between both eyes. This is especially noticeable at high magnification.
-- **Physical Body Rotation has been rewritten.** The character's body now follows physical head rotation through the game's own heading, without directly dragging or snapping the player's view. The free-look cone is adjustable from F10 and defaults to `25°`. Recenter behavior has also been reworked so Physical Body Rotation no longer disrupts body/view alignment: with PBR off, the game's native recenter behavior is preserved; with PBR on, the mod aligns its body and base rotation correctly.
+- **Optional right-eye ADS alignment.** Head Aim can move the vanilla ADS pose toward the right eye instead of leaving the sight between both eyes. This is especially useful at high magnification and can be enabled from F10.
+- **Physical Body Rotation has been rewritten.** The character's body follows physical head rotation through the game's own heading without directly dragging or snapping the player's view. The free-look cone is adjustable from F10 and defaults to 25°. Recenter handling keeps the body, view, hands, and aiming references on the same VR base, and vehicle handling no longer rotates the hands with the car.
+- **Experimental VRIK shoulder constraints.** TE5 introduced testing constraints for weapon and other pose owners to reduce twisted or overextended shoulders while the broader VRIK rewrite is still unfinished. The option remains marked **testing** and can be disabled from F10 if it causes problems.
 
 ### Improved, More Realistic Laser Dot
 
@@ -80,25 +101,27 @@ The external laser dot has been visually rebuilt with a bright central core, sof
 
 ![TE4 redesigned Laser Dot](images/te4-pretty-laser-dot.png)
 
-The **Spot Radius** can be customized from the F10 menu. View- and angular-size-aware rendering also keeps its apparent size more consistent across different VR rendering and headset resolutions.
+The **Spot Radius** can be customized from the F10 menu. View- and angular-size-aware rendering keeps its apparent size more consistent across different VR rendering and headset resolutions, and per-eye projection avoids the lateral offset caused by applying IPD twice.
 
 Choose from three Laser Dot modes:
 
 - **Steady projection:** a simple, stable stereo projection.
 - **Real world point:** places the dot at a real point in 3D space ahead of the weapon.
-- **Surface raycast:** casts a pointing ray from the weapon muzzle and places the dot on the actual surface it hits, behaving more like a real weapon-mounted laser. If the ray misses, it falls back to **Steady projection**, so the dot does not disappear or jump unpredictably. An optional **Scale with distance** setting can vary its apparent size with the actual hit distance.
+- **Surface raycast:** casts a pointing ray from the weapon muzzle and places the dot on the actual surface it hits, behaving more like a real weapon-mounted laser. Per-eye visibility testing handles occlusion independently for each eye. If the ray misses, it falls back to **Steady projection**, so the dot does not disappear or jump unpredictably. An optional **Scale with distance** setting can vary its apparent size with the actual hit distance.
+
+The Laser Dot is shown only during ranged-weapon gameplay. It is hidden when no ranged weapon is active and during menus, loading transitions, popups, maps, and device screens.
 
 [Watch Surface Raycast tracking real surfaces](https://www.youtube.com/watch?v=lIXc0hclnn0)
 
 ## Controller Setup
 
-Press **F10**, open **Controls**, and adjust the options to your preference.
+Press **F10**, open **Controls**, and adjust the options to your preference. Live F10 controls are grouped by function and save automatically as you change them; there is no separate Save step.
 
 ![New controller settings in the F10 menu](images/v0.1.1-controller-enhancements.png)
 
 ### Emulate D-pad and Additional Controls
 
-Choose a **Chord Activation Method**. The original L3 method is selected by default:
+Choose a **Chord Activation Method**. Tofu Express fresh installs use R3 by default:
 
 | Activation method | D-pad | Back / Select | VR Recenter | F10 Menu |
 |---|---|---|---|---|
