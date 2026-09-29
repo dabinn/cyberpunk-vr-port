@@ -315,6 +315,15 @@ extern "C" int GetInputActionsEnabled() {
     return g_liveControls.xrInputActions != 0 ? 1 : 0;
 }
 
+extern "C" int GetChordActivationMethod() {
+    const int value = g_liveControls.xrChordActivation;
+    return (value >= 0 && value <= 2) ? value : 1;
+}
+
+extern "C" int GetExtraChordActionsEnabled() {
+    return g_liveControls.xrExtraChordActions != 0 ? 1 : 0;
+}
+
 extern "C" int GetMonoXQueueWait() {
     return g_liveControls.xrMonoXQueueWait != 0 ? 1 : 0;
 }

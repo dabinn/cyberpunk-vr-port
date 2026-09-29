@@ -1,6 +1,8 @@
 #pragma once
 #include <imgui.h>
 
+struct LiveControlsUiState;
+
 namespace overlay::widgets {
 bool SliderFloat(const char* label,float* value,float minimum,float maximum,
                  const char* format="%.3f",ImGuiSliderFlags flags=0);
@@ -10,5 +12,5 @@ bool Combo(const char* label,int* selected,const char* const* items,int count,in
 bool Combo(const char* label,int* selected,const char* zeroSeparatedItems,int height=-1);
 void Section(const char* label);
 void Tabs(const char* id,int& selected,const char* const* labels,int count);
-void DrawBindings();
+void DrawBindings(const LiveControlsUiState& state);
 }

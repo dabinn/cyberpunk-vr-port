@@ -108,7 +108,7 @@ bool DrawVrShell(LiveControlsUiState& state){
     }else changed=DrawLiveControls(state,selected);
     ImGui::PopItemWidth();ImGui::EndChild();ImGui::EndChild();ImGui::Separator();
     ImGui::TextColored(Cyan,"TRIGGER  Select     STICK  Scroll     GRIP  Drag     GRIP + STICK  Distance");
-    ImGui::TextDisabled("L3 + R3  Hold 1 sec     F10 / INSERT  Toggle     ESC  Close");
+    ImGui::TextDisabled("Controller shortcut: CONTROLS > BINDINGS     F10 / INSERT  Toggle     ESC  Close");
     ImGui::End();
     auto* draw=ImGui::GetForegroundDrawList();
     draw->AddRectFilled({0,0},{4,4},IM_COL32(76,224,240,255));

@@ -10,7 +10,6 @@ namespace {
 std::mutex mutex;
 Settings settings;
 Placement placement;
-HoldChord chord;
 cvr::hud::DisplayClock clock;
 std::atomic<bool> visible{false},capture{false};
 int command=0;bool wanted=false,buttonDown=false,triggerArmed=false,releasePending=false,gripHeld[2]{};
@@ -46,16 +45,14 @@ std::vector<PointerEvent> ConsumePointerEvents(){std::lock_guard lock(mutex);std
 View GetView(){std::lock_guard lock(mutex);return view;}
 void UpdateTracking(const Tracking& t){
     std::lock_guard lock(mutex);clock.Step(t.time);
-    const bool both=t.valid && t.hands[0].valid && t.hands[1].valid && t.hands[0].stickClick && t.hands[1].stickClick;
-    if(chord.Update(both,clock.elapsed))ToggleLocked();
     const auto now=GetTickCount64();
     // The idle Lua bridge only polls commands, so its last acknowledgement may
     // be arbitrarily old while closed. Give each new request its opening window;
     // require a live heartbeat only after that request has made the panel visible.
     if(wanted && ((visible && bridgeStamp && now-bridgeStamp>1500) || (!visible && now-requestStamp>3000))){wanted=false;visible=false;ReleasePointer();}
-    if(releasePending && !both && t.hands[0].trigger<.3f && t.hands[1].trigger<.3f && t.hands[0].grip<.5f && t.hands[1].grip<.5f)releasePending=false;
-    capture=visible || wanted || both || releasePending;
-    view.hold=float(chord.held);
+    if(releasePending && t.hands[0].trigger<.3f && t.hands[1].trigger<.3f && t.hands[0].grip<.5f && t.hands[1].grip<.5f)releasePending=false;
+    capture=visible || wanted || releasePending;
+    view.hold=0;
     if(!visible){view.valid=false;return;}
     const bool wasDragging=placement.dragging>=0;
     placement.Update(t,settings,clock.elapsed);

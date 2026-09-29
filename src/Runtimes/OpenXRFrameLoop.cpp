@@ -1437,10 +1437,43 @@ DWORD OpenXRManager::FrameThreadMain() {
                 cvr::vrui::Tracking uiTracking{};
                 uiTracking.time=frameState.predictedDisplayTime;uiTracking.origin=GetTrackingOriginSerial();
                 uiTracking.head=location.pose;uiTracking.valid=headPoseLocated;
-                // D-PAD chord state (left hand is processed first, right second):
-                // HOLD the LEFT stick click, pick the direction with the RIGHT stick.
-                bool leftStickClicked  = false;
-                bool dpadUsedThisFrame = false;
+                float stickX[2]{};
+                float stickY[2]{};
+                bool stickClicked[2]{};
+                bool primaryPressed[2]{};
+                bool secondaryPressed[2]{};
+
+                constexpr uint16_t XB_DPAD_UP     = 0x0001;
+                constexpr uint16_t XB_DPAD_DOWN   = 0x0002;
+                constexpr uint16_t XB_DPAD_LEFT   = 0x0004;
+                constexpr uint16_t XB_DPAD_RIGHT  = 0x0008;
+                constexpr uint16_t XB_START       = 0x0010;
+                constexpr uint16_t XB_BACK        = 0x0020;
+                constexpr uint16_t XB_LEFT_THUMB  = 0x0040;
+                constexpr uint16_t XB_RIGHT_THUMB = 0x0080;
+                constexpr uint16_t XB_LEFT_SHOULDER  = 0x0100;
+                constexpr uint16_t XB_RIGHT_SHOULDER = 0x0200;
+                constexpr uint16_t XB_A           = 0x1000;
+                constexpr uint16_t XB_B           = 0x2000;
+                constexpr uint16_t XB_X           = 0x4000;
+                constexpr uint16_t XB_Y           = 0x8000;
+
+                bool rightThumbrestTouched=false;
+                bool rightThumbrestAvailable=m_rightThumbrestAvailable.load(std::memory_order_relaxed);
+                if(gameplayInputActive && !m_rightThumbrestProfileKnown.load(std::memory_order_relaxed)){
+                    RefreshRightThumbrestAvailability();
+                    rightThumbrestAvailable=m_rightThumbrestAvailable.load(std::memory_order_relaxed);
+                }
+                if(gameplayInputActive && m_rightThumbrestAction!=XR_NULL_HANDLE){
+                    XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+                    gi.action=m_rightThumbrestAction;gi.subactionPath=XR_NULL_PATH;
+                    XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
+                    if(XR_SUCCEEDED(xrGetActionStateBoolean(m_session,&gi,&st)) && st.isActive){
+                        rightThumbrestAvailable=true;
+                        m_rightThumbrestProfileKnown.store(true,std::memory_order_relaxed);
+                        rightThumbrestTouched=st.currentState!=XR_FALSE;
+                    }
+                }
 
                 std::lock_guard<std::mutex> handLock(m_handMutex);
                 // ONE INSTANT: the head position that goes with these controller poses, plus the
@@ -1671,61 +1704,26 @@ DWORD OpenXRManager::FrameThreadMain() {
                     const bool sec    = getBool(m_secondaryButtonAction);
                     const bool frameBumper=m_steamFrameActions.bumper!=XR_NULL_HANDLE && getBool(m_steamFrameActions.bumper);
 
-                    // XInput-compatible button bits so the hook can OR them into
-                    // XINPUT_GAMEPAD.wButtons directly (XINPUT_GAMEPAD_*).
-                    constexpr uint16_t XB_A              = 0x1000;
-                    constexpr uint16_t XB_B              = 0x2000;
-                    constexpr uint16_t XB_X              = 0x4000;
-                    constexpr uint16_t XB_Y              = 0x8000;
-                    constexpr uint16_t XB_LEFT_SHOULDER  = 0x0100;
-                    constexpr uint16_t XB_RIGHT_SHOULDER = 0x0200;
-                    constexpr uint16_t XB_LEFT_THUMB     = 0x0040;
-                    constexpr uint16_t XB_RIGHT_THUMB    = 0x0080;
-                    constexpr uint16_t XB_DPAD_UP        = 0x0001;
-                    constexpr uint16_t XB_DPAD_DOWN      = 0x0002;
-                    constexpr uint16_t XB_DPAD_LEFT     = 0x0004;
-                    constexpr uint16_t XB_DPAD_RIGHT     = 0x0008;
-                    (void)XB_LEFT_THUMB;
+                    stickX[i]=sx;
+                    stickY[i]=sy;
+                    stickClicked[i]=sclick;
+                    primaryPressed[i]=prim;
+                    secondaryPressed[i]=sec;
 
                     if (i == 0) {
                         ctrl.leftTrigger = trig;
                         ctrl.leftGrip    = grip;
                         ctrl.leftThumbX  = sx;
                         ctrl.leftThumbY  = sy;
-                        if (prim)   ctrl.buttons |= XB_X;
-                        if (sec)    ctrl.buttons |= XB_Y;
                         if(frameBumper)ctrl.buttons|=XB_LEFT_SHOULDER;
                         // Only Frame's separate bumper emits LB here. The grip
                         // remains available for magazine grabs and VR gestures.
-
-                        // LEFT stick click = D-Pad modifier (direction picked with the
-                        // RIGHT stick, see the right-hand branch). The vanilla L3
-                        // (sprint) is emitted DEFERRED, after the loop: only when the
-                        // click is released without a D-Pad direction having been used.
-                        leftStickClicked = sclick;
                     } else {
                         ctrl.rightTrigger = trig;
                         ctrl.rightGrip    = grip;
                         ctrl.rightThumbX  = sx;
                         ctrl.rightThumbY  = sy;
-                        if (sclick) ctrl.buttons |= XB_RIGHT_THUMB;
-                        if (prim)   ctrl.buttons |= XB_A;
-                        if (sec)    ctrl.buttons |= XB_B;
                         if(frameBumper)ctrl.buttons|=XB_RIGHT_SHOULDER;
-
-                        // D-PAD CHORD: while the LEFT stick click is held, the RIGHT
-                        // stick picks the D-Pad direction. The right axes are zeroed for
-                        // the whole hold so snap-turn/camera cannot fire during selection.
-                        if (leftStickClicked) {
-                            float threshold = CyberpunkVR_DpadChordStick;
-                            if (!(threshold > 0.05f) || threshold > 1.0f) threshold = 0.90f;
-                            if (sy > threshold)  { ctrl.buttons |= XB_DPAD_UP;    dpadUsedThisFrame = true; }
-                            if (sy < -threshold) { ctrl.buttons |= XB_DPAD_DOWN;  dpadUsedThisFrame = true; }
-                            if (sx < -threshold) { ctrl.buttons |= XB_DPAD_LEFT;  dpadUsedThisFrame = true; }
-                            if (sx > threshold)  { ctrl.buttons |= XB_DPAD_RIGHT; dpadUsedThisFrame = true; }
-                            ctrl.rightThumbX = 0.0f;
-                            ctrl.rightThumbY = 0.0f;
-                        }
 
 
                         // Right grip is RESERVED for the hand-to-holster equip system: a CET mod reads
@@ -1736,35 +1734,25 @@ DWORD OpenXRManager::FrameThreadMain() {
                     }
                 }
 
-                // The overlay reads RAW clicks first: L3+R3 takes priority over
-                // cyberware even when the left grip is held too.
                 cvr::vrui::UpdateTracking(uiTracking);
-                const bool cyberwareClaim=cvr::input::UpdateCyberwareChord(leftStickClicked,ctrl.leftGrip,
-                    uiTracking.hands[1].stickClick,gameplayInputActive);
-                if(cyberwareClaim) {
-                    ctrl.leftGrip=0.f;
-                    ctrl.buttons &= static_cast<uint16_t>(~0x000f); // no D-pad from the same chord
-                }
 
-                // DEFERRED L3 (sprint): the left stick click doubles as the D-Pad
-                // modifier. Emit the vanilla stick-click press only when the click is
-                // RELEASED without any D-Pad direction having been used during the hold
-                // (one-frame press; the game latches button edges per poll).
-                {
-                    static bool s_l3Held = false;
-                    static bool s_l3UsedForDpad = false;
-                    if(cyberwareClaim)s_l3UsedForDpad=true;
-                    if(uiTracking.hands[0].stickClick && uiTracking.hands[1].stickClick)s_l3UsedForDpad=true;
-                    if (leftStickClicked) {
-                        if (dpadUsedThisFrame) s_l3UsedForDpad = true;
-                        s_l3Held = true;
-                    } else {
-                        if (s_l3Held && !s_l3UsedForDpad)
-                            ctrl.buttons |= 0x0040;   // XINPUT_GAMEPAD_LEFT_THUMB
-                        s_l3Held = false;
-                        s_l3UsedForDpad = false;
-                    }
-                }
+                struct ChordRuntimeState {
+                    int effectiveMode=-1;
+                    bool modifierHeld=false;
+                    bool modifierPassthrough=false;
+                    bool modifierDeferred=false;
+                    bool chordConsumed=false;
+                    bool dpadArmed=false;
+                    bool menuDown=false;
+                    bool menuChorded=false;
+                    bool faceWasDown[4]{};
+                    bool faceChordLatched[4]{};
+                    bool leftGripDown=false;
+                    bool cyberwareGripLatched=false;
+                    uint16_t deferredTapButton=0;
+                    uint64_t deferredTapUntilMs=0;
+                };
+                static ChordRuntimeState s_chord{};
 
                 auto getGlobalBool=[&](XrAction action) -> bool {
                     if(action==XR_NULL_HANDLE)return false;
@@ -1773,17 +1761,153 @@ DWORD OpenXRManager::FrameThreadMain() {
                     XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
                     return XR_SUCCEEDED(xrGetActionStateBoolean(m_session,&gi,&st)) && st.isActive && st.currentState;
                 };
-                if(gameplayInputActive)ctrl.buttons|=m_steamFrameActions.GlobalButtons(getGlobalBool);
+
+                if(gameplayInputActive){
+                    const bool menuPressed=getGlobalBool(m_menuButtonAction);
+                    const int configuredMode=GetChordActivationMethod();
+                    const int effectiveMode=(configuredMode==2 && !rightThumbrestAvailable)?0:configuredMode;
+                    const bool extraChordActionsEnabled=GetExtraChordActionsEnabled()!=0;
+                    const bool facePressed[4]={
+                        primaryPressed[0],secondaryPressed[0],
+                        primaryPressed[1],secondaryPressed[1]
+                    };
+                    const uint16_t faceBits[4]={XB_X,XB_Y,XB_A,XB_B};
+                    float dpadThreshold=CyberpunkVR_DpadChordStick;
+                    if(!(dpadThreshold>0.05f) || dpadThreshold>1.0f)dpadThreshold=0.90f;
+                    constexpr float dpadNeutralThreshold=0.35f;
+                    const int dpadStick=effectiveMode==0?1:0;
+                    const int recenterButton=effectiveMode==0?2:0;
+                    const int overlayButton=effectiveMode==0?3:1;
+                    const bool modifierPressed=effectiveMode==0?stickClicked[0]:
+                        (effectiveMode==1?stickClicked[1]:rightThumbrestTouched);
+                    const bool gameMenuActive=GetMenuMode()!=0 || GetSharedSlot(81)!=0.0f;
+                    const bool thumbModifier=effectiveMode==0 || effectiveMode==1;
+                    const bool modifierWasHeld=s_chord.effectiveMode==effectiveMode && s_chord.modifierHeld;
+                    const bool gripPressed=std::isfinite(ctrl.leftGrip) &&
+                        (s_chord.leftGripDown?ctrl.leftGrip>0.4f:ctrl.leftGrip>=0.7f);
+                    const bool chordInputAlreadyActive=
+                        std::abs(stickX[dpadStick])>=dpadNeutralThreshold ||
+                        std::abs(stickY[dpadStick])>=dpadNeutralThreshold ||
+                        (effectiveMode==0 &&
+                            (std::abs(stickX[0])>=dpadNeutralThreshold ||
+                             std::abs(stickY[0])>=dpadNeutralThreshold)) ||
+                        (effectiveMode==1 &&
+                            (std::abs(stickX[1])>=dpadNeutralThreshold ||
+                             std::abs(stickY[1])>=dpadNeutralThreshold)) ||
+                        menuPressed ||
+                        (extraChordActionsEnabled &&
+                            (facePressed[recenterButton] || facePressed[overlayButton] || gripPressed));
+
+                    if(s_chord.effectiveMode!=effectiveMode){
+                        s_chord.effectiveMode=effectiveMode;
+                        s_chord.modifierHeld=modifierPressed;
+                        s_chord.modifierPassthrough=modifierPressed && chordInputAlreadyActive;
+                        s_chord.modifierDeferred=modifierPressed && thumbModifier && gameMenuActive;
+                        s_chord.chordConsumed=false;
+                        s_chord.dpadArmed=false;
+                        s_chord.deferredTapButton=0;
+                        s_chord.deferredTapUntilMs=0;
+                    }else if(modifierPressed){
+                        if(!s_chord.modifierHeld){
+                            s_chord.modifierHeld=true;
+                            s_chord.modifierPassthrough=chordInputAlreadyActive;
+                            s_chord.modifierDeferred=thumbModifier && gameMenuActive;
+                            s_chord.chordConsumed=false;
+                            s_chord.dpadArmed=false;
+                            s_chord.deferredTapButton=0;
+                            s_chord.deferredTapUntilMs=0;
+                        }
+                    }else if(s_chord.modifierHeld){
+                        if(s_chord.modifierDeferred && !s_chord.chordConsumed){
+                            s_chord.deferredTapButton=effectiveMode==0?XB_LEFT_THUMB:XB_RIGHT_THUMB;
+                            s_chord.deferredTapUntilMs=GetTickCount64()+50;
+                        }
+                        s_chord.modifierHeld=false;
+                        s_chord.modifierPassthrough=false;
+                        s_chord.modifierDeferred=false;
+                        s_chord.chordConsumed=false;
+                        s_chord.dpadArmed=false;
+                    }
+                    const bool chordReady=modifierPressed && modifierWasHeld && !s_chord.modifierPassthrough;
+
+                    // Thumb clicks keep their native gameplay meaning. In native menus the
+                    // selected click modifier is deferred until release so a completed chord
+                    // cannot also activate the menu's normal thumb-click action.
+                    const bool suppressLeftThumb=effectiveMode==0 && s_chord.modifierDeferred;
+                    const bool suppressRightThumb=effectiveMode==1 && s_chord.modifierDeferred;
+                    if(stickClicked[0] && !suppressLeftThumb)ctrl.buttons|=XB_LEFT_THUMB;
+                    if(stickClicked[1] && !suppressRightThumb)ctrl.buttons|=XB_RIGHT_THUMB;
+                    if(s_chord.deferredTapButton!=0){
+                        if(GetTickCount64()<s_chord.deferredTapUntilMs)ctrl.buttons|=s_chord.deferredTapButton;
+                        else{s_chord.deferredTapButton=0;s_chord.deferredTapUntilMs=0;}
+                    }
+
+                    if(chordReady){
+                        const float sx=stickX[dpadStick],sy=stickY[dpadStick];
+                        if(!s_chord.dpadArmed && std::abs(sx)<dpadNeutralThreshold && std::abs(sy)<dpadNeutralThreshold)
+                            s_chord.dpadArmed=true;
+                        if(s_chord.dpadArmed){
+                            if(sy>dpadThreshold){ctrl.buttons|=XB_DPAD_UP;s_chord.chordConsumed=true;}
+                            if(sy<-dpadThreshold){ctrl.buttons|=XB_DPAD_DOWN;s_chord.chordConsumed=true;}
+                            if(sx<-dpadThreshold){ctrl.buttons|=XB_DPAD_LEFT;s_chord.chordConsumed=true;}
+                            if(sx>dpadThreshold){ctrl.buttons|=XB_DPAD_RIGHT;s_chord.chordConsumed=true;}
+                            if(dpadStick==0){ctrl.leftThumbX=0;ctrl.leftThumbY=0;}
+                            else{ctrl.rightThumbX=0;ctrl.rightThumbY=0;}
+                        }
+                    }
+
+                    if(menuPressed && !s_chord.menuDown){
+                        s_chord.menuChorded=chordReady;
+                        if(s_chord.menuChorded)s_chord.chordConsumed=true;
+                    }
+                    if(menuPressed)ctrl.buttons|=s_chord.menuChorded?XB_BACK:XB_START;
+                    else s_chord.menuChorded=false;
+                    s_chord.menuDown=menuPressed;
+
+                    for(int button=0;button<4;++button)
+                        if(!facePressed[button])s_chord.faceChordLatched[button]=false;
+
+                    if(extraChordActionsEnabled && chordReady){
+                        if(facePressed[recenterButton] && !s_chord.faceWasDown[recenterButton]){
+                            s_chord.faceChordLatched[recenterButton]=true;
+                            s_chord.chordConsumed=true;
+                            RequestRecenter();
+                        }
+                        if(facePressed[overlayButton] && !s_chord.faceWasDown[overlayButton]){
+                            s_chord.faceChordLatched[overlayButton]=true;
+                            s_chord.chordConsumed=true;
+                            cvr::vrui::Toggle();
+                        }
+                    }
+
+                    if(!gripPressed)s_chord.cyberwareGripLatched=false;
+                    if(extraChordActionsEnabled && chordReady && gripPressed && !s_chord.leftGripDown &&
+                        !gameMenuActive && cvr::input::RequestCyberwareChord()){
+                        s_chord.cyberwareGripLatched=true;
+                        s_chord.chordConsumed=true;
+                    }
+                    if(s_chord.cyberwareGripLatched && gripPressed)ctrl.leftGrip=0.0f;
+                    s_chord.leftGripDown=gripPressed;
+
+                    for(int button=0;button<4;++button){
+                        if(facePressed[button] && !s_chord.faceChordLatched[button])ctrl.buttons|=faceBits[button];
+                        s_chord.faceWasDown[button]=facePressed[button];
+                    }
+
+                    // Steam Frame's physical D-pad/View/X/Y remain independent hardware
+                    // buttons and are merged after the configurable Touch-style chords.
+                    ctrl.buttons|=m_steamFrameActions.GlobalButtons(getGlobalBool);
+                }else{
+                    s_chord={};
+                }
+
                 // The extra physical Frame buttons obey the same overlay capture
                 // as Touch controls. Menu/Start retains the existing escape path.
                 if(cvr::vrui::CapturesInput())ctrl={};
-                if (gameplayInputActive) {
-                    if(getGlobalBool(m_menuButtonAction))ctrl.buttons|=0x0010; // XINPUT_GAMEPAD_START
-
-                    // Publish the snapshot for the XInput hook.
-                    std::lock_guard<std::mutex> inLock(m_inputMutex);
-                    m_controllerState = ctrl;
-                }
+                // Always publish a fresh snapshot so disabling gameplay actions cannot
+                // leave a previous button or axis latched in the XInput merge.
+                std::lock_guard<std::mutex> inLock(m_inputMutex);
+                m_controllerState=ctrl;
             }
 
             // Rotate the head velocity into the same base-recentered frame as the

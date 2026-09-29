@@ -919,8 +919,24 @@ bool DrawLiveControls(LiveControlsUiState& state,int section) {
             static const char* pages[]={"GENERAL","DRIVING","BINDINGS"};
             widgets::Tabs("controls-pages",page,pages,3);
             if(page==1)changed|=DrawDrivingControls(state);
-            else if(page==2)widgets::DrawBindings();
+            else if(page==2)widgets::DrawBindings(state);
             else {
+            widgets::Section("CHORD SETTINGS");
+            static const char* chordModes[]{
+                "L3 / left stick press",
+                "R3 / right stick press",
+                "Right Thumbrest touch"
+            };
+            state.xrChordActivation=std::clamp(state.xrChordActivation,0,2);
+            changed|=widgets::Combo("Chord Activation Method",&state.xrChordActivation,chordModes,IM_ARRAYSIZE(chordModes));
+            bool extras=state.xrExtraChordActions!=0;
+            if(ImGui::Checkbox("Extra Chord Actions",&extras)){state.xrExtraChordActions=extras?1:0;changed=true;}
+            const int effectiveChordMode=(state.xrChordActivation==2 && !state.xrRightThumbrestAvailable)?0:state.xrChordActivation;
+            if(state.xrChordActivation==2 && effectiveChordMode==0)
+                ImGui::TextWrapped("Right Thumbrest is unavailable on the active controller profile. Chords currently fall back to L3; the selected setting is preserved.");
+            ImGui::TextWrapped("Press and hold the modifier first, then press the chord action. Inputs already active when the modifier goes down stay normal until released.");
+            ImGui::Separator();
+
             ImGui::TextWrapped("Movement, weapon aiming and physical interaction shortcuts.");
 
             // Weapon aim: bullets/projectiles fly down the WEAPON BARREL (controller-pointed) instead

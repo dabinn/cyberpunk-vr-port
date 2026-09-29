@@ -76,6 +76,9 @@ struct LiveControlsUiState {
     // OpenXR binding or XInput entry-point patch can't keep CP2077 from booting.
     int xrXInputInstall;
     int xrInputActions;
+    int xrChordActivation = 1;
+    int xrExtraChordActions = 1;
+    int xrRightThumbrestAvailable = 0; // runtime status only; never persisted
     // Mono submit safety flags. Defaults 0 keep CP2077 mono mode from hanging on
     // the menu (see cybervrport-controller-bindings memory for the trace).
     int xrMonoXQueueWait;

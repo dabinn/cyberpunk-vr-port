@@ -6,13 +6,10 @@
 #include "Overlay/VrOverlay.hpp"
 #include "Utils/DebugGate.hpp"
 #include <atomic>
-#include <mutex>
 #include <windows.h>
 
 extern "C" __declspec(dllexport) std::atomic<uint64_t> CyberpunkVR_CyberwareChordSent{};
 namespace {
-cvr::input::CyberwareHold chord;
-std::mutex mutex;
 std::atomic<uint64_t> pendingUntil{};
 bool Allowed() {
     return g_liveControls.xrXInputHook!=0 && g_menuModeValue==0 && !cvr::vrui::CapturesInput() && !cvr::input::KeypadInputActive() &&
@@ -20,14 +17,11 @@ bool Allowed() {
            g_sceneTier.load(std::memory_order_relaxed)<=1;
 }
 }
-bool cvr::input::UpdateCyberwareChord(bool l3,float grip,bool r3,bool inputActive) {
-    std::lock_guard lock(mutex);
-    const bool allowed=inputActive && Allowed();
+bool cvr::input::RequestCyberwareChord() {
+    if(!Allowed())return false;
     const auto now=GetTickCount64();
-    const auto result=chord.Step(l3,grip,r3,allowed,now);
-    if(!allowed || r3)pendingUntil.store(0,std::memory_order_release);
-    else if(result.fire)pendingUntil.store(now+200,std::memory_order_release);
-    return result.claimed;
+    pendingUntil.store(now+200,std::memory_order_release);
+    return true;
 }
 void cvr::input::DispatchCyberwareChord() {
     const auto until=pendingUntil.exchange(0,std::memory_order_acq_rel);

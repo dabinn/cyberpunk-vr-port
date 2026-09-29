@@ -522,6 +522,8 @@ void PollLiveControls() {
     float xrLeftStickDeadzone=.15f,xrRightStickDeadzone=.15f,xrMaxInputThreshold=.90f;
     int xrXInputInstall = g_liveControls.xrXInputInstall;
     int xrInputActions = g_liveControls.xrInputActions;
+    int xrChordActivation = g_liveControls.xrChordActivation;
+    int xrExtraChordActions = g_liveControls.xrExtraChordActions;
     int xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
     int xrSnapTurnPulseMs = g_liveControls.xrSnapTurnPulseMs > 0 ? g_liveControls.xrSnapTurnPulseMs : 30;
     int xrMonoDepthCapture = g_liveControls.xrMonoDepthCapture;
@@ -1285,6 +1287,16 @@ void PollLiveControls() {
             xrInputActions = intValue;
             continue;
         }
+        if (sscanf_s(line, "xr_chord_activation=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_chord_activation = %d", &intValue) == 1) {
+            xrChordActivation = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_extra_chord_actions=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_extra_chord_actions = %d", &intValue) == 1) {
+            xrExtraChordActions = intValue;
+            continue;
+        }
         if (sscanf_s(line, "xr_mono_xqueue_wait=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_mono_xqueue_wait = %d", &intValue) == 1) {
             xrMonoXQueueWait = intValue;
@@ -1483,6 +1495,8 @@ void PollLiveControls() {
     g_liveControls.xrSnapTurnAngleDeg = xrSnapTurnAngleDeg > 0.0f ? xrSnapTurnAngleDeg : 30.0f;
     g_liveControls.xrXInputInstall = xrXInputInstall != 0 ? 1 : 0;
     g_liveControls.xrInputActions = xrInputActions != 0 ? 1 : 0;
+    g_liveControls.xrChordActivation = (xrChordActivation >= 0 && xrChordActivation <= 2) ? xrChordActivation : 1;
+    g_liveControls.xrExtraChordActions = xrExtraChordActions != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = xrMonoXQueueWait != 0 ? 1 : 0;
     g_liveControls.xrSnapTurnPulseMs = xrSnapTurnPulseMs > 0 ? xrSnapTurnPulseMs : 30;
     g_liveControls.xrMonoDepthCapture = xrMonoDepthCapture != 0 ? 1 : 0;
@@ -1748,6 +1762,9 @@ LiveControlsUiState MakeLiveControlsUiState() {
     state.xrVehicleCutsceneSuspendTier = g_liveControls.xrVehicleCutsceneSuspendTier;
     state.xrXInputInstall = g_liveControls.xrXInputInstall;
     state.xrInputActions = g_liveControls.xrInputActions;
+    state.xrChordActivation = g_liveControls.xrChordActivation;
+    state.xrExtraChordActions = g_liveControls.xrExtraChordActions;
+    state.xrRightThumbrestAvailable = OpenXRManager::Get().IsRightThumbrestAvailable() ? 1 : 0;
     state.xrMonoXQueueWait = g_liveControls.xrMonoXQueueWait;
     state.xrMonoDepthCapture = g_liveControls.xrMonoDepthCapture;
     state.xrSnapTurnPulseMs = g_liveControls.xrSnapTurnPulseMs;
@@ -2025,6 +2042,9 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
             cvr::anim::ResolveVehicleVrikSuspendTier(state.xrCutsceneSuspendTier,state.xrVehicleCutsceneSuspendTier,true));
     fprintf(file, "xr_xinput_install=%d\n", state.xrXInputInstall != 0 ? 1 : 0);
     fprintf(file, "xr_input_actions=%d\n", state.xrInputActions != 0 ? 1 : 0);
+    fprintf(file, "xr_chord_activation=%d\n",
+            (state.xrChordActivation >= 0 && state.xrChordActivation <= 2) ? state.xrChordActivation : 1);
+    fprintf(file, "xr_extra_chord_actions=%d\n", state.xrExtraChordActions != 0 ? 1 : 0);
     fprintf(file, "xr_mono_xqueue_wait=%d\n", state.xrMonoXQueueWait != 0 ? 1 : 0);
     fprintf(file, "xr_mono_depth_capture=%d\n", state.xrMonoDepthCapture != 0 ? 1 : 0);
     fprintf(file, "xr_snap_turn_pulse_ms=%d\n", state.xrSnapTurnPulseMs > 0 ? state.xrSnapTurnPulseMs : 30);
@@ -2141,6 +2161,9 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
     g_liveControls.xrSnapTurnAngleDeg = state->xrSnapTurnAngleDeg > 0.0f ? state->xrSnapTurnAngleDeg : 30.0f;
     g_liveControls.xrXInputInstall = state->xrXInputInstall != 0 ? 1 : 0;
     g_liveControls.xrInputActions = state->xrInputActions != 0 ? 1 : 0;
+    g_liveControls.xrChordActivation =
+        (state->xrChordActivation >= 0 && state->xrChordActivation <= 2) ? state->xrChordActivation : 1;
+    g_liveControls.xrExtraChordActions = state->xrExtraChordActions != 0 ? 1 : 0;
     g_liveControls.xrMonoXQueueWait = state->xrMonoXQueueWait != 0 ? 1 : 0;
     g_liveControls.xrMonoDepthCapture = state->xrMonoDepthCapture != 0 ? 1 : 0;
     g_liveControls.xrSnapTurnPulseMs = state->xrSnapTurnPulseMs > 0 ? state->xrSnapTurnPulseMs : 30;

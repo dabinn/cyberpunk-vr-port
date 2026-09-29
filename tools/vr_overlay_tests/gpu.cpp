@@ -13,7 +13,7 @@ using namespace cvr::vrui;
 void Log(const char*,...){}
 #include "Overlay/VrWidgets.hpp"
 namespace overlay {
-bool DrawLiveControls(LiveControlsUiState&,int section){if(section==3)widgets::DrawBindings();return false;}
+bool DrawLiveControls(LiveControlsUiState& state,int section){if(section==3)return widgets::DrawBindings(state);return false;}
 bool DrawFpsOverlayControls(LiveControlsUiState&){return false;}
 }
 namespace cvr::camera {std::recursive_mutex& ImageSubmissionMutex(){static std::recursive_mutex m;return m;}}

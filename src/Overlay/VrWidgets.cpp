@@ -1,9 +1,11 @@
 #include "Overlay/VrWidgets.hpp"
+#include "Overlay/LiveControlsUi.hpp"
 #include <imgui_internal.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace overlay::widgets {
@@ -157,7 +159,7 @@ void Tabs(const char* id,int& selected,const char* const* labels,int count) {
     }
     ImGui::PopID();ImGui::Spacing();
 }
-void DrawBindings() {
+void DrawBindings(const LiveControlsUiState& state) {
     struct Binding { const char* input;const char* action; };
     auto group=[](const char* title,const Binding* rows,int count) {
         Section(title);
@@ -174,6 +176,21 @@ void DrawBindings() {
         }
         ImGui::PopStyleVar();
     };
+    const int configuredMode=std::clamp(state.xrChordActivation,0,2);
+    const bool extras=state.xrExtraChordActions!=0;
+    const int effectiveMode=(configuredMode==2 && !state.xrRightThumbrestAvailable)?0:configuredMode;
+    const char* modifier=effectiveMode==0?"L3":effectiveMode==1?"R3":"RIGHT THUMBREST";
+    const char* dpadStick=effectiveMode==0?"RIGHT STICK":"LEFT STICK";
+    const char* recenterButton=effectiveMode==0?"A":"X";
+    const char* overlayButton=effectiveMode==0?"B":"Y";
+    char dpadInput[96]{},backInput[96]{},releaseInput[96]{},releaseAction[128]{};
+    char recenterInput[96]{},overlayInput[96]{},cyberwareInput[96]{};
+    std::snprintf(dpadInput,sizeof(dpadInput),"%s + %s",modifier,dpadStick);
+    std::snprintf(backInput,sizeof(backInput),"%s + LEFT MENU BUTTON",modifier);
+    std::snprintf(recenterInput,sizeof(recenterInput),"%s + %s",modifier,recenterButton);
+    std::snprintf(overlayInput,sizeof(overlayInput),"%s + %s",modifier,overlayButton);
+    std::snprintf(cyberwareInput,sizeof(cyberwareInput),"%s + LEFT GRIP",modifier);
+
     ImGui::TextWrapped("VR shortcuts and default game actions. Button names follow the Touch / Xbox convention; game actions use your controller bindings.");
     static const Binding foot[]{
         {"LEFT STICK","Move. Hold fully forward for 0.2 seconds to sprint."},
@@ -190,7 +207,6 @@ void DrawBindings() {
         {"RIGHT GRIP  At a holster","Equip or holster the weapon at the reached slot."},
         {"LEFT GRIP","Grab the magazine during a reload."},
         {"LEFT GRIP  Near left ear","Toggle the scanner. Squeeze again to close it."},
-        {"L3 + LEFT GRIP  Hold 0.5 seconds","Activate cyberware once. Release both to use again."},
         {"LEFT MENU BUTTON","Open the game's pause menu."}
     };
     group("ON FOOT",foot,IM_ARRAYSIZE(foot));
@@ -208,11 +224,26 @@ void DrawBindings() {
         {"LEFT TRIGGER + RIGHT STICK","Adjust scanner zoom."}
     };
     group("SCANNER",scanner,IM_ARRAYSIZE(scanner));
-    static const Binding dpad[]{
-        {"Hold LEFT STICK press + RIGHT STICK","Push the right stick fully up, down, left or right to send that D-pad direction."},
-        {"Release without a direction","Send the normal left-stick press (L3)."}
+    Binding dpad[3]{
+        {dpadInput,"After the modifier is held and the stick is neutral, push fully up, down, left or right to send that D-pad direction."},
+        {backInput,"Send Back / Select instead of Start."},
+        {nullptr,nullptr}
     };
-    group("D-PAD SHORTCUT",dpad,IM_ARRAYSIZE(dpad));
+    int dpadCount=2;
+    if(effectiveMode<2){
+        std::snprintf(releaseInput,sizeof(releaseInput),"Release %s without a chord",modifier);
+        std::snprintf(releaseAction,sizeof(releaseAction),"Send the normal %s stick-click action.",modifier);
+        dpad[dpadCount++]={releaseInput,releaseAction};
+    }
+    group("CHORD SHORTCUTS",dpad,dpadCount);
+
+    const char* disabled="Disabled while Extra Chord Actions is off.";
+    Binding extra[]{
+        {recenterInput,extras?"Recenter VR tracking.":disabled},
+        {overlayInput,extras?"Open or close the VR settings overlay.":disabled},
+        {cyberwareInput,extras?"Activate iconic cyberware once per grip press; game context and cooldown still apply.":disabled}
+    };
+    group("EXTRA CHORD ACTIONS",extra,IM_ARRAYSIZE(extra));
     static const Binding driving[]{
         {"Hold X  Left controller","Exit the vehicle."},
         {"A  Right controller","Confirm a dialogue choice. The normal handbrake action remains available."},
@@ -222,7 +253,6 @@ void DrawBindings() {
     };
     group("DRIVING",driving,IM_ARRAYSIZE(driving));
     static const Binding overlay[]{
-        {"L3 + R3  Hold 1 second","Open or close this overlay."},
         {"Point + TRIGGER","Select a control."},
         {"STICK  Up / down","Scroll the pointed panel."},
         {"GRIP","Drag the panel."},

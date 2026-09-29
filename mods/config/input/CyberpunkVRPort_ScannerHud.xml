@@ -79,8 +79,8 @@
 
 	<hold action="VRPortScannerEditor"  timeout="0.4" />
 
-	<!-- Dedicated OS-ability input. The VR chord supplies F18 after a deliberate
-	     0.5 s hold; native contexts, cooldown and ability checks remain in charge. -->
+	<!-- Dedicated OS-ability input. The VR chord supplies F18 once per chord press;
+	     native contexts, cooldown and ability checks remain in charge. -->
 	<mapping name="IconicCyberware_Button" type="Button" append="true">
 		<button id="IK_F18" />
 	</mapping>

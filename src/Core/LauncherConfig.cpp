@@ -208,6 +208,8 @@ void EnsureLiveControlFileExists() {
     // from reaching its main menu.
     fprintf(file, "xr_xinput_install=1\n");
     fprintf(file, "xr_input_actions=1\n");
+    fprintf(file, "xr_chord_activation=1\n");
+    fprintf(file, "xr_extra_chord_actions=1\n");
     fprintf(file, "xr_mono_xqueue_wait=0\n");
     fprintf(file, "xr_snap_turn_pulse_ms=30\n");
     fprintf(file, "xr_mono_depth_capture=1\n");
