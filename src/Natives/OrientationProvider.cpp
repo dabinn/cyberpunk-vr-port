@@ -65,6 +65,7 @@
 #include <string>
 #include "Anim/VrikHook.hpp"
 #include "Anim/WeaponAim.hpp"
+#include "Anim/AdsSightAim.hpp"
 #include "Core/VrCoreShared.hpp"
 #include "Natives/NativeState.hpp"
 #include "Natives/NativeHelpers.hpp"
@@ -391,9 +392,16 @@ static uintptr_t __fastcall PosProvStub33(uintptr_t rcx, uintptr_t rdx, uintptr_
         g_pSharedHands[vrshared::kWeaponFlag] <= 0.5f || g_pSharedHands[27] <= 0.5f ||
         !PosProvIsPlayersAttack(rcx)) return result;
 
-    const float x = g_provMuzzlePos[0], y = g_provMuzzlePos[1], z = g_provMuzzlePos[2];
+    float x = g_provMuzzlePos[0], y = g_provMuzzlePos[1], z = g_provMuzzlePos[2];
     const float lengthSq = x*x + y*y + z*z;
     if (!std::isfinite(lengthSq) || lengthSq <= 1.0f) return result;
+
+    if (VrAdsSightAimActive()) {
+        float sight[3] = {};
+        if (VrReadSightOrigin(sight)) {
+            x = sight[0]; y = sight[1]; z = sight[2];
+        }
+    }
 
     const uintptr_t output = rdx ? rdx : result;
     if (!ProvPlausiblePtr(output)) return result;
@@ -913,6 +921,38 @@ void SetVRMuzzlePos(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, 
         g_pSharedHands[200] = x; g_pSharedHands[201] = y; g_pSharedHands[202] = z;
         g_pSharedHands[203] = 1.0f;   // valid
     }
+}
+
+// The sight packet has independent validity and sequence from the muzzle and surface ray packets.
+// CET invalidates it on weapon loss or failed sight lookup so a weapon swap cannot reuse old data.
+void SetVRSightOrigin(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t) {
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    int32_t valid = 0;
+    RED4ext::GetParameter(aFrame, &x);
+    RED4ext::GetParameter(aFrame, &y);
+    RED4ext::GetParameter(aFrame, &z);
+    RED4ext::GetParameter(aFrame, &valid);
+    aFrame->code++;
+    EnsureSharedMemory();
+    if (!g_pSharedHands) return;
+
+    static uint32_t s_evenSeq = 0;
+    uint32_t nextEven = s_evenSeq + 2u;
+    if (nextEven >= 1000000u) nextEven = 2u;
+    g_pSharedHands[vrshared::kSightOriginSeq] = static_cast<float>(nextEven - 1u);
+    std::atomic_thread_fence(std::memory_order_release);
+
+    const float lengthSq = x*x + y*y + z*z;
+    const bool accepted = valid != 0 && std::isfinite(lengthSq) && lengthSq > 1.0f;
+    if (accepted) {
+        g_pSharedHands[vrshared::kSightOriginX] = x;
+        g_pSharedHands[vrshared::kSightOriginX + 1] = y;
+        g_pSharedHands[vrshared::kSightOriginX + 2] = z;
+    }
+    g_pSharedHands[vrshared::kSightOriginValid] = accepted ? 1.0f : 0.0f;
+    std::atomic_thread_fence(std::memory_order_release);
+    g_pSharedHands[vrshared::kSightOriginSeq] = static_cast<float>(nextEven);
+    s_evenSeq = nextEven;
 }
 
 // THE CARRY FLAG. Raised on the frame the weapon moves into the left slot; it starts the wrist's

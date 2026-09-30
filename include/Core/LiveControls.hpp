@@ -63,6 +63,7 @@ struct LiveControls {
     volatile int xrLaserDotMode = 1; // 0 = steady projection, 1 = real world point, 2 = surface raycast
     volatile float xrLaserDotRadiusMm = 6.0f; // apparent world-space radius in millimetres
     volatile int xrLaserDotScaleWithDistance = 0; // mode 2 only: scale spot footprint with surface distance
+    volatile int xrHideLaserDotAds = 0; // hide the dot and fire from the weapon sight while ADS
     volatile int xrMovementSpeedMode = 0; // 0=current fixed speed, 1=analog on foot
     volatile float xrLeftStickDeadzone = .15f;
     volatile float xrRightStickDeadzone = .15f;

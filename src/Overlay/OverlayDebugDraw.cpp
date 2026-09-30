@@ -457,7 +457,8 @@ void DrawBarrelCrosshair() {
     const bool gameUiActive =
         g_menuModeValue != 0 || worldMapOpen ||
         g_uiPopupOpen.load(std::memory_order_relaxed) != 0 || deviceScreenOpen;
-    const bool drawLaser = g_drawBarrelCross && rangedWeaponActive && !gameUiActive;
+    const bool hideForAds = g_drawBarrelCross && g_liveControls.xrHideLaserDotAds != 0 && g_isAiming;
+    const bool drawLaser = g_drawBarrelCross && rangedWeaponActive && !gameUiActive && !hideForAds;
     const bool raycastActive = drawLaser && surfaceMode;
 
     // CET owns every physics query. Publish the common mode/UI gate before any early return so

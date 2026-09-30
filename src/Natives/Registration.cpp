@@ -799,6 +799,14 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     fMuzP->flags = flags;
     fMuzP->AddParam("Float", "x"); fMuzP->AddParam("Float", "y"); fMuzP->AddParam("Float", "z");
     rtti->RegisterFunction(fMuzP);
+    auto fSightOrigin = RED4ext::CGlobalFunction::Create(
+        "SetVRSightOrigin", "SetVRSightOrigin", &SetVRSightOrigin);
+    fSightOrigin->flags = flags;
+    fSightOrigin->AddParam("Float", "x");
+    fSightOrigin->AddParam("Float", "y");
+    fSightOrigin->AddParam("Float", "z");
+    fSightOrigin->AddParam("Int32", "valid");
+    rtti->RegisterFunction(fSightOrigin);
     auto fBarrelRay = RED4ext::CGlobalFunction::Create(
         "SetVRBarrelRayHit", "SetVRBarrelRayHit", &SetVRBarrelRayHit);
     fBarrelRay->flags = flags;

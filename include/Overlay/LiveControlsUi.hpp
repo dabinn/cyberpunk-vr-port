@@ -72,6 +72,7 @@ struct LiveControlsUiState {
     int xrLaserDotMode;
     float xrLaserDotRadiusMm;
     int xrLaserDotScaleWithDistance;
+    int xrHideLaserDotAds;
     int xrMovementSpeedMode = 0;
     float xrLeftStickDeadzone = .15f;
     float xrRightStickDeadzone = .15f;

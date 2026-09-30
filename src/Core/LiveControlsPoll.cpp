@@ -521,6 +521,7 @@ void PollLiveControls() {
     int xrLaserDotMode = g_liveControls.xrLaserDotMode;
     float xrLaserDotRadiusMm = g_liveControls.xrLaserDotRadiusMm > 0.0f ? g_liveControls.xrLaserDotRadiusMm : 6.0f;
     int xrLaserDotScaleWithDistance = g_liveControls.xrLaserDotScaleWithDistance;
+    int xrHideLaserDotAds = g_liveControls.xrHideLaserDotAds;
     int xrMovementSpeedMode=0;
     float xrLeftStickDeadzone=.15f,xrRightStickDeadzone=.15f,xrMaxInputThreshold=.90f;
     int xrXInputInstall = g_liveControls.xrXInputInstall;
@@ -1263,6 +1264,11 @@ void PollLiveControls() {
             xrLaserDotScaleWithDistance = intValue;
             continue;
         }
+        if (sscanf_s(line, "xr_hide_laser_dot_ads=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_hide_laser_dot_ads = %d", &intValue) == 1) {
+            xrHideLaserDotAds = intValue;
+            continue;
+        }
         if(sscanf_s(line,"xr_movement_speed_mode = %d",&intValue)==1){xrMovementSpeedMode=intValue;continue;}
         if(sscanf_s(line,"xr_left_stick_deadzone = %f",&value)==1){xrLeftStickDeadzone=value;continue;}
         if(sscanf_s(line,"xr_right_stick_deadzone = %f",&value)==1){xrRightStickDeadzone=value;continue;}
@@ -1524,6 +1530,7 @@ void PollLiveControls() {
     g_liveControls.xrLaserDotRadiusMm =
         xrLaserDotRadiusMm < 1.0f ? 1.0f : (xrLaserDotRadiusMm > 50.0f ? 50.0f : xrLaserDotRadiusMm);
     g_liveControls.xrLaserDotScaleWithDistance = xrLaserDotScaleWithDistance != 0 ? 1 : 0;
+    g_liveControls.xrHideLaserDotAds = xrHideLaserDotAds != 0 ? 1 : 0;
     g_liveControls.xrMovementSpeedMode=xrMovementSpeedMode==1;
     g_liveControls.xrLeftStickDeadzone=cvr::input::StickDeadzone(xrLeftStickDeadzone);
     g_liveControls.xrRightStickDeadzone=cvr::input::StickDeadzone(xrRightStickDeadzone);
@@ -1808,6 +1815,7 @@ LiveControlsUiState MakeLiveControlsUiState() {
     state.xrLaserDotMode = g_liveControls.xrLaserDotMode;
     state.xrLaserDotRadiusMm = g_liveControls.xrLaserDotRadiusMm;
     state.xrLaserDotScaleWithDistance = g_liveControls.xrLaserDotScaleWithDistance;
+    state.xrHideLaserDotAds = g_liveControls.xrHideLaserDotAds;
     state.xrMovementSpeedMode=g_liveControls.xrMovementSpeedMode;
     state.xrLeftStickDeadzone=g_liveControls.xrLeftStickDeadzone;
     state.xrRightStickDeadzone=g_liveControls.xrRightStickDeadzone;
@@ -2099,6 +2107,7 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_laser_dot_radius_mm=%.0f\n",
             state.xrLaserDotRadiusMm < 1.0f ? 1.0f : (state.xrLaserDotRadiusMm > 50.0f ? 50.0f : state.xrLaserDotRadiusMm));
     fprintf(file, "xr_laser_dot_scale_with_distance=%d\n", state.xrLaserDotScaleWithDistance != 0 ? 1 : 0);
+    fprintf(file, "xr_hide_laser_dot_ads=%d\n", state.xrHideLaserDotAds != 0 ? 1 : 0);
     fprintf(file,"xr_movement_speed_mode=%d\nxr_left_stick_deadzone=%.3f\nxr_right_stick_deadzone=%.3f\nxr_max_input_threshold=%.3f\n",
         state.xrMovementSpeedMode==1,cvr::input::StickDeadzone(state.xrLeftStickDeadzone),
         cvr::input::StickDeadzone(state.xrRightStickDeadzone),cvr::input::StickFullInput(state.xrMaxInputThreshold));
@@ -2221,6 +2230,7 @@ extern "C" void SetLiveControlsUiState(const LiveControlsUiState* state, int per
         state->xrLaserDotRadiusMm < 1.0f ? 1.0f
                                         : (state->xrLaserDotRadiusMm > 50.0f ? 50.0f : state->xrLaserDotRadiusMm);
     g_liveControls.xrLaserDotScaleWithDistance = state->xrLaserDotScaleWithDistance != 0 ? 1 : 0;
+    g_liveControls.xrHideLaserDotAds = state->xrHideLaserDotAds != 0 ? 1 : 0;
     g_liveControls.xrPhysicalBodyRotation = state->xrPhysicalBodyRotation != 0 ? 1 : 0;
     g_liveControls.xrMovementSpeedMode=state->xrMovementSpeedMode==1;
     g_liveControls.xrLeftStickDeadzone=cvr::input::StickDeadzone(state->xrLeftStickDeadzone);

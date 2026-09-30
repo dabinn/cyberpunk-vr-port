@@ -228,6 +228,10 @@ constexpr int kBarrelEyeSeq         = 178;   // odd while writing, even when coh
 constexpr int kBarrelMainVisible    = 179;   // 1 = clear/fail-open, 0 = occluded
 constexpr int kBarrelSecondVisible  = 180;   // 1 = clear/fail-open, 0 = occluded
 constexpr int kBarrelRayActive      = 181;   // laser enabled + mode 2 + ranged gameplay
+// Coherent weapon-owned sight origin for ADS firing and wrist ballistic alignment.
+constexpr int kSightOriginX         = 182;   // ..184 world-space sight XYZ
+constexpr int kSightOriginValid     = 185;
+constexpr int kSightOriginSeq       = 186;   // odd while writing, even when coherent
 // 1 while mounted Classic Vehicle controls own the controller mapping. CET uses this only to
 // suppress holster gestures; it is intentionally separate from kWheelArmedMask ownership.
 constexpr int kClassicVehicleActive = 187;

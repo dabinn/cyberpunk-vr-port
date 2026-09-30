@@ -997,6 +997,14 @@ bool DrawLiveControls(LiveControlsUiState& state,int section) {
                     ImGui::SetTooltip("Surface raycast only. Use the actual surface distance when sizing the beam footprint.");
                 }
                 if (!distanceScaleAvailable) ImGui::EndDisabled();
+                ImGui::Indent();
+                if (!g_drawBarrelCross) ImGui::BeginDisabled();
+                changed |= CheckboxInt("Hide laser dot while ADS", &state.xrHideLaserDotAds);
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    ImGui::SetTooltip("Hide the external laser dot while ADS and fire from the weapon sight line.");
+                }
+                if (!g_drawBarrelCross) ImGui::EndDisabled();
+                ImGui::Unindent();
             }
             ImGui::Separator();
 

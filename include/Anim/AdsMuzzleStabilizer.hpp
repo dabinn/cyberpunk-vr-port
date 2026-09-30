@@ -12,6 +12,14 @@ namespace cvr::anim {
 // composes from that, so repeated passes cannot accumulate.
 void ApplyNonVrikAdsMuzzleStabilizer(uint8_t* boneBuf);
 
+// Retain the Hip surface target when ADS stops the raycast and update once per pose tick.
+void UpdateAdsBallisticCorrection();
+void ApplyAdsBallisticCorrectionToWeapon(uint8_t* boneBuf, int weaponIdx,
+                                         const float* wristModelPos, float* weaponModelRot,
+                                         const float* weaponLocalOverride = nullptr);
+void ApplyWristTargetAdsBallisticCorrection(uint8_t* boneBuf, const float* wristTargetModel,
+                                            float* handModelRot);
+
 }  // namespace cvr::anim
 
 // 1 = correct the drift the vanilla aim-in animation adds to the muzzle direction (default).

@@ -380,8 +380,12 @@ void SolvePreparedAimArms(uint8_t* boneBuf) {
     // rotation, or the stabilizer's correction -- so it is read back from the FK rather than
     // re-derived here. The left hand takes the rotated authored grip.
     VRIK_ComputeFK(boneBuf, VRIK_FKCount());
-    const float rightHandRot[4] = { g_fkRot[pose->bone[2]][0], g_fkRot[pose->bone[2]][1],
+    float rightHandRot[4] = { g_fkRot[pose->bone[2]][0], g_fkRot[pose->bone[2]][1],
                                     g_fkRot[pose->bone[2]][2], g_fkRot[pose->bone[2]][3] };
+    // Head Aim shifts the wrist around the eye. Correct the firing geometry using its final target.
+    if (IsHeadAimWeaponActive()) {
+        ApplyWristTargetAdsBallisticCorrection(boneBuf, pose->targetHand[0], rightHandRot);
+    }
     SolveAimArm(boneBuf, pose->bone[0], pose->bone[1], pose->bone[2],
                 &pose->rawPos[0], &pose->rawRot[0],
                 pose->targetHand[0], pose->targetElbow[0], rightHandRot);
