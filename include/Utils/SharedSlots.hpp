@@ -83,9 +83,6 @@
 //  [152]      [CAMWRITE] Lua ack (= last [151] applied via SetVRCamAck)  Lua -> dxgi
 //  [153]      [CAMWRITE] entity world yaw (deg)  plugin (SetVRPlayerYaw batch) -> dxgi
 //             (mode-1 heading source: the camera quat can't serve once WE compose it)
-//  [167..169] barrel ray hit world XYZ          plugin (CET push) -> overlay
-//  [170]      barrel ray hit valid              plugin (CET push) -> overlay
-//  [171]      barrel ray packet seqlock         plugin (CET push) -> overlay
 //             ONE-TICK VIEW HOLD protocol (v3, trace-proven mechanism): the entity/
 //             puppet world yaw applies one TICK after the camera turns; sprint locks
 //             puppet yaw to the heading, so the animated body+arms rendered one frame
@@ -216,12 +213,22 @@ constexpr int kWheelArmedLeftBit  = 2;
 // Right-grip routing selected by the CET holster-zone classifier. 0 = unavailable,
 // 1 = ordinary gameplay RB, 2 = spatial action ownership/suppression.
 constexpr int kRightGripRoute     = 165;
+// MUZZLE LASER RAYCAST. CET owns the physics query on the script/game thread; the overlay only
+// consumes its world-space hit and visibility. [171] brackets XYZ+valid+[179..180] so the render
+// thread cannot combine values from different CET updates. A fresh valid=0 packet deliberately
+// selects direction mode while retaining that update's per-eye visibility.
+constexpr int kBarrelRayHitX        = 167;   // ..169 world-space hit XYZ
+constexpr int kBarrelRayHitValid    = 170;   // 1 = hit, 0 = miss
+constexpr int kBarrelRaySeq         = 171;   // odd while writing, even when coherent
+// The eye names follow the two actual draw paths rather than assuming MAIN is always the physical
+// left eye. DrawBarrelCrosshair publishes the frame-coherent origins used by those textures.
+constexpr int kBarrelMainEyeX       = 172;   // ..174 world-space eye XYZ
+constexpr int kBarrelSecondEyeX     = 175;   // ..177 world-space eye XYZ
+constexpr int kBarrelEyeSeq         = 178;   // odd while writing, even when coherent
+constexpr int kBarrelMainVisible    = 179;   // 1 = clear/fail-open, 0 = occluded
+constexpr int kBarrelSecondVisible  = 180;   // 1 = clear/fail-open, 0 = occluded
+constexpr int kBarrelRayActive      = 181;   // laser enabled + mode 2 + ranged gameplay
 // 1 while mounted Classic Vehicle controls own the controller mapping. CET uses this only to
 // suppress holster gestures; it is intentionally separate from kWheelArmedMask ownership.
 constexpr int kClassicVehicleActive = 187;
-// MUZZLE LASER RAYCAST. CET owns the physics query on the script/game thread; the overlay only
-// consumes its world-space hit. [171] brackets XYZ+valid so the render thread cannot combine
-// values from different CET updates. A fresh valid=0 packet deliberately selects direction mode.
-constexpr int kBarrelRayHitX     = 167;   // ..169 world-space hit XYZ
-constexpr int kBarrelRayHitValid = 170;   // 1 = hit, 0 = miss
-constexpr int kBarrelRaySeq      = 171;   // odd while writing, even when coherent} // namespace vrshared
+} // namespace vrshared
