@@ -210,4 +210,10 @@ constexpr int kWheelArmedMask     = 163;
 constexpr int kDeviceScreenOpen   = 164;
 constexpr int kWheelArmedRightBit = 1;
 constexpr int kWheelArmedLeftBit  = 2;
+// Right-grip routing selected by the CET holster-zone classifier. 0 = unavailable,
+// 1 = ordinary gameplay RB, 2 = spatial action ownership/suppression.
+constexpr int kRightGripRoute     = 165;
+// 1 while mounted Classic Vehicle controls own the controller mapping. CET uses this only to
+// suppress holster gestures; it is intentionally separate from kWheelArmedMask ownership.
+constexpr int kClassicVehicleActive = 187;
 } // namespace vrshared

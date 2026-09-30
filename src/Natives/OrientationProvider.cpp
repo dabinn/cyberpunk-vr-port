@@ -951,6 +951,18 @@ void GetVRSharedSlot(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, float*
     int32_t idx = 0; RED4ext::GetParameter(aFrame, &idx); aFrame->code++;
     if (aOut) *aOut = (g_pSharedHands && idx >= 0 && idx < 256) ? g_pSharedHands[idx] : 0.0f;
 }
+
+// Publish the route selected by the CET holster-zone classifier.
+// 0 = unavailable, 1 = XInput RB, 2 = a spatial action owns/suppresses the grip.
+void SetVRRightGripRoute(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t) {
+    int32_t route = 0;
+    RED4ext::GetParameter(aFrame, &route);
+    aFrame->code++;
+    if (route < 0 || route > 2) route = 0;
+    EnsureSharedMemory();
+    if (g_pSharedHands) g_pSharedHands[vrshared::kRightGripRoute] = static_cast<float>(route);
+    if (aOut) *aOut = route;
+}
 void GetVRProvDump(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, float* aOut, int64_t) {
     int32_t idx = 0; RED4ext::GetParameter(aFrame, &idx); aFrame->code++;
     double v = 0.0;

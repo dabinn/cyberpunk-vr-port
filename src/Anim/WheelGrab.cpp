@@ -149,7 +149,15 @@ void WheelCaptureAnim(int hand, int handIdx) {
 // lag on a 28 cm radius is not a thing a hand can outrun.
 void WheelUpdate(float dtSec) {
     ++g_wheelFrame;
-    const bool enabled = (g_liveControls.xrWheelGrab != 0);
+    const bool classicVehicle = (g_liveControls.xrClassicVehicleControls != 0);
+    static bool s_classicVehicleWasEnabled = false;
+    if (classicVehicle && !s_classicVehicleWasEnabled) {
+        // Drop stale wheel ownership immediately. The loop below still samples gripPrev while
+        // Classic is active, so turning Classic off cannot re-grab from an already-held grip.
+        WheelReset();
+    }
+    s_classicVehicleWasEnabled = classicVehicle;
+    const bool enabled = (g_liveControls.xrWheelGrab != 0) && !classicVehicle;
     const bool driving = g_isDriving.load(std::memory_order_relaxed);
     float radius = g_liveControls.xrWheelRadius;
     if (!(radius > 0.05f) || radius > 1.0f) radius = 0.28f;
@@ -242,7 +250,7 @@ void WheelUpdate(float dtSec) {
     // where the hub is. Releasing the grip is what turns a hand at the hub back into a horn.
     int hornMask = 0;
     {
-        const bool hornEnabled = (g_liveControls.xrWheelHorn != 0);
+        const bool hornEnabled = (g_liveControls.xrWheelHorn != 0) && !classicVehicle;
         float hornR = g_liveControls.xrWheelHornRadius;
         if (!(hornR >= kHornRadiusMin) || hornR > kHornRadiusMax) hornR = kHornRadiusDefault;
         const float rIn  = hornR;
@@ -272,6 +280,11 @@ void WheelUpdate(float dtSec) {
     g_wheelBlendRight.store(g_wheel[0].blend, std::memory_order_relaxed);
     g_wheelBlendLeft.store(g_wheel[1].blend, std::memory_order_relaxed);
     g_wheelHornMask.store(hornMask, std::memory_order_relaxed);
+    if (classicVehicle && driving && g_liveControls.xrClassicSwapTriggersGrips != 0) {
+        // Wheel ownership is disabled, but both grips now belong to the pedal mapping. Keep CET
+        // consumers from treating the same squeeze as reload/holster input.
+        armedMask = vrshared::kWheelArmedRightBit | vrshared::kWheelArmedLeftBit;
+    }
     // THE ONE THING THAT STILL CROSSES A BOUNDARY: the CET mods read the grips out of the shared
     // block ([49] and [155] feed the holster equip, the smoking poses, the basketball grab and the
     // reload's magazine hand), and a grip that is holding the wheel must not also mean any of those.
@@ -296,7 +309,8 @@ void WheelMaintainGrab() {
     // Without this heartbeat, a >250ms camera miss reset the physical pivot
     // mid-turn even though controllers were fresh. New grabs still require a
     // normal proximity solve; this path can only retain or release old grabs.
-    const bool allowed=g_liveControls.xrWheelGrab && g_isDriving.load(std::memory_order_relaxed);
+    const bool classicVehicle=g_liveControls.xrClassicVehicleControls!=0;
+    const bool allowed=g_liveControls.xrWheelGrab && !classicVehicle && g_isDriving.load(std::memory_order_relaxed);
     for(int h=0;h<2;++h) {
         auto& w=g_wheel[h];
         const bool grip=WheelSlot(h==0 ? 49:vrshared::kLeftGripPressed)>.5f;
@@ -308,10 +322,16 @@ void WheelMaintainGrab() {
     g_wheelBlendRight.store(g_wheel[0].blend,std::memory_order_relaxed);
     g_wheelBlendLeft.store(g_wheel[1].blend,std::memory_order_relaxed);
     WheelPublishGrab();
+    if(g_pSharedHands && classicVehicle) {
+        const bool pedals=g_isDriving.load(std::memory_order_relaxed) && g_liveControls.xrClassicSwapTriggersGrips!=0;
+        g_pSharedHands[vrshared::kWheelArmedMask]=pedals
+            ? float(vrshared::kWheelArmedRightBit|vrshared::kWheelArmedLeftBit):0.0f;
+    }
 }
 
 int WheelControlState() {
     if(!g_isDriving.load(std::memory_order_relaxed) || !g_liveControls.xrWheelGrab ||
+       g_liveControls.xrClassicVehicleControls ||
        g_menuModeValue!=0 || OverlayIsVisible())return 0;
     const auto grab=g_grabState.load(std::memory_order_acquire);
     const auto stamp=g_wheelStampMs.load(std::memory_order_relaxed),now=GetTickCount64();

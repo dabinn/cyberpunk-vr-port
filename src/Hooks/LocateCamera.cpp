@@ -27,6 +27,7 @@
 #include "Anim/VehiclePosePolicy.hpp"
 #include "Core/Telemetry.hpp"
 #include "Core/VrCoreShared.hpp"
+#include "Utils/SharedSlots.hpp"
 #include "Hooks/Hook.hpp"
 #include "Hooks/RoomscaleMove.hpp"
 #include "Hooks/Trampoline.hpp"
@@ -302,6 +303,9 @@ void RefreshPlayerCameraState() {
             // the vehicle drives the puppet, body IK fights it and breaks the
             // character/camera position. Arms-only in vehicles.
             OpenXRManager::Get().SetSharedSlot(31, g_isInVehicle ? 1.0f : 0.0f);
+            OpenXRManager::Get().SetSharedSlot(
+                vrshared::kClassicVehicleActive,
+                g_isInVehicle && g_liveControls.xrClassicVehicleControls != 0 ? 1.0f : 0.0f);
             // CUTSCENE SUSPEND, producer half (PR #40 in substance, RTTI instead of CET).
             //
             // The player's own scene tier, read as a property: PlayerPuppet carries

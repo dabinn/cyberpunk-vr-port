@@ -209,7 +209,20 @@ void DrawBindings(const LiveControlsUiState& state) {
         {"LEFT GRIP  Near left ear","Toggle the scanner. Squeeze again to close it."},
         {"LEFT MENU BUTTON","Open the game's pause menu."}
     };
-    group("ON FOOT",foot,IM_ARRAYSIZE(foot));
+    Binding footClassic[]{
+        {"LEFT STICK",state.xrClassicDisableLsSprint?"Move. Full-forward sprint gesture is disabled.":"Move. Hold fully forward for 0.2 seconds to sprint."},
+        {"RIGHT STICK  Left / right","Turn. Uses your snap-turn setting."},
+        {"RIGHT STICK  Up / down",state.xrClassicDisableRsDashCrouch?"Normal right-stick Y input; Dash / Crouch gestures are disabled.":"Normal right-stick Y input; full up adds Dash / Dodge and full down adds Crouch."},
+        {"A / B / X / Y","Normal Xbox face-button mapping."},
+        {"LEFT / RIGHT STICK PRESS","Normal Xbox L3 / R3 mapping."},
+        {"LEFT / RIGHT TRIGGER","Normal Xbox LT / RT mapping."},
+        {"LEFT / RIGHT GRIP","LB / RB unless an active VR interaction owns that grip."},
+        {"RIGHT GRIP  At a holster","Equip or holster the reached weapon; this press is consumed instead of RB."},
+        {"LEFT GRIP  Near left ear","Toggle the scanner. Squeeze again to close it."},
+        {"LEFT MENU BUTTON","Open the game's pause menu."}
+    };
+    if(state.xrClassicOnFootControls) group("ON FOOT",footClassic,IM_ARRAYSIZE(footClassic));
+    else group("ON FOOT",foot,IM_ARRAYSIZE(foot));
     static const Binding swimming[]{
         {"BOTH HANDS  Reach, sweep out, pull back","Swim in the direction you look. Movement starts during the pull; gentle strokes swim normally and fast strokes boost."},
         {"BOTH HANDS  Raise, then push down","Swim upward."},
@@ -223,7 +236,14 @@ void DrawBindings(const LiveControlsUiState& state) {
         {"RIGHT STICK  Press","Change scanner tab."},
         {"LEFT TRIGGER + RIGHT STICK","Adjust scanner zoom."}
     };
-    group("SCANNER",scanner,IM_ARRAYSIZE(scanner));
+    static const Binding scannerClassic[]{
+        {"HAND AT LEFT EAR + LEFT GRIP","Toggle Scanner; while active the Scanner latch keeps LB asserted."},
+        {"STICKS / FACE BUTTONS","Normal Xbox mapping while Scanner is active."},
+        {"LEFT / RIGHT TRIGGER","Normal Xbox LT / RT mapping."},
+        {"LEFT / RIGHT GRIP","LB / RB unless an active VR interaction owns that grip."}
+    };
+    if(state.xrClassicScannerControls) group("SCANNER",scannerClassic,IM_ARRAYSIZE(scannerClassic));
+    else group("SCANNER",scanner,IM_ARRAYSIZE(scanner));
     Binding dpad[3]{
         {dpadInput,"After the modifier is held and the stick is neutral, push fully up, down, left or right to send that D-pad direction."},
         {backInput,"Send Back / Select instead of Start."},
@@ -251,7 +271,17 @@ void DrawBindings(const LiveControlsUiState& state) {
         {"GRIP  At the wheel","Grab the wheel or handlebars with that hand. Release to let go."},
         {"GAME CAMERA","VR follows the camera chosen by the game, including third-person scenes. Driving and seated-camera options are in DRIVING."}
     };
-    group("DRIVING",driving,IM_ARRAYSIZE(driving));
+    Binding drivingClassic[]{
+        {"A / B / X / Y","Normal Xbox vehicle face-button mapping; no A-to-X or hold-X exit remap."},
+        {"LEFT / RIGHT STICK","Normal Xbox vehicle stick mapping."},
+        {"LEFT / RIGHT STICK PRESS","Normal Xbox L3 / R3 mapping."},
+        {"LEFT / RIGHT TRIGGER",state.xrClassicSwapTriggersGrips?"LB / RB.":"Normal Xbox LT / RT mapping."},
+        {"LEFT / RIGHT GRIP",state.xrClassicSwapTriggersGrips?"Analog LT / RT for brake and throttle.":"LB / RB."},
+        {"WHEEL GRAB","Disabled while Classic Vehicle controls are active."},
+        {"GAME CAMERA","VR follows the camera chosen by the game, including third-person scenes. Seated-camera options remain in DRIVING."}
+    };
+    if(state.xrClassicVehicleControls) group("DRIVING",drivingClassic,IM_ARRAYSIZE(drivingClassic));
+    else group("DRIVING",driving,IM_ARRAYSIZE(driving));
     static const Binding overlay[]{
         {"Point + TRIGGER","Select a control."},
         {"STICK  Up / down","Scroll the pointed panel."},

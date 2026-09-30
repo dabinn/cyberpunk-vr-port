@@ -23,6 +23,8 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     auto wheelProfile=RED4ext::CGlobalFunction::Create("SetVRWheelGamepadProfile","SetVRWheelGamepadProfile",&SetVRWheelGamepadProfile);
     wheelProfile->flags=flags;wheelProfile->AddParam("Float","inner");wheelProfile->AddParam("Float","outer");
     wheelProfile->SetReturnType("Bool");rtti->RegisterFunction(wheelProfile);
+    auto gripRoute=RED4ext::CGlobalFunction::Create("SetVRRightGripRoute","SetVRRightGripRoute",&SetVRRightGripRoute);
+    gripRoute->flags=flags;gripRoute->AddParam("Int32","route");gripRoute->SetReturnType("Int32");rtti->RegisterFunction(gripRoute);
     auto uiCommand=RED4ext::CGlobalFunction::Create("VROverlayCommand","VROverlayCommand",&VROverlayCommand);
     uiCommand->flags=flags;uiCommand->SetReturnType("Int32");rtti->RegisterFunction(uiCommand);
     auto uiMenu=RED4ext::CGlobalFunction::Create("VROverlayMenu","VROverlayMenu",&VROverlayMenu);

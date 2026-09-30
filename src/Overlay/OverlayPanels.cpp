@@ -1039,6 +1039,36 @@ bool DrawLiveControls(LiveControlsUiState& state,int section) {
                 changed |= widgets::SliderFloat("Snap angle", &state.xrSnapTurnAngleDeg, 10.0f, 90.0f, "%.0f deg");
             }
 
+            widgets::Section("CLASSIC CONTROLLER MAPPING");
+            ImGui::TextWrapped("Classic mode replaces this port's controller remaps for the selected gameplay context with a complete Xbox-style baseline. Spatial VR interactions still take only the controls they actively use.");
+            changed |= CheckboxInt("Use classic on-foot controls", &state.xrClassicOnFootControls);
+            ImGui::Indent();
+            ImGui::BeginDisabled(state.xrClassicOnFootControls == 0);
+            changed |= CheckboxInt("Disable Sprint on LS-Y", &state.xrClassicDisableLsSprint);
+            changed |= CheckboxInt("Disable Dash / Crouch on RS-Y", &state.xrClassicDisableRsDashCrouch);
+            ImGui::EndDisabled();
+            ImGui::Unindent();
+
+            changed |= CheckboxInt("Use classic vehicle controls", &state.xrClassicVehicleControls);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Use the normal Xbox vehicle mapping instead of wheel-grab steering,\n"
+                                  "the X-hold exit remap and the driving trigger special cases.");
+            }
+            ImGui::Indent();
+            ImGui::BeginDisabled(state.xrClassicVehicleControls == 0);
+            changed |= CheckboxInt("Swap vehicle triggers / grips", &state.xrClassicSwapTriggersGrips);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Triggers become LB / RB. Analog grips become LT / RT for brake and throttle.");
+            }
+            ImGui::EndDisabled();
+            ImGui::Unindent();
+
+            changed |= CheckboxInt("Use classic Scanner controls", &state.xrClassicScannerControls);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Keep the hand-to-ear Scanner gesture, but use the normal Xbox mapping\n"
+                                  "while Scanner is active instead of the port's custom quickhack controls.");
+            }
+
             }
             if(section<0)ImGui::EndTabItem();
         }

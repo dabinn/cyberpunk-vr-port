@@ -51,6 +51,12 @@ namespace CyberpunkVRPort.AutoInstaller
             "xr_input_actions=1\n" +
             "xr_chord_activation=1\n" +
             "xr_extra_chord_actions=1\n" +
+            "xr_classic_on_foot_controls=0\n" +
+            "xr_classic_disable_ls_sprint=0\n" +
+            "xr_classic_disable_rs_dash_crouch=0\n" +
+            "xr_classic_vehicle_controls=0\n" +
+            "xr_classic_swap_triggers_grips=0\n" +
+            "xr_classic_scanner_controls=0\n" +
             "xr_mono_xqueue_wait=0\n" +
             "xr_snap_turn_pulse_ms=30\n" +
             "xr_mono_depth_capture=1\n";

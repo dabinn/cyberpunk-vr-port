@@ -79,6 +79,13 @@ struct LiveControlsUiState {
     int xrChordActivation = 1;
     int xrExtraChordActions = 1;
     int xrRightThumbrestAvailable = 0; // runtime status only; never persisted
+    // Classic controller routing. Parent toggles preserve child values while off.
+    int xrClassicOnFootControls;
+    int xrClassicDisableLsSprint;
+    int xrClassicDisableRsDashCrouch;
+    int xrClassicVehicleControls;
+    int xrClassicSwapTriggersGrips;
+    int xrClassicScannerControls;
     // Mono submit safety flags. Defaults 0 keep CP2077 mono mode from hanging on
     // the menu (see cybervrport-controller-bindings memory for the trace).
     int xrMonoXQueueWait;
