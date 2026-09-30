@@ -72,6 +72,8 @@ struct LiveControlsUiState {
     float xrLeftStickDeadzone = .15f;
     float xrRightStickDeadzone = .15f;
     float xrMaxInputThreshold = .90f;
+    // Laser dot projection mode. 0 = steady projection, 1 = real world point, 2 = surface raycast.
+    int xrLaserDotMode;
     // Kill-switches for the new controller pipeline; default 0 (off) so a stuck
     // OpenXR binding or XInput entry-point patch can't keep CP2077 from booting.
     int xrXInputInstall;
