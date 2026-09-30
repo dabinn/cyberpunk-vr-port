@@ -64,6 +64,7 @@
 #include "Utils/LogThrottle.hpp"
 #include "Stereo/StereoInternal.hpp"
 #include "Stereo/EngineRvas.hpp"
+#include "Stereo/CetOverlayLayer.hpp"
 #include "Stereo/DetourRegistry.hpp"
 #include "Stereo/StereoInternal.hpp"
 #include "Stereo/EngineRvas.hpp"
@@ -1209,6 +1210,7 @@ static HRESULT STDMETHODCALLTYPE Hook_CreateCommandList(
         REFIID riid, void** out) {
     HRESULT hr = g_orig_CreateCommandList(
         self, node_mask, type, allocator, initial_state, riid, out);
+    const void* const caller = _ReturnAddress();
     // COMPUTE as well as DIRECT. Registering only DIRECT lists left the engine's async-compute
     // list (`AsyncComputeDuringShadowmaps` in a capture) invisible to every hook here -- the
     // dispatch census, the ExecuteIndirect census, the barrier probes, all of them. That blind
@@ -1221,6 +1223,8 @@ static HRESULT STDMETHODCALLTYPE Hook_CreateCommandList(
     if (SUCCEEDED(hr) && out && *out &&
         (type == D3D12_COMMAND_LIST_TYPE_DIRECT || type == D3D12_COMMAND_LIST_TYPE_COMPUTE))
         patch_command_list_vtable(*out);
+    if (SUCCEEDED(hr) && out && *out && type == D3D12_COMMAND_LIST_TYPE_DIRECT)
+        CetOverlayNoteCommandListCreated(reinterpret_cast<ID3D12GraphicsCommandList*>(*out), caller);
     return hr;
 }
 

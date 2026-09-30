@@ -50,6 +50,7 @@
 #include "Utils/LogThrottle.hpp"
 #include "Stereo/StereoInternal.hpp"
 #include "Stereo/EngineRvas.hpp"
+#include "Stereo/CetOverlayLayer.hpp"
 #include "Stereo/DetourRegistry.hpp"
 #include "Stereo/StereoInternal.hpp"
 #include "Stereo/EngineRvas.hpp"
@@ -647,7 +648,9 @@ extern "C" __declspec(dllexport) uint64_t CyberpunkVR_DebugHudSnapSkips = 0;
 
  void STDMETHODCALLTYPE hk_CreateRTV(ID3D12Device* self, ID3D12Resource* res,
         const D3D12_RENDER_TARGET_VIEW_DESC* desc, D3D12_CPU_DESCRIPTOR_HANDLE dst) {
+    const void* const caller = _ReturnAddress();
     g_orig_CreateRTV(self, res, desc, dst);
+    CetOverlayNoteRtvCreated(self, res, dst, caller);
     if(cvr::stereo::probe::internalCommands)return;
     rtv_dim_register(dst, res);   // broad map (any format) for the crop-blit RT-size probe
     cvr::stereo::scene_state::RtvCreated(res,desc,dst);
@@ -851,9 +854,18 @@ void STDMETHODCALLTYPE hk_OMSetRenderTargets(
     //  is too early: the glow mips do not exist yet. It now hangs off the barrier that releases
     //  the last mip -- see hk_ResourceBarrier.)
 
-    D3D12_CPU_DESCRIPTOR_HANDLE sub[8];
     const D3D12_CPU_DESCRIPTOR_HANDLE* use = handles;
     BOOL use_contig = contiguous;
+    D3D12_CPU_DESCRIPTOR_HANDLE cetSub[8];
+    if (handles && count && count <= 8 && CetOverlayOwnsCommandList(self)) {
+        BOOL cetContig = contiguous;
+        if (CetOverlayRewriteRenderTargets(self, count, handles, contiguous, cetSub, &cetContig)) {
+            use = cetSub;
+            use_contig = cetContig;
+        }
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE sub[8];
     bool subbed = false;
     if (CyberpunkVR_VrcamOwnTarget && t_mirror_copy_node_active && handles && count &&
             count <= 8 && g_game_device) {
@@ -1399,7 +1411,14 @@ void STDMETHODCALLTYPE hk_ResourceBarrier(ID3D12GraphicsCommandList* self,
         UINT count, const D3D12_RESOURCE_BARRIER* barriers) {
     const CommandListVtableHook* e = command_list_hook_entry(self);
     PFN_ResourceBarrier orig = e ? e->barrier_original : nullptr;
-    if (orig) orig(self, count, barriers);
+    const D3D12_RESOURCE_BARRIER* use = barriers;
+    std::vector<D3D12_RESOURCE_BARRIER> cetBarriers;
+    if (barriers && count && CetOverlayOwnsCommandList(self)) {
+        cetBarriers.resize(count);
+        if (CetOverlayRewriteBarriers(self, count, barriers, cetBarriers.data()))
+            use = cetBarriers.data();
+    }
+    if (orig) orig(self, count, use);
     if(cvr::stereo::probe::internalCommands)return;
     // Gated on the same demand as the snapshot, NOT on the mirror window alone. This hook is
     // where t_mirror_src_state is refined (below): the OM bind seeds it as RENDER_TARGET and

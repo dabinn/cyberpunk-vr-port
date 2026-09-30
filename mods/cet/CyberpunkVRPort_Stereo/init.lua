@@ -47,6 +47,17 @@ registerForEvent("onUpdate", function(dt)
     StoryAttention.tick(dt, VrOverlay.active)
 end)
 
-registerForEvent("onShutdown", function() StoryAttention.shutdown();KeypadInput.shutdown();VrOverlay.shutdown();HudPanel.shutdown() end)
+registerForEvent("onShutdown", function()
+    SetVRCetOverlayVisible(0)
+    StoryAttention.shutdown();KeypadInput.shutdown();VrOverlay.shutdown();HudPanel.shutdown()
+end)
+
+registerForEvent("onOverlayOpen", function()
+    SetVRCetOverlayVisible(1)
+end)
+
+registerForEvent("onOverlayClose", function()
+    SetVRCetOverlayVisible(0)
+end)
 
 return Stereo

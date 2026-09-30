@@ -7,8 +7,10 @@
 #include "Overlay/VrImGuiInput.hpp"
 #include "Runtimes/OpenXRManager.hpp"
 #include "Render/DesktopMirror.hpp"
+#include "Stereo/CetOverlayLayer.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -26,6 +28,10 @@ extern volatile int g_verboseLog; // per-frame log spam toggle (default off)
 
 
 extern void Log(const char* fmt, ...);
+extern void SetCetVirtualCursorVisible(bool visible);
+extern bool GetCetVirtualCursorClientPosition(float* x, float* y);
+extern void SyncCetVirtualCursorFromPhysicalClient(LPARAM lParam);
+extern void UpdateCetVirtualCursorFromRawInput(LPARAM lParam);
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -154,6 +160,7 @@ bool g_drawDataSubmitted = false;
 cvr::vrui::ImGuiPointerRouter g_pointerInput;
 std::atomic<float> g_desktopWidth{0},g_desktopHeight{0};
 std::mutex g_desktopPointerMutex;
+std::atomic<bool> g_cetOverlayVisible{false};
 bool g_drawHandLocator = false;
 bool g_drawHandProxy3D = false;
 bool g_drawHandDebugAxes = false;
@@ -198,6 +205,7 @@ void ReleaseRenderTargets() {
             Log("Overlay teardown drain timed out; continuing (the device may be gone).\n");
         }
     }
+    CetOverlayInvalidateSwapchainResources();
     for (FrameContext& frame : g_frames) {
         SafeRelease(frame.renderTarget);
         SafeRelease(frame.allocator);
@@ -211,6 +219,14 @@ void ReleaseRenderTargets() {
     SafeRelease(g_swapChain3);
     g_frameCount = 0;
     g_rtvFormat = DXGI_FORMAT_UNKNOWN;
+}
+
+bool OverlayIsSwapchainBackbuffer(ID3D12Resource* resource) {
+    if (!resource) return false;
+    for (const FrameContext& frame : g_frames) {
+        if (frame.renderTarget == resource) return true;
+    }
+    return false;
 }
 
 void ShutdownOverlay() {
@@ -489,6 +505,22 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         Log("OverlayWndProc: msg=%u, hwnd=%p, count=%d\n", msg, hwnd, totalMsgCount);
     }
 
+    const bool cetCursorActive = g_cetOverlayVisible.load(std::memory_order_relaxed) && !cvr::vrui::Visible();
+    if (cetCursorActive) {
+        if (msg == WM_INPUT) {
+            UpdateCetVirtualCursorFromRawInput(lParam);
+        } else if (msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
+                   msg == WM_LBUTTONDBLCLK || msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
+                   msg == WM_RBUTTONDBLCLK || msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP ||
+                   msg == WM_MBUTTONDBLCLK || msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP) {
+            SyncCetVirtualCursorFromPhysicalClient(lParam);
+        } else if (msg == WM_KILLFOCUS) {
+            SetCetVirtualCursorVisible(false);
+        } else if (msg == WM_SETFOCUS) {
+            SetCetVirtualCursorVisible(true);
+        }
+    }
+
     // 1. Scale mouse coordinates FIRST so ImGui and game receive the scaled input
     if (msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP || msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP) {
         UINT virtualWidth = GetForcedDisplayModeWidth();
@@ -527,6 +559,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if ((msg == WM_KEYUP || msg == WM_SYSKEYUP) && (wParam == VK_F10 || wParam == VK_INSERT)) {
         cvr::vrui::Toggle();
         g_menuVisible = cvr::vrui::Visible();
+        SetCetVirtualCursorVisible(g_cetOverlayVisible.load(std::memory_order_relaxed) && !g_menuVisible);
         if (g_menuVisible) {
             ReleaseGameMouseCapture();
         }
@@ -581,10 +614,26 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
     }
 
+    if (g_cetOverlayVisible.load(std::memory_order_relaxed) && !cvr::vrui::Visible() &&
+        (msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
+         msg == WM_LBUTTONDBLCLK || msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
+         msg == WM_RBUTTONDBLCLK || msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP ||
+         msg == WM_MBUTTONDBLCLK || msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP)) {
+        float x = 0.0f;
+        float y = 0.0f;
+        if (GetCetVirtualCursorClientPosition(&x, &y)) {
+            lParam = MAKELPARAM(static_cast<WORD>(std::lround(x)), static_cast<WORD>(std::lround(y)));
+        }
+    }
     return g_originalWndProc ? CallWindowProcA(g_originalWndProc, hwnd, msg, wParam, lParam) : DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 }  // namespace overlay
 using namespace overlay;
+
+void SetCetOverlayVisible(bool visible) {
+    g_cetOverlayVisible.store(visible, std::memory_order_relaxed);
+    SetCetVirtualCursorVisible(visible && !cvr::vrui::Visible());
+}
 
 void OverlaySetDeviceAndQueue(ID3D12Device* device, ID3D12CommandQueue* queue) {
     if (device == g_device && queue == g_queue) return;
@@ -627,6 +676,11 @@ void OverlayRender(IDXGISwapChain* swapChain) {
     FrameContext& frame = g_frames[frameIndex];
     if (!frame.renderTarget || !frame.allocator || !g_cmdList) return;
     g_menuVisible=cvr::vrui::Visible();
+    static bool previousMenuVisible = false;
+    if (previousMenuVisible != g_menuVisible) {
+        previousMenuVisible = g_menuVisible;
+        SetCetVirtualCursorVisible(g_cetOverlayVisible.load(std::memory_order_relaxed) && !g_menuVisible);
+    }
     std::shared_ptr<cvr::vrui::Canvas> vrCanvas;
     if(g_menuVisible){vrCanvas=cvr::vrui::AcquireCanvas(g_device,g_imguiPsoFormat);if(!vrCanvas)return;}
 
@@ -672,6 +726,27 @@ void OverlayRender(IDXGISwapChain* swapChain) {
 
     if(!g_menuVisible){DrawHandLocatorOverlay();DrawBarrelCrosshair();DrawCompactAdsCameraTelemetry();}
 
+    if (g_cetOverlayVisible.load(std::memory_order_relaxed) && !g_menuVisible) {
+        float cursorX = 0.0f;
+        float cursorY = 0.0f;
+        if (GetCetVirtualCursorClientPosition(&cursorX, &cursorY)) {
+            ImDrawList* draw = ImGui::GetForegroundDrawList();
+            const ImVec2 p(cursorX, cursorY);
+            const ImVec2 p1(cursorX + 6.0f, cursorY + 18.0f);
+            const ImVec2 p2(cursorX + 10.0f, cursorY + 11.0f);
+            const ImVec2 p3(cursorX + 17.0f, cursorY + 10.0f);
+            draw->AddTriangleFilled(p, p1, p2, IM_COL32(0, 0, 0, 255));
+            draw->AddTriangleFilled(ImVec2(cursorX + 1.0f, cursorY + 1.0f),
+                                    ImVec2(cursorX + 6.0f, cursorY + 16.0f),
+                                    ImVec2(cursorX + 9.0f, cursorY + 10.0f),
+                                    IM_COL32(255, 255, 255, 255));
+            draw->AddLine(p2, p3, IM_COL32(0, 0, 0, 255), 3.0f);
+            draw->AddLine(ImVec2(cursorX + 9.0f, cursorY + 10.0f),
+                          ImVec2(cursorX + 15.0f, cursorY + 10.0f),
+                          IM_COL32(255, 255, 255, 255), 1.0f);
+        }
+    }
+
     const bool placementSave = cvr::vrui::ConsumePlacementSave();
     if (g_menuVisible || placementSave) {
         LiveControlsUiState state{};
@@ -691,7 +766,9 @@ void OverlayRender(IDXGISwapChain* swapChain) {
     const bool haveSecondEyeWorld = g_secondEyeWorldDrawList &&
                                     g_secondEyeWorldDrawList->VtxBuffer.Size > 0 &&
                                     g_secondEyeWorldDrawList->IdxBuffer.Size > 0;
-    if (CyberpunkVR_OverlaySkipEmpty && !vrCanvas && !HasDrawWork(ImGui::GetDrawData()) &&
+    if (CyberpunkVR_OverlaySkipEmpty && !vrCanvas &&
+        !(g_cetOverlayVisible.load(std::memory_order_relaxed) && CyberpunkVR_CetStereoOverlay) &&
+        !HasDrawWork(ImGui::GetDrawData()) &&
         !haveSecondEyeWorld) {
         CVR_DIAGNOSTIC(++CyberpunkVR_DebugOverlayEmptyFrames);
         // An empty CPU frame must still clear stale ImGui draw data and update
@@ -716,6 +793,28 @@ void OverlayRender(IDXGISwapChain* swapChain) {
     toRt.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
     toRt.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     g_cmdList->ResourceBarrier(1, &toRt);
+
+    if (g_cetOverlayVisible.load(std::memory_order_relaxed) && CyberpunkVR_CetStereoOverlay) {
+        // With the F10 XR canvas active, the game backbuffer remains in PRESENT.
+        // Transition it separately so CET can still composite its independent layer.
+        D3D12_RESOURCE_BARRIER cetBackbuffer{};
+        if (vrCanvas) {
+            cetBackbuffer.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            cetBackbuffer.Transition.pResource = frame.renderTarget;
+            cetBackbuffer.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+            cetBackbuffer.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            cetBackbuffer.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            g_cmdList->ResourceBarrier(1, &cetBackbuffer);
+        }
+        if (CetOverlayRecordIntoTarget(g_cmdList, frame.renderTarget, 0.0f)) {
+            if (++CyberpunkVR_DebugCetMainComposites == 1)
+                Log("[cet-layer] MAIN composite active.\n");
+        }
+        if (vrCanvas) {
+            std::swap(cetBackbuffer.Transition.StateBefore, cetBackbuffer.Transition.StateAfter);
+            g_cmdList->ResourceBarrier(1, &cetBackbuffer);
+        }
+    }
 
     const auto drawRtv=vrCanvas?vrCanvas->rtv->GetCPUDescriptorHandleForHeapStart():frame.rtv;
     if(vrCanvas){const float clear[4]={0,0,0,0};g_cmdList->ClearRenderTargetView(drawRtv,clear,0,nullptr);}

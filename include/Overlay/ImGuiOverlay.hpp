@@ -16,6 +16,9 @@ void OverlayInvalidateSwapchainResources();
 // the one window in which the faster pacing was measured to hang the device. See ImGuiOverlay.cpp.
 void OverlayArmLoadGuard(const char* reason);
 bool OverlayIsVisible();
+namespace overlay {
+bool OverlayIsSwapchainBackbuffer(ID3D12Resource* resource);
+}
 
 // THE OVERLAY IN THE SECOND EYE.
 //
