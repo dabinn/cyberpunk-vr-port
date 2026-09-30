@@ -356,6 +356,56 @@ static bool ProvIsPlayersAttack(int aClass, uintptr_t aProvider) {
     return mine;
 }
 
+// Visible Bullets uses the native projectile position provider. Its real slot 33 has a different
+// source offset from the orientation provider: +0x88 leads to the attack at source +0x10.
+// Only the local player's attack may use the live weapon muzzle as its launch origin.
+static void* g_posProvOrig = nullptr;
+
+static bool PosProvIsPlayersAttack(uintptr_t aProvider) {
+    const uintptr_t player = g_playerEntityPtr;
+    if (!player || !ProvPlausiblePtr(aProvider)) return false;
+
+    bool mine = false;
+    __try {
+        const uintptr_t source = *reinterpret_cast<uintptr_t*>(aProvider + 0x88);
+        if (!ProvPlausiblePtr(source)) return false;
+        const uintptr_t attack = *reinterpret_cast<uintptr_t*>(source + 0x10);
+        if (!ProvPlausiblePtr(attack)) return false;
+        const uintptr_t* words = reinterpret_cast<const uintptr_t*>(attack);
+        for (int h = 0; h < 4; ++h) {
+            if (words[kProvAttackHandleOffsets[h] / 8] == player) {
+                mine = true;
+                break;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    return mine;
+}
+
+static uintptr_t __fastcall PosProvStub33(uintptr_t rcx, uintptr_t rdx, uintptr_t r8, uintptr_t r9) {
+    using Fn = uintptr_t(__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t);
+    Fn original = reinterpret_cast<Fn>(g_posProvOrig);
+    const uintptr_t result = original ? original(rcx, rdx, r8, r9) : 0;
+
+    if (!g_pSharedHands || !g_provMuzzlePosSeq ||
+        g_pSharedHands[vrshared::kWeaponFlag] <= 0.5f || g_pSharedHands[27] <= 0.5f ||
+        !PosProvIsPlayersAttack(rcx)) return result;
+
+    const float x = g_provMuzzlePos[0], y = g_provMuzzlePos[1], z = g_provMuzzlePos[2];
+    const float lengthSq = x*x + y*y + z*z;
+    if (!std::isfinite(lengthSq) || lengthSq <= 1.0f) return result;
+
+    const uintptr_t output = rdx ? rdx : result;
+    if (!ProvPlausiblePtr(output)) return result;
+    __try {
+        float* position = reinterpret_cast<float*>(output);
+        position[0] = x;
+        position[1] = y;
+        position[2] = z;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return result;
+}
+
 // Each stub knows its (class C, slot S): bump counter; sample/override the out-quat; call original.
 template <int C, int S>
 static uintptr_t __fastcall ProvStub(uintptr_t rcx, uintptr_t rdx, uintptr_t r8, uintptr_t r9) {
@@ -626,6 +676,25 @@ static int InstallProvClass(int c) {
     VirtualProtect(reinterpret_cast<void*>(vt + kProvSlotLo*8), kProvNSlots*8, oldp, &oldp);
     return 1;
 }
+static int InstallPositionProvClass() {
+    auto* rtti = RED4ext::CRTTISystem::Get();
+    auto* cls = rtti ? rtti->GetClass("entFuncPositionProvider") : nullptr;
+    if (!cls) return -1;
+    void* instance = cls->CreateInstance(true);
+    if (!instance) return -2;
+    uintptr_t vtable = 0;
+    __try { vtable = *reinterpret_cast<uintptr_t*>(instance); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (!vtable) return -3;
+
+    constexpr int kPositionSlot = 33;
+    uintptr_t* slot = reinterpret_cast<uintptr_t*>(vtable + kPositionSlot * 8);
+    DWORD oldProtection = 0;
+    if (!VirtualProtect(slot, sizeof(uintptr_t), PAGE_EXECUTE_READWRITE, &oldProtection)) return -4;
+    g_posProvOrig = reinterpret_cast<void*>(*slot);
+    *slot = reinterpret_cast<uintptr_t>(&PosProvStub33);
+    VirtualProtect(slot, sizeof(uintptr_t), oldProtection, &oldProtection);
+    return 1;
+}
 void InstallVRProvInstrument(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, int32_t* aOut, int64_t) {
     aFrame->code++;
     if (g_provInstalled) { if (aOut) *aOut = 2; return; }
@@ -634,8 +703,9 @@ void InstallVRProvInstrument(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame
     FillRow<2>(std::make_integer_sequence<int, kProvNSlots>{});
     int ok = 0;
     for (int c = 0; c < kProvNCls; ++c) if (InstallProvClass(c) == 1) ++ok;
+    if (InstallPositionProvClass() == 1) ++ok;
     g_provInstalled = ok > 0 ? 1 : 0;
-    if (aOut) *aOut = ok;   // number of provider classes instrumented (expect 3)
+    if (aOut) *aOut = ok;   // number of provider classes instrumented (expect 4)
 }
 // arg = cls*1000 + REAL vtable slot (e.g. 0*1000+33 for entEntity slot 33); -1 = off.
 // Stored override slot is the STUB INDEX (realSlot - kProvSlotLo) to match ProvStub<C,S>.
