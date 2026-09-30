@@ -134,6 +134,9 @@ DXGI_FORMAT g_rtvFormat = DXGI_FORMAT_UNKNOWN;
 DXGI_FORMAT g_imguiPsoFormat = DXGI_FORMAT_UNKNOWN;
 // The list the world-projected markers draw into, captured while the frame is still open.
 ImDrawList* g_bgDrawList = nullptr;
+// Geometry projected through the second eye's own world frustum. It is inserted only while recording
+// the VRCAM overlay replay; MAIN's background list remains excluded from that pass.
+ImDrawList* g_secondEyeWorldDrawList = nullptr;
 // A small ring of RTVs for targets that are not the swapchain (the second eye). Round-robin
 // rather than one, so a descriptor is never rewritten while a frame that referenced it is still
 // in flight -- the same reason ColorBlit keeps a ring.
@@ -212,6 +215,10 @@ void ReleaseRenderTargets() {
 void ShutdownOverlay() {
     {std::lock_guard pointerLock(g_desktopPointerMutex);g_pointerInput={};}
     ReleaseRenderTargets();
+    if (g_secondEyeWorldDrawList) {
+        IM_DELETE(g_secondEyeWorldDrawList);
+        g_secondEyeWorldDrawList = nullptr;
+    }
     if (g_imguiInitialized) {
         ImGui_ImplDX12_Shutdown();
         ImGui_ImplWin32_Shutdown();
@@ -639,6 +646,14 @@ void OverlayRender(IDXGISwapChain* swapChain) {
 
     ImGui::NewFrame();
 
+    if (!g_secondEyeWorldDrawList) {
+        g_secondEyeWorldDrawList = IM_NEW(ImDrawList)(ImGui::GetDrawListSharedData());
+        g_secondEyeWorldDrawList->_OwnerName = "##SecondEyeWorld";
+    }
+    g_secondEyeWorldDrawList->_ResetForNewFrame();
+    g_secondEyeWorldDrawList->PushTextureID(ImGui::GetIO().Fonts->TexID);
+    g_secondEyeWorldDrawList->PushClipRect(ImVec2(0.0f, 0.0f), ImGui::GetIO().DisplaySize, false);
+
     if(!g_menuVisible){DrawHandLocatorOverlay();DrawBarrelCrosshair();DrawCompactAdsCameraTelemetry();}
 
     const bool placementSave = cvr::vrui::ConsumePlacementSave();
@@ -657,7 +672,11 @@ void OverlayRender(IDXGISwapChain* swapChain) {
     ImGui::Render();
 
     const bool drain = ShouldDrainThisFrame();
-    if (CyberpunkVR_OverlaySkipEmpty && !vrCanvas && !HasDrawWork(ImGui::GetDrawData())) {
+    const bool haveSecondEyeWorld = g_secondEyeWorldDrawList &&
+                                    g_secondEyeWorldDrawList->VtxBuffer.Size > 0 &&
+                                    g_secondEyeWorldDrawList->IdxBuffer.Size > 0;
+    if (CyberpunkVR_OverlaySkipEmpty && !vrCanvas && !HasDrawWork(ImGui::GetDrawData()) &&
+        !haveSecondEyeWorld) {
         CVR_DIAGNOSTIC(++CyberpunkVR_DebugOverlayEmptyFrames);
         // An empty CPU frame must still clear stale ImGui draw data and update
         // the barrel-dot publication. It needs no allocator, upload or barriers.
@@ -791,8 +810,8 @@ bool OverlayIsVisible() {
 // What is NOT recorded is the background draw list: the hand locator, the aim ray and the barrel
 // cross are projected with one frustum, so their pixels are only true for the eye they were
 // projected for. Reusing them here would put a second, flat copy at optical infinity beside the
-// correct one -- and the barrel dot already has its own properly projected second-eye draw
-// (ColorBlit::RecordDot with CyberpunkVR_BarrelDotNdcX2). The foreground list is kept, because after
+// correct one. The barrel dot instead writes its properly projected second-eye geometry into the
+// dedicated g_secondEyeWorldDrawList inserted below. The foreground list is kept, because after
 // that move it holds exactly what IS screen-space: ImGui's software mouse cursor, which has to be in
 // both eyes to be usable.
 // ================================================================================================
@@ -840,7 +859,11 @@ bool OverlayRecordIntoTarget(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
     if (g_imguiPsoFormat == DXGI_FORMAT_UNKNOWN) return false;
 
     ImDrawData* drawData = ImGui::GetDrawData();
-    if (!drawData || !drawData->Valid || drawData->CmdListsCount <= 0) return false;
+    if (!drawData || !drawData->Valid) return false;
+    const bool haveSecondEyeWorld = g_secondEyeWorldDrawList &&
+                                    g_secondEyeWorldDrawList->VtxBuffer.Size > 0 &&
+                                    g_secondEyeWorldDrawList->IdxBuffer.Size > 0;
+    if (drawData->CmdListsCount <= 0 && !haveSecondEyeWorld) return false;
 
     const D3D12_RESOURCE_DESC desc = target->GetDesc();
     const uint32_t wantW = static_cast<uint32_t>(drawData->DisplaySize.x);
@@ -892,6 +915,8 @@ bool OverlayRecordIntoTarget(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
     // whole overlay LEFT -- which is where a panel nearer than infinity sits in the right eye. Clip
     // rectangles are taken relative to DisplayPos by the backend, so they follow it exactly.
     const ImVec2 savedPos = drawData->DisplayPos;
+    const int savedTotalIdxCount = drawData->TotalIdxCount;
+    const int savedTotalVtxCount = drawData->TotalVtxCount;
     drawData->DisplayPos.x += shiftPx;
 
     // And the background list is dropped for this pass. Erasing from the vector keeps its capacity,
@@ -904,7 +929,21 @@ bool OverlayRecordIntoTarget(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
         }
     }
     if (bgIndex >= 0) {
+        drawData->TotalIdxCount -= g_bgDrawList->IdxBuffer.Size;
+        drawData->TotalVtxCount -= g_bgDrawList->VtxBuffer.Size;
         drawData->CmdLists.erase(drawData->CmdLists.Data + bgIndex);
+        drawData->CmdListsCount = drawData->CmdLists.Size;
+    }
+
+    // This list is already projected for the second eye. Insert it beneath screen-space windows and
+    // cancel the draw-data DisplayPos shift for its vertices only.
+    if (haveSecondEyeWorld) {
+        if (shiftPx != 0.0f) {
+            for (ImDrawVert& vertex : g_secondEyeWorldDrawList->VtxBuffer) vertex.pos.x += shiftPx;
+        }
+        drawData->CmdLists.insert(drawData->CmdLists.Data, g_secondEyeWorldDrawList);
+        drawData->TotalIdxCount += g_secondEyeWorldDrawList->IdxBuffer.Size;
+        drawData->TotalVtxCount += g_secondEyeWorldDrawList->VtxBuffer.Size;
         drawData->CmdListsCount = drawData->CmdLists.Size;
     }
 
@@ -916,10 +955,18 @@ bool OverlayRecordIntoTarget(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
         ImGui_ImplDX12_RenderDrawData(drawData, cmdList);
     }
 
+    if (haveSecondEyeWorld) {
+        drawData->CmdLists.erase(drawData->CmdLists.Data);
+        if (shiftPx != 0.0f) {
+            for (ImDrawVert& vertex : g_secondEyeWorldDrawList->VtxBuffer) vertex.pos.x -= shiftPx;
+        }
+    }
     if (bgIndex >= 0) {
         drawData->CmdLists.insert(drawData->CmdLists.Data + bgIndex, g_bgDrawList);
-        drawData->CmdListsCount = drawData->CmdLists.Size;
     }
+    drawData->CmdListsCount = drawData->CmdLists.Size;
+    drawData->TotalIdxCount = savedTotalIdxCount;
+    drawData->TotalVtxCount = savedTotalVtxCount;
     drawData->DisplayPos = savedPos;
 
     if (anything) CVR_DIAGNOSTIC(++CyberpunkVR_DebugOverlaySecondEyeDraws);

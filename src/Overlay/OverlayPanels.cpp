@@ -954,34 +954,49 @@ bool DrawLiveControls(LiveControlsUiState& state,int section) {
                                       "the weapon arm. Either way the shot leaves the real muzzle, for guns and\n"
                                       "projectiles alike, and free-look while aiming is preserved.");
                 }
-                ImGui::Checkbox("Laser dot", &g_drawBarrelCross);
+                ImGui::Checkbox("Weapon Aim laser dot (where the bullet hits)", &g_drawBarrelCross);
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Show a red aiming dot projected from the weapon muzzle.\n"
-                                      "Select how its depth is determined with the mode selector.");
+                    ImGui::SetTooltip("Red dot projected from the actual weapon muzzle direction through the\n"
+                                      "game camera -- marks exactly where the bullet will fly.");
                 }
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(190.0f);
-                static const char* kLaserDotModes[] = {
+                static const char* laserModes[] = {
                     "Steady projection",
                     "Real world point",
                     "Surface raycast"
                 };
-                int laserDotMode = state.xrLaserDotMode;
-                if (laserDotMode < 0 || laserDotMode > 2) laserDotMode = 1;
-                if (ImGui::Combo("##laserDotMode", &laserDotMode, kLaserDotModes,
-                                 IM_ARRAYSIZE(kLaserDotModes))) {
+                int laserDotMode = std::clamp(state.xrLaserDotMode, 0, 2);
+                ImGui::SetNextItemWidth(220.0f);
+                if (ImGui::Combo("Laser dot mode", &laserDotMode, laserModes, IM_ARRAYSIZE(laserModes))) {
                     state.xrLaserDotMode = laserDotMode;
                     changed = true;
                 }
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip(
-                        "Steady projection\n"
-                        "Simple and steady stereo projection.\n\n"
-                        "Real world point\n"
-                        "Places the dot at a real point in 3D space ahead of the weapon.\n\n"
-                        "Surface raycast\n"
-                        "Places the dot on the surface hit by the weapon's pointing ray.");
+                    ImGui::SetTooltip("Steady projection: stable bore-direction cue.\n"
+                                      "Real world point: project the same finite point into both eyes.\n"
+                                      "Surface raycast: place the dot on the world/NPC surface hit by the muzzle ray.");
                 }
+                ImGui::SetNextItemWidth(220.0f);
+                int laserDotRadiusMm = static_cast<int>(std::lround(state.xrLaserDotRadiusMm));
+                if (ImGui::SliderInt("Spot radius", &laserDotRadiusMm, 1, 50, "%d mm")) {
+                    state.xrLaserDotRadiusMm = static_cast<float>(laserDotRadiusMm);
+                    changed = true;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Laser spot radius in world-space millimetres.\n"
+                                      "Pixel size adapts to the current render resolution and projection.");
+                }
+                ImGui::SameLine();
+                const bool distanceScaleAvailable = laserDotMode == 2;
+                if (!distanceScaleAvailable) ImGui::BeginDisabled();
+                bool scaleWithDistance = state.xrLaserDotScaleWithDistance != 0;
+                if (ImGui::Checkbox("Scale with distance", &scaleWithDistance)) {
+                    state.xrLaserDotScaleWithDistance = scaleWithDistance ? 1 : 0;
+                    changed = true;
+                }
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    ImGui::SetTooltip("Surface raycast only. Use the actual surface distance when sizing the beam footprint.");
+                }
+                if (!distanceScaleAvailable) ImGui::EndDisabled();
             }
             ImGui::Separator();
 

@@ -60,11 +60,13 @@ struct LiveControls {
     volatile int xrSnapTurn;        // 1 = discrete snap turn from right-stick X
     volatile float xrSnapTurnAngleDeg; // degrees per snap pulse
     volatile int xrMovementSource;  // 0 = Game, 1 = HMD, 2 = LeftHand, 3 = RightHand
+    volatile int xrLaserDotMode = 1; // 0 = steady projection, 1 = real world point, 2 = surface raycast
+    volatile float xrLaserDotRadiusMm = 6.0f; // apparent world-space radius in millimetres
+    volatile int xrLaserDotScaleWithDistance = 0; // mode 2 only: scale spot footprint with surface distance
     volatile int xrMovementSpeedMode = 0; // 0=current fixed speed, 1=analog on foot
     volatile float xrLeftStickDeadzone = .15f;
     volatile float xrRightStickDeadzone = .15f;
     volatile float xrMaxInputThreshold = .90f;
-    volatile int xrLaserDotMode = 1; // 0 = steady projection, 1 = real world point, 2 = surface raycast
     volatile int xrXInputInstall;   // 1 = install the XInput entry-point detour at startup (default 1, set 0 in vrport.ini to fully bypass)
     volatile int xrInputActions;    // 1 = create gameplay XrActions (thumbstick/trigger/buttons). 0 = pose-only legacy behaviour
     volatile int xrChordActivation = 1; // 0 = L3 + right stick, 1 = R3 + left stick, 2 = right thumbrest + left stick

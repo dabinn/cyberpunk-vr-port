@@ -35,6 +35,7 @@ extern bool g_drawBarrelCross;
 extern bool g_drawHandDebugAxes;
 extern bool g_drawHandLocator;
 extern bool g_drawHandProxy3D;
+extern ImDrawList* g_secondEyeWorldDrawList;
 extern float g_aimRayLenM;
 extern float g_handLocatorScale;
 void DrawBarrelCrosshair();

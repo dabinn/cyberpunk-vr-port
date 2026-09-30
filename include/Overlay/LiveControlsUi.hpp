@@ -68,12 +68,14 @@ struct LiveControlsUiState {
     // 0..3 enum (0=Game, 1=HMD, 2=LeftHand, 3=RightHand). The overlay edits the
     // latter and the proxy mirrors it back into the legacy field.
     int xrMovementSource;
+    // Laser dot projection mode and appearance.
+    int xrLaserDotMode;
+    float xrLaserDotRadiusMm;
+    int xrLaserDotScaleWithDistance;
     int xrMovementSpeedMode = 0;
     float xrLeftStickDeadzone = .15f;
     float xrRightStickDeadzone = .15f;
     float xrMaxInputThreshold = .90f;
-    // Laser dot projection mode. 0 = steady projection, 1 = real world point, 2 = surface raycast.
-    int xrLaserDotMode;
     // Kill-switches for the new controller pipeline; default 0 (off) so a stuck
     // OpenXR binding or XInput entry-point patch can't keep CP2077 from booting.
     int xrXInputInstall;
