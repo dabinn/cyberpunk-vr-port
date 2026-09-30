@@ -795,6 +795,10 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     fProvReset->flags = flags; rtti->RegisterFunction(fProvReset);
     auto fProvQM = RED4ext::CGlobalFunction::Create("SetVRProvQuatMode", "SetVRProvQuatMode", &SetVRProvQuatMode);
     fProvQM->flags = flags; fProvQM->AddParam("Int32", "mode"); fProvQM->AddParam("Int32", "axis"); rtti->RegisterFunction(fProvQM);
+    auto fMuzP = RED4ext::CGlobalFunction::Create("SetVRMuzzlePos", "SetVRMuzzlePos", &SetVRMuzzlePos);
+    fMuzP->flags = flags;
+    fMuzP->AddParam("Float", "x"); fMuzP->AddParam("Float", "y"); fMuzP->AddParam("Float", "z");
+    rtti->RegisterFunction(fMuzP);
     auto fBarrelRay = RED4ext::CGlobalFunction::Create(
         "SetVRBarrelRayHit", "SetVRBarrelRayHit", &SetVRBarrelRayHit);
     fBarrelRay->flags = flags;
@@ -813,10 +817,6 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     fNpcSurface->AddParam("Vector4", "to");
     fNpcSurface->SetReturnType("Vector4");
     rtti->RegisterFunction(fNpcSurface);
-    auto fMuzP = RED4ext::CGlobalFunction::Create("SetVRMuzzlePos", "SetVRMuzzlePos", &SetVRMuzzlePos);
-    fMuzP->flags = flags;
-    fMuzP->AddParam("Float", "x"); fMuzP->AddParam("Float", "y"); fMuzP->AddParam("Float", "z");
-    rtti->RegisterFunction(fMuzP);
 
     auto fCarryL = RED4ext::CGlobalFunction::Create("SetVRCarryLeft", "SetVRCarryLeft", &SetVRCarryLeft);
     fCarryL->flags = flags; fCarryL->AddParam("Int32", "on"); rtti->RegisterFunction(fCarryL);
@@ -902,6 +902,11 @@ RED4EXT_C_EXPORT void RED4EXT_CALL PostRegisterTypes() {
     rtti->RegisterFunction(fWeaponRaise);
     auto fMeleeFire = RED4ext::CGlobalFunction::Create("SetVRMeleeFire", "SetVRMeleeFire", &SetVRMeleeFire);
     fMeleeFire->flags = flags; fMeleeFire->AddParam("Int32","fire"); rtti->RegisterFunction(fMeleeFire);
+    auto fLaserRangedWeaponState = RED4ext::CGlobalFunction::Create(
+        "SetVRLaserRangedWeaponState", "SetVRLaserRangedWeaponState", &SetVRLaserRangedWeaponState);
+    fLaserRangedWeaponState->flags = flags;
+    fLaserRangedWeaponState->AddParam("Int32", "ranged");
+    rtti->RegisterFunction(fLaserRangedWeaponState);
     auto fTrgMode = RED4ext::CGlobalFunction::Create("SetVRTriggerMode", "SetVRTriggerMode", &SetVRTriggerMode);
     fTrgMode->flags = flags; fTrgMode->AddParam("Int32","mode"); rtti->RegisterFunction(fTrgMode);
     auto fCamFreeze = RED4ext::CGlobalFunction::Create("SetVRCamBoneFreeze", "SetVRCamBoneFreeze", &SetVRCamBoneFreeze);

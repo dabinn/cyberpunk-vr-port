@@ -6,7 +6,6 @@
 // register rather than guessing what passes through it.
 #include <RED4ext/RED4ext.hpp>
 #include <RED4ext/GameEngine.hpp>
-#include <atomic>
 #include <sstream>
 #include <locale>
 #include <clocale>
@@ -56,8 +55,8 @@
 #include <windows.h>
 #include <algorithm>
 #include <cctype>
-#include <cmath>
 #include <cstring>
+#include <atomic>
 #include <cstdint>
 #include <fstream>
 #include <utility>
@@ -66,12 +65,15 @@
 #include <string>
 #include "Anim/VrikHook.hpp"
 #include "Anim/WeaponAim.hpp"
+#include "Core/VrCoreShared.hpp"
 #include "Natives/NativeState.hpp"
 #include "Natives/NativeHelpers.hpp"
 #include <MinHook.h>
 #include "Natives/NativeFunctions.hpp"
 #include "Natives/NativeHelpers.hpp"
 #include "Natives/NativeState.hpp"
+
+
 
 // ============================================================================
 // ORIENTATION-PROVIDER GetOrientation VMT INSTRUMENT (the user's "stand at the register" plan).
@@ -676,14 +678,11 @@ void SetVRMuzzleQuat(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*,
         g_pSharedHands[27] = 1.0f;  // valid
     }
 }
-
 // Publish CET's muzzle raycast result without performing a game-world query from Present. The
-// sequence brackets the hit and per-eye visibility stores so the render thread consumes one update.
+// sequence brackets hit XYZ/valid and both visibility bits so the render thread consumes one update.
 void SetVRBarrelRayHit(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t) {
     float x = 0.0f, y = 0.0f, z = 0.0f;
-    int32_t valid = 0;
-    int32_t mainVisible = 1;
-    int32_t secondVisible = 1;
+    int32_t valid = 0, mainVisible = 1, secondVisible = 1;
     RED4ext::GetParameter(aFrame, &x);
     RED4ext::GetParameter(aFrame, &y);
     RED4ext::GetParameter(aFrame, &z);
@@ -694,8 +693,6 @@ void SetVRBarrelRayHit(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void
     EnsureSharedMemory();
     if (!g_pSharedHands) return;
 
-    // Float retains exact integer values in this range. Bounding the counter keeps long sessions
-    // away from the 24-bit precision limit used by the shared-memory transport.
     static uint32_t s_evenSeq = 0;
     uint32_t nextEven = s_evenSeq + 2u;
     if (nextEven >= 1000000u) nextEven = 2u;
@@ -718,61 +715,59 @@ struct HitRepQueryState {
     bool initialized = false;
 };
 
-static bool HitRepMatchesBytes(const uint8_t* aAddress, const uint8_t* aExpected, size_t aCount) {
+static bool HitRepMatchesBytes(const uint8_t* address, const uint8_t* expected, size_t count) {
     __try {
-        if (!aAddress || !aExpected) return false;
-        for (size_t i = 0; i < aCount; ++i) {
-            if (aAddress[i] != aExpected[i]) return false;
-        }
+        if (!address || !expected) return false;
+        for (size_t i = 0; i < count; ++i) if (address[i] != expected[i]) return false;
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
 }
 
-static void QueryHitRepSurfaceNative(RED4ext::game::HitRepresentationComponent* aComponent,
-                                     const RED4ext::Vector4* aFrom,
-                                     const RED4ext::Vector4* aTo,
-                                     HitRepQueryState* aState) {
-    if (!aComponent || !aFrom || !aTo || !aState) return;
+static void QueryHitRepSurfaceNative(RED4ext::game::HitRepresentationComponent* component,
+                                     const RED4ext::Vector4* from,
+                                     const RED4ext::Vector4* to,
+                                     HitRepQueryState* state) {
+    if (!component || !from || !to || !state) return;
     __try {
         const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"Cyberpunk2077.exe"));
-        if (!base) { aState->status = -1; return; }
+        if (!base) { state->status = -1; return; }
+        // CP2077 2.3x signatures used by the TE6 implementation. Refuse the call if a game update
+        // moved either routine; a disabled NPC surface query is safer than calling a guessed RVA.
         static constexpr uint8_t kQueryBytes[] = {0x48, 0x8B, 0xC4, 0x53};
         static constexpr uint8_t kResultCtorBytes[] = {0x83, 0x61, 0x08, 0x00};
         if (!HitRepMatchesBytes(reinterpret_cast<const uint8_t*>(base + 0x8BB428),
-                kQueryBytes, sizeof(kQueryBytes)) ||
+                               kQueryBytes, sizeof(kQueryBytes)) ||
             !HitRepMatchesBytes(reinterpret_cast<const uint8_t*>(base + 0x8BA038),
-                kResultCtorBytes, sizeof(kResultCtorBytes))) {
-            aState->status = -3;
+                               kResultCtorBytes, sizeof(kResultCtorBytes))) {
+            state->status = -3;
             return;
         }
         const auto initResult = reinterpret_cast<void (*)(RED4ext::game::QueryResult*)>(base + 0x8BA038);
         const auto query = reinterpret_cast<bool (*)(RED4ext::game::HitRepresentationComponent*,
-            const float*, const float*, RED4ext::game::QueryResult*, void*)>(
-                base + 0x8BB428);
-        initResult(&aState->result);
-        aState->initialized = true;
-        aState->status = query(aComponent, &aFrom->X, &aTo->X, &aState->result, nullptr) ? 1 : 2;
+            const float*, const float*, RED4ext::game::QueryResult*, void*)>(base + 0x8BB428);
+        initResult(&state->result);
+        state->initialized = true;
+        state->status = query(component, &from->X, &to->X, &state->result, nullptr) ? 1 : 2;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        aState->status = -2;
+        state->status = -2;
     }
 }
 
-static void DestroyHitRepQuery(HitRepQueryState* aState) {
-    if (!aState || !aState->initialized) return;
+static void DestroyHitRepQuery(HitRepQueryState* state) {
+    if (!state || !state->initialized) return;
     __try {
         const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"Cyberpunk2077.exe"));
         if (!base) return;
         const auto destroyResult = reinterpret_cast<void (*)(RED4ext::game::QueryResult*)>(base + 0x8B9F40);
-        destroyResult(&aState->result);
+        destroyResult(&state->result);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
 
-// Return the closest official animated HitRepresentation surface on one candidate NPC. W<=0 is a
-// miss; W=1 is a current-frame hit. Candidate selection remains script-side, while this function
-// only intersects the exact same muzzle ray with the entity's live shapes.
+// Return the closest animated HitRepresentation surface on one candidate NPC. W<=0 is a miss;
+// candidate collection/deduplication stays in redscript so this native only intersects live shapes.
 void QueryVRNpcHitSurface(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame,
                           RED4ext::Vector4* aOut, int64_t) {
     RED4ext::Handle<RED4ext::IScriptable> entityHandle;
@@ -782,10 +777,7 @@ void QueryVRNpcHitSurface(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame,
     RED4ext::GetParameter(aFrame, &to);
     aFrame->code++;
     if (!aOut) return;
-    aOut->X = 0.0f;
-    aOut->Y = 0.0f;
-    aOut->Z = 0.0f;
-    aOut->W = 0.0f;
+    aOut->X = aOut->Y = aOut->Z = aOut->W = 0.0f;
 
     auto* entity = reinterpret_cast<RED4ext::ent::Entity*>(entityHandle.instance);
     if (!entity) return;
@@ -806,9 +798,7 @@ void QueryVRNpcHitSurface(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame,
                 const auto& position = hit.result.hitPositionEnter;
                 if (!std::isfinite(distanceSq) || distanceSq < 0.0f ||
                     !std::isfinite(position.X) || !std::isfinite(position.Y) ||
-                    !std::isfinite(position.Z) || distanceSq >= bestDistanceSq) {
-                    continue;
-                }
+                    !std::isfinite(position.Z) || distanceSq >= bestDistanceSq) continue;
                 bestDistanceSq = distanceSq;
                 aOut->X = position.X;
                 aOut->Y = position.Y;
@@ -818,6 +808,17 @@ void QueryVRNpcHitSurface(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame,
         }
         DestroyHitRepQuery(&queryState);
     }
+}
+
+// Laser eligibility is deliberately separate from generic weapon state. A melee weapon is still a
+// weapon for animation/input ownership but must never qualify a firearm aiming aid. Timestamping
+// makes the state fail closed when CET stops ticking during loads.
+void SetVRLaserRangedWeaponState(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void*, int64_t) {
+    int32_t value = 0;
+    RED4ext::GetParameter(aFrame, &value);
+    aFrame->code++;
+    g_laserRangedWeaponActive.store(value != 0 ? 1 : 0, std::memory_order_relaxed);
+    g_laserRangedWeaponUpdatedMs.store(GetTickCount64(), std::memory_order_relaxed);
 }
 
 // Publish the current ADS/scope zoom factor to shared[28] so the dxgi overlay can scale the
@@ -1134,3 +1135,4 @@ void ResetVRProvCounts(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, void
     g_provOverrides = 0;
     for (int i = 0; i < 4; ++i) { g_provLastQ[i]=0; g_provOrigQ[i]=0; g_provCtrlQ[i]=0; g_provHmdQ[i]=0; }
 }
+
