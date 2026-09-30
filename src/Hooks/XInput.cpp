@@ -1114,10 +1114,9 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     float ry=analogMovement?cvr::input::AnalogAxis(vr.rightThumbY,g_liveControls.xrRightStickDeadzone,fullInput):legacyRy;
 
     // Right stick pushed near FULL down => CROUCH. Same bind as the right-stick click
-    // (R3) used today; we assert R3 while the stick is held fully down and consume the
-    // downward Y so it doesn't also drive camera pitch. Detected here, before the snap
-    // turn block may zero ry, so it works regardless of the turn mode.
-    // CROUCH IS THIS, AND ONLY THIS, since the click became the slide release: the stick past 0.90 down.
+    // (R3) used today; we assert R3 while the stick reaches the configured full-travel
+    // threshold. The gesture leaves analog Y available for camera pitch when enabled.
+    // CROUCH IS THIS, AND ONLY THIS, since the click became the slide release.
     // ON FOOT ONLY, for the same reason the dash below is: crouching means nothing in a car, and
     // R3 there is VehicleInverseCameraToggle_Button -- so the right stick pushed down was
     // flipping the driving camera. Found while fixing the exit button; same family of bug.
@@ -1125,8 +1124,8 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     //
     // The game scrolls a device screen -- a computer's message list, a terminal -- with
     // UI_MoveY_Axis, and its own r6\config\inputUserMappings.xml binds that to IK_Pad_RightAxisY
-    // and to nothing else. Three things here were eating exactly that: the crouch gesture and the
-    // dash gesture each consume their half of the axis, and xr_disable_mouse_y zeroes it outright
+    // and to nothing else. The original crouch and dash gestures used to consume their half of
+    // this axis, while xr_disable_mouse_y still zeroes it outright
     // for anyone who wants pitch from the headset only -- which is the shipped setting. So on a
     // computer the list could not be scrolled at all, and pushing the stick to read it dodged or
     // crouched instead.
@@ -1180,17 +1179,15 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     const bool disableRsDashCrouch=classicGeneralContext && g_liveControls.xrClassicDisableRsDashCrouch!=0;
     const bool wantCrouch = !disableRsDashCrouch && fullDown && !inWater && !g_isInVehicle && !deviceScreen && !scannerHold
                             && !DeviceCamActive();   // in a camera the stick aims the camera
-    if (wantCrouch) ry = 0.0f;
 
     // Right stick pushed near FULL UP => DASH (the game's Dodge_Button, pad B). The mirror image of
-    // the crouch gesture above, in every respect: same 0.90 threshold, detected here BEFORE the pitch
-    // suppression so it works whichever way "Disable Mouse Y" is set, and its half of the axis is
-    // consumed so a dash never also pitches the camera.
+    // the crouch gesture above: it uses the same full-travel threshold and is detected before pitch
+    // suppression so it works whichever way "Disable Mouse Y" is set. Like crouch, it leaves analog Y intact.
     //
     // DASH LIVES HERE AND NOT ON A. A is Jump_Button and carries three things already -- jump, the
     // double jump, and Charge Jump on the hold -- so a tap/hold split there has to spend one of them:
     // either the jump moves to the release (late, and the charge can never charge) or the jump always
-    // fires first and the dash is mid-air only. This half of this axis was doing nothing.
+    // fires first and the dash is mid-air only.
     //
     // EDGE-TRIGGERED, with the same re-arm rule the snap turn uses: the stick must come back before
     // another dash can fire, so holding it up dodges exactly once. The direction is the LEFT stick's,
@@ -1223,7 +1220,6 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
             s_dashUntilMs = 0;
         }
     }
-    if (!scannerHold && !disableRsDashCrouch && fullUp && !deviceScreen) ry = 0.0f;   // consumed, exactly as the crouch half is
 
     // Suppress pitch from the stick if the user wants HMD-only pitch.
     // ...but never on a device screen: there this axis is not camera pitch at all, it is the
