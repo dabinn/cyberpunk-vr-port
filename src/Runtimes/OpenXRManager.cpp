@@ -483,7 +483,7 @@ void OpenXRManager::MaybeLogRuntimeFovDetails(const XrFovf& left, const XrFovf& 
 
 // [ExtrapolatePose / RotateVector moved to openxr_math.h (inline)]
 
-// [ContainsSwapchainFormat / PickMonoSwapchainFormat moved to openxr_internal.h (inline)]
+// Swapchain color-format selection lives in OpenXRSwapchainFormat.hpp.
 
 // [ApplyForcedProjectionFov moved to openxr_internal.h (inline)]
 

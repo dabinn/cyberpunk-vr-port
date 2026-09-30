@@ -15,6 +15,7 @@
 #include <vector>
 #include "Utils/XrMath.hpp"              // XR types + quaternion math (used by the cant helpers)
 #include "Runtimes/RuntimeFovCorrection.hpp"   // ComputeRuntimeFovCorrection for cant/FOV helpers
+#include "Runtimes/OpenXRSwapchainFormat.hpp"
 
 // The central logger is defined in vr_core.cpp; every TU forward-declares it.
 extern void Log(const char* fmt, ...);
@@ -175,65 +176,3 @@ inline XrFovf ApplyForcedProjectionFov(const XrFovf& sourceFov, const XrFovf* pa
 }
 
 // ---- mono swapchain format pick (were file-scope static in openxr_manager.cpp) ----
-inline bool ContainsSwapchainFormat(const std::vector<int64_t>& formats, int64_t candidate) {
-    for (const int64_t format : formats) {
-        if (format == candidate) {
-            return true;
-        }
-    }
-    return false;
-}
-
-inline int64_t PickMonoSwapchainFormat(const std::vector<int64_t>& runtimeFormats, int64_t gameFormat, bool preferSrgbForVD) {
-    // VirtualDesktopXR honors the swapchain format strictly: a UNORM swapchain
-    // is treated as linear data, so the compositor applies an extra sRGB
-    // encode → washed-out / overbright look that the user reported. SteamVR
-    // historically treats UNORM as already-sRGB display data and doesn't apply
-    // the extra encode, which is why colors look "normal" there. CP2077's
-    // backbuffer is already tonemapped sRGB-encoded bytes despite being typed
-    // R8G8B8A8_UNORM, so a UNORM_SRGB swapchain views the same bits as sRGB
-    // and the runtime skips the redundant encode. Direction confirmed by an
-    // external VR modder consulted by the user.
-    if (preferSrgbForVD) {
-        if (gameFormat == static_cast<int64_t>(DXGI_FORMAT_R8G8B8A8_UNORM) &&
-            ContainsSwapchainFormat(runtimeFormats, static_cast<int64_t>(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB))) {
-            return static_cast<int64_t>(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
-        }
-        if (gameFormat == static_cast<int64_t>(DXGI_FORMAT_B8G8R8A8_UNORM) &&
-            ContainsSwapchainFormat(runtimeFormats, static_cast<int64_t>(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB))) {
-            return static_cast<int64_t>(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
-        }
-    }
-    if (ContainsSwapchainFormat(runtimeFormats, gameFormat)) {
-        return gameFormat;
-    }
-
-    // Prefer bit-compatible sRGB companions before falling back to unrelated
-    // formats. SteamVR commonly advertises R8G8B8A8_UNORM_SRGB (29) but not
-    // R8G8B8A8_UNORM (28); picking 16-bit float there caused a blank HMD
-    // because our submit path is a straight resource copy, not a format-convert
-    // blit.
-    if (gameFormat == static_cast<int64_t>(DXGI_FORMAT_R8G8B8A8_UNORM) &&
-        ContainsSwapchainFormat(runtimeFormats, static_cast<int64_t>(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB))) {
-        return static_cast<int64_t>(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
-    }
-    if (gameFormat == static_cast<int64_t>(DXGI_FORMAT_B8G8R8A8_UNORM) &&
-        ContainsSwapchainFormat(runtimeFormats, static_cast<int64_t>(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB))) {
-        return static_cast<int64_t>(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
-    }
-
-    const int64_t preferredFormats[] = {
-        static_cast<int64_t>(DXGI_FORMAT_R8G8B8A8_UNORM),
-        static_cast<int64_t>(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB),
-        static_cast<int64_t>(DXGI_FORMAT_B8G8R8A8_UNORM),
-        static_cast<int64_t>(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB),
-        static_cast<int64_t>(DXGI_FORMAT_R16G16B16A16_FLOAT)
-    };
-    for (const int64_t preferred : preferredFormats) {
-        if (ContainsSwapchainFormat(runtimeFormats, preferred)) {
-            return preferred;
-        }
-    }
-
-    return runtimeFormats.empty() ? gameFormat : runtimeFormats[0];
-}

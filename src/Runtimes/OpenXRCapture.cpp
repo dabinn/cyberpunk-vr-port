@@ -1293,10 +1293,21 @@ bool OpenXRManager::EnsureMonoSubmitResources() {
         return false;
     }
 
-    const int64_t selectedFormat = PickMonoSwapchainFormat(
-        runtimeFormats,
-        static_cast<int64_t>(format),
-        IsRuntimeVirtualDesktop());
+    const auto formatSelection = cvr::openxr::PickSwapchainFormat(
+        runtimeFormats, static_cast<DXGI_FORMAT>(format));
+    if (formatSelection.format == DXGI_FORMAT_UNKNOWN) {
+        Log("OpenXRManager: no compatible sRGB or UNORM swapchain format for source=%u\n", format);
+        return false;
+    }
+    const int64_t selectedFormat = static_cast<int64_t>(formatSelection.format);
+    if (formatSelection.decodeSrgbToLinear) {
+        if (!m_srgbToLinearPass) m_srgbToLinearPass = std::make_unique<SrgbToLinearPass>();
+        if (!m_srgbToLinearPass->EnsureInitialized(m_d3dDevice, formatSelection.format, width, height)) {
+            Log("OpenXRManager: failed to initialize sRGB-to-linear UNORM fallback\n");
+            return false;
+        }
+    }
+    m_decodeSrgbForUnormSwapchain = formatSelection.decodeSrgbToLinear;
 
     // Pick a runtime-supported depth format ONLY AFTER the game's scene depth resource
     // has been pinned. This remains intentionally conservative: only the R32-family
@@ -1380,6 +1391,7 @@ bool OpenXRManager::EnsureMonoSubmitResources() {
     const bool colorResourcesReady = !m_eyeSwapchains.empty() &&
         m_eyeSwapchains[0].width == static_cast<int32_t>(width) &&
         m_eyeSwapchains[0].height == static_cast<int32_t>(height) &&
+        m_eyeViewFmt.load(std::memory_order_acquire) == static_cast<uint32_t>(selectedFormat) &&
         m_cmdAllocators[0] && m_cmdLists[0] && m_fence && m_fenceEvent;
     if (colorResourcesReady && (!wantDepthSwapchains || haveDepthSwapchains)) {
         return true;
@@ -1548,7 +1560,9 @@ bool OpenXRManager::EnsureMonoSubmitResources() {
     m_depthSwapchainFormat = selectedDepthFormat;
 
     char formatSummary[512] = {};
-    int summaryPos = sprintf_s(formatSummary, "OpenXRManager: Mono swapchain formats. game=%u selected=%lld runtime:", format, selectedFormat);
+    int summaryPos = sprintf_s(formatSummary,
+        "OpenXRManager: Mono swapchain formats. game=%u selected=%lld srgbDecode=%d runtime:",
+        format, selectedFormat, formatSelection.decodeSrgbToLinear ? 1 : 0);
     if (summaryPos > 0) {
         for (uint32_t i = 0; i < runtimeFormatCount && summaryPos > 0 && summaryPos < static_cast<int>(sizeof(formatSummary) - 32); ++i) {
             summaryPos += sprintf_s(formatSummary + summaryPos, sizeof(formatSummary) - summaryPos, " %lld", runtimeFormats[i]);

@@ -18,6 +18,7 @@
 
 #include "Render/DepthResolve.hpp"
 #include "Render/SharpenPass.hpp"
+#include "Render/SrgbToLinearPass.hpp"
 #include "Render/ColorBlit.hpp"
 #include "Runtimes/HudQuad.hpp"
 #include "Runtimes/RoomscaleMovement.hpp"
@@ -1239,6 +1240,8 @@ private:
     // image is written to the swapchain when xr_sharpness > 0.
     std::unique_ptr<SharpenPass> m_sharpenPass;
     bool m_sharpenReady = false;
+    std::unique_ptr<SrgbToLinearPass> m_srgbToLinearPass;
+    bool m_decodeSrgbForUnormSwapchain = false;
 
     // Reuse-last-frame path: persistent "last good" eye images + their pose/fov.
     // On a stale tick we re-present these with the stashed pose so the runtime

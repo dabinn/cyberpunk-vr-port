@@ -2152,9 +2152,10 @@ DWORD OpenXRManager::FrameThreadMain() {
                         // monoSource is always COMMON here (no synth scratch in mono).
                         const float monoSharp = GetVrSharpness();
                         bool doMonoSharpen = false;
+                        bool didColorConvert = false;
                         // DISABLED: in-submit CAS GPU-crashes; needs an
                         // SRV scratch rework before re-enabling.
-                        if (false && monoSharp > 0.0001f && m_d3dDevice && texture && monoSource) {
+                        if (!m_decodeSrgbForUnormSwapchain && false && monoSharp > 0.0001f && m_d3dDevice && texture && monoSource) {
                             if (!m_sharpenPass) m_sharpenPass = std::make_unique<SharpenPass>();
                             const D3D12_RESOURCE_DESC sd = texture->GetDesc();
                             m_sharpenReady = m_sharpenPass->EnsureInitialized(
@@ -2213,6 +2214,43 @@ DWORD OpenXRManager::FrameThreadMain() {
                             post[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
                             post[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
                             m_cmdList->ResourceBarrier(2, post);
+                        } else if (m_decodeSrgbForUnormSwapchain && m_srgbToLinearPass) {
+                            ID3D12Resource* eyeSource = fgSelected
+                                ? fgSelection.frame.color[eye]
+                                : ((eye == (CyberpunkVR_MainIsRightEye ? 0u : 1u) && vrcamEye)
+                                    ? vrcamEye : monoSource);
+                            if (!eyeSource) {
+                                copyReady = false;
+                                break;
+                            }
+
+                            D3D12_RESOURCE_BARRIER toShaderRead{};
+                            toShaderRead.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                            toShaderRead.Transition.pResource = eyeSource;
+                            toShaderRead.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                            toShaderRead.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                            toShaderRead.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                            m_cmdList->ResourceBarrier(1, &toShaderRead);
+
+                            const bool decoded = m_srgbToLinearPass->Record(
+                                m_cmdList, eyeSource, texture, m_cmdAllocatorIndex * 2 + eye);
+
+                            D3D12_RESOURCE_BARRIER toCopySource{};
+                            toCopySource.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                            toCopySource.Transition.pResource = eyeSource;
+                            toCopySource.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                            toCopySource.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                            toCopySource.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                            m_cmdList->ResourceBarrier(1, &toCopySource);
+
+                            if (!decoded) {
+                                Log("OpenXRManager: sRGB-to-linear submit failed for eye %u\n", eye);
+                                copyReady = false;
+                                break;
+                            }
+                            didColorConvert = true;
+                            if (eye == (CyberpunkVR_MainIsRightEye ? 0u : 1u) && vrcamEye)
+                                CVR_DIAGNOSTIC(++CyberpunkVR_DebugStereoEyeSubmits);
                         } else if (eye == (CyberpunkVR_MainIsRightEye ? 0u : 1u) && vrcamEye) {
                             {
                                 // Identical in shape to the MAIN branch below -- both operands
@@ -2240,7 +2278,7 @@ DWORD OpenXRManager::FrameThreadMain() {
                                 CVR_DIAGNOSTIC(++CyberpunkVR_DebugStereoEyeSubmits);
                             }
                         }
-                        if (!(doMonoSharpen ||
+                        if (!(doMonoSharpen || didColorConvert ||
                               (eye == (CyberpunkVR_MainIsRightEye ? 0u : 1u) && vrcamEye))) {
                             D3D12_RESOURCE_BARRIER toCopyDest{};
                             toCopyDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;

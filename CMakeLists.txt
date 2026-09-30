@@ -172,6 +172,17 @@ if(MSVC)
     target_compile_options(classic_controller_mapping_tests PRIVATE /W4 /permissive- /EHsc)
 endif()
 
+add_executable(openxr_swapchain_format_tests EXCLUDE_FROM_ALL
+    tests/OpenXRSwapchainFormatTests.cpp
+)
+target_compile_features(openxr_swapchain_format_tests PRIVATE cxx_std_20)
+target_compile_definitions(openxr_swapchain_format_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(openxr_swapchain_format_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(openxr_swapchain_format_tests PRIVATE d3d12.lib dxgi.lib)
+if(MSVC)
+    target_compile_options(openxr_swapchain_format_tests PRIVATE /W4 /permissive- /EHsc)
+endif()
+
 # ============================================================================================
 # Tools. Separate targets, never deployed with the plugin.
 # ============================================================================================
