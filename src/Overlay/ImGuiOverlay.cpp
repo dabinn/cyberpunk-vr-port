@@ -6,6 +6,7 @@
 #include "Overlay/VrDraw.hpp"
 #include "Overlay/VrImGuiInput.hpp"
 #include "Runtimes/OpenXRManager.hpp"
+#include "Render/DesktopMirror.hpp"
 
 #include <algorithm>
 #include <cfloat>
@@ -503,9 +504,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 int oldX = x;
                 int oldY = y;
                 
-                if (winWidth > 0 && winHeight > 0 && (winWidth != static_cast<int>(virtualWidth) || winHeight != static_cast<int>(virtualHeight))) {
-                    x = (x * static_cast<int>(virtualWidth)) / winWidth;
-                    y = (y * static_cast<int>(virtualHeight)) / winHeight;
+                DesktopCoverTransform cover{};
+                if (winWidth > 0 && winHeight > 0 && ComputeDesktopCoverTransform(
+                        virtualWidth, virtualHeight, static_cast<UINT>(winWidth),
+                        static_cast<UINT>(winHeight), cover)) {
+                    x = static_cast<int>(std::lround(cover.sourceX + x * cover.sourceWidth / winWidth));
+                    y = static_cast<int>(std::lround(cover.sourceY + y * cover.sourceHeight / winHeight));
                     
                     lParam = MAKELPARAM(static_cast<WORD>(x), static_cast<WORD>(y));
                 }
@@ -536,11 +540,23 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if(msg==WM_MOUSEMOVE || msg==WM_LBUTTONDOWN || msg==WM_LBUTTONDBLCLK || msg==WM_LBUTTONUP || msg==WM_MOUSEWHEEL || msg==WM_MOUSEHWHEEL){
             const float width=g_desktopWidth.load(),height=g_desktopHeight.load();
             const auto rect=cvr::vrui::DesktopPlacement(width,height);
-            RECT client{};GetClientRect(hwnd,&client);
+            RECT client{};POINT clientOrigin{};
+            if(!GetDesktopPhysicalClientRect(hwnd,client,clientOrigin))GetClientRect(hwnd,&client);
             POINT position{LONG(clientMouseX),LONG(clientMouseY)};
             if(msg==WM_MOUSEWHEEL || msg==WM_MOUSEHWHEEL)ScreenToClient(hwnd,&position);
-            const float x=(position.x*width/std::max(1L,client.right-client.left)-rect.x)/rect.scale;
-            const float y=(position.y*height/std::max(1L,client.bottom-client.top)-rect.y)/rect.scale;
+            DesktopCoverTransform cover{};
+            const LONG clientW=std::max(1L,client.right-client.left);
+            const LONG clientH=std::max(1L,client.bottom-client.top);
+            const bool cropped=ComputeDesktopCoverTransform(
+                static_cast<UINT>(width),static_cast<UINT>(height),
+                static_cast<UINT>(clientW),static_cast<UINT>(clientH),cover);
+            const auto placement=cropped
+                ? cvr::vrui::DesktopPlacement(float(cover.sourceWidth),float(cover.sourceHeight))
+                : rect;
+            const float x=(position.x*float(cropped ? cover.sourceWidth : width)/clientW-
+                placement.x)/placement.scale;
+            const float y=(position.y*float(cropped ? cover.sourceHeight : height)/clientH-
+                placement.y)/placement.scale;
             const auto now=GetTickCount64();
             std::lock_guard pointerLock(g_desktopPointerMutex);
             if(msg==WM_LBUTTONDOWN || msg==WM_LBUTTONDBLCLK || msg==WM_LBUTTONUP)
@@ -754,7 +770,16 @@ void OverlayRenderDesktop(IDXGISwapChain* swapChain) {
     barrier.Transition={frame.renderTarget,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET};
     g_cmdList->ResourceBarrier(1,&barrier);g_cmdList->OMSetRenderTargets(1,&frame.rtv,FALSE,nullptr);
     ID3D12DescriptorHeap* heaps[]={g_srvHeap};g_cmdList->SetDescriptorHeaps(1,heaps);
-    {cvr::vrui::DesktopDraw desktop(*draw,w,h);ImGui_ImplDX12_RenderDrawData(draw,g_cmdList);}
+    cvr::vrui::DesktopRect placement=cvr::vrui::DesktopPlacement(w,h);
+    RECT client{};POINT origin{};DesktopCoverTransform cover{};
+    if(GetDesktopPhysicalClientRect(g_hwnd,client,origin) &&
+        ComputeDesktopCoverTransform(static_cast<UINT>(w),static_cast<UINT>(h),
+            static_cast<UINT>(std::max(0L,client.right-client.left)),
+            static_cast<UINT>(std::max(0L,client.bottom-client.top)),cover)){
+        placement=cvr::vrui::DesktopPlacement(float(cover.sourceWidth),float(cover.sourceHeight));
+        placement.x+=float(cover.sourceX);placement.y+=float(cover.sourceY);
+    }
+    {cvr::vrui::DesktopDraw desktop(*draw,w,h,placement);ImGui_ImplDX12_RenderDrawData(draw,g_cmdList);}
     std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);g_cmdList->ResourceBarrier(1,&barrier);
     if(FAILED(g_cmdList->Close()))return;
     ID3D12CommandList* lists[]={g_cmdList};g_queue->ExecuteCommandLists(1,lists);

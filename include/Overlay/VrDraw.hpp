@@ -13,9 +13,10 @@ class DesktopDraw {
         }
     }
 public:
-    DesktopDraw(ImDrawData& d,float w,float h):data(d),rect(DesktopPlacement(w,h)),pos(d.DisplayPos),size(d.DisplaySize),scale(d.FramebufferScale){
+    DesktopDraw(ImDrawData& d,float w,float h,DesktopRect placement):data(d),rect(placement),pos(d.DisplayPos),size(d.DisplaySize),scale(d.FramebufferScale){
         Transform(rect.scale,rect.x,rect.y);data.DisplayPos={0,0};data.DisplaySize={w,h};data.FramebufferScale={1,1};
     }
+    DesktopDraw(ImDrawData& d,float w,float h):DesktopDraw(d,w,h,DesktopPlacement(w,h)){}
     ~DesktopDraw(){Transform(1/rect.scale,-rect.x/rect.scale,-rect.y/rect.scale);data.DisplayPos=pos;data.DisplaySize=size;data.FramebufferScale=scale;}
 };
 }

@@ -17,7 +17,11 @@ public:
 
     bool RecordBlit(ID3D12GraphicsCommandList* cmdList,
                     ID3D12Resource* srcColor,
-                    ID3D12Resource* dstColor);
+                    ID3D12Resource* dstColor,
+                    float u0 = 0.0f,
+                    float v0 = 0.0f,
+                    float u1 = 1.0f,
+                    float v1 = 1.0f);
 
     // Alpha-blend an overlay over what is already in dstColor, which must be in RENDER_TARGET.
     // The source is expected to carry PREMULTIPLIED alpha -- the blend is ONE / INV_SRC_ALPHA,
