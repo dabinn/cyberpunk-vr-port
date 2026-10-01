@@ -18,9 +18,12 @@ inline float AnalogAxis(float value,float deadzone,float fullInput) {
     if(magnitude<=deadzone)return 0;
     return std::copysign(std::min(1.f,(magnitude-deadzone)/(fullInput-deadzone)),value);
 }
+// This controls on-foot locomotion magnitude only. Stick response tuning is
+// independent and still applies in fixed-speed and vehicle contexts.
 inline bool UseAnalogMovement(int mode,bool vehicle) {return mode==1 && !vehicle;}
-// The caller supplies raw travel in analog mode and the legacy deadzoned axis
-// in fixed mode. Scanner ownership can zero that value before testing it.
+// Raw-travel callers use analog=true so the configured outer threshold remains
+// independent of movement-speed policy. The false branch preserves the legacy
+// 0.90 rule for any explicitly legacy caller.
 inline bool AtFullTravel(float value,bool analog,float fullInput,bool negative=false) {
     if(!std::isfinite(value))return false;
     if(negative)value=-value;

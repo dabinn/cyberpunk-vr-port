@@ -1032,16 +1032,14 @@ bool DrawLiveControls(LiveControlsUiState& state,int section) {
             ImGui::TextUnformatted("Locomotion direction");
             bool analogMovement=state.xrMovementSpeedMode==1;
             if(ImGui::Checkbox("Analog movement",&analogMovement)) {state.xrMovementSpeedMode=analogMovement?1:0;changed=true;}
-            if(ImGui::IsItemHovered())ImGui::SetTooltip("On: speed follows left-stick travel. Off: the current fixed-speed movement (default).\nVehicle controls keep their existing response.");
-            ImGui::BeginDisabled(!analogMovement);
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("On: on-foot speed follows left-stick travel. Off: movement uses the current fixed-speed policy (default).\nStick deadzones and full-input tuning below apply in both modes and while driving.");
             int leftDeadzone=int(state.xrLeftStickDeadzone*100+.5f);
             int rightDeadzone=int(state.xrRightStickDeadzone*100+.5f);
             int fullInput=int(state.xrMaxInputThreshold*100+.5f);
             if(widgets::SliderInt("Left stick deadzone",&leftDeadzone,0,30,"%d%%")){state.xrLeftStickDeadzone=leftDeadzone*.01f;changed=true;}
             if(widgets::SliderInt("Right stick deadzone",&rightDeadzone,0,30,"%d%%")){state.xrRightStickDeadzone=rightDeadzone*.01f;changed=true;}
             if(widgets::SliderInt("Full input threshold",&fullInput,80,100,"%d%%")){state.xrMaxInputThreshold=fullInput*.01f;changed=true;}
-            if(ImGui::IsItemHovered())ImGui::SetTooltip("Raw travel that produces full analog input and activates sprint, dash and crouch.\nThe usable travel between the deadzone and this threshold maps to 0-100%%.");
-            ImGui::EndDisabled();
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("Raw travel that produces full stick output and activates sprint, dash and crouch.\nThe usable travel between each stick's deadzone and this threshold maps to 0-100%%.\nScanner and Snap Turn keep their own legacy thresholds.");
             const char* moveSrcNames[] = { "Game (camera)", "HMD (head)", "Left hand", "Right hand" };
             int moveSrc = state.xrMovementSource;
             if (moveSrc < 0 || moveSrc > 3) moveSrc = state.xrMovementControl != 0 ? 1 : 0;

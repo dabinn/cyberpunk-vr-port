@@ -777,14 +777,15 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // the left hand at the ear and the other wants it at the weapon, so they cannot both be true.
     if (scannerRemapActive && CyberpunkVR_ScannerTriggerTag != 0) pState->Gamepad.bRightTrigger = 0;
 
-    // Left stick = locomotion (always merged when magnitude exceeds the
-    // physical pad's so the game uses our values).
+    // Stick response tuning is independent of locomotion speed policy. Both
+    // Fixed and Analog movement, plus vehicle input, use the configured centre
+    // deadzone and outer full-input point. Only the on-foot magnitude policy
+    // below decides whether left-stick travel remains analog.
     const bool analogMovement=cvr::input::UseAnalogMovement(g_liveControls.xrMovementSpeedMode,g_isInVehicle);
     const float fullInput=cvr::input::StickFullInput(g_liveControls.xrMaxInputThreshold);
     const float scannerLy=ApplyStickDeadzone(vr.leftThumbY,0.12f);
-    float lx=analogMovement?cvr::input::AnalogAxis(vr.leftThumbX,g_liveControls.xrLeftStickDeadzone,fullInput)
-                           :ApplyStickDeadzone(vr.leftThumbX,0.12f);
-    float ly=analogMovement?cvr::input::AnalogAxis(vr.leftThumbY,g_liveControls.xrLeftStickDeadzone,fullInput):scannerLy;
+    float lx=cvr::input::AnalogAxis(vr.leftThumbX,g_liveControls.xrLeftStickDeadzone,fullInput);
+    float ly=cvr::input::AnalogAxis(vr.leftThumbY,g_liveControls.xrLeftStickDeadzone,fullInput);
 
     // HOW FAR THE STICK IS ACTUALLY PUSHED, kept before the quantiser below rewrites it. The gesture
     // that means "to the stop" -- the sprint detent further down -- has to read the player's own
@@ -833,7 +834,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         if (navDir != 0) ly = 0.0f;   // at the stop the axis is the list's, not the legs'
     }
 
-    const float lyDetent = ly==0 ? 0 : (analogMovement?vr.leftThumbY:ly);
+    const float lyDetent = ly==0 ? 0 : vr.leftThumbY;
 
     // ONE SPEED PER PUSH. The pad's analogue magnitude is the odd one out in this game: the keyboard
     // binds the same axis at val="1.0", so W runs, sprint is its own key and walk is its own toggle. A
@@ -1032,7 +1033,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         // puts the old outright block back.
         const bool crouchBlocks = (CyberpunkVR_SprintFromCrouch == 0) && crouched;
 
-        const bool fullForward=cvr::input::AtFullTravel(lyDetent,analogMovement,fullInput);
+        const bool fullForward=cvr::input::AtFullTravel(lyDetent,true,fullInput);
         const bool disableLsSprint=classicGeneralContext && g_liveControls.xrClassicDisableLsSprint!=0;
         const bool detent = !disableLsSprint && fullForward && !g_isInVehicle && !crouchBlocks;
         if (detent) s_detentMs += dtMs; else s_detentMs = 0.0;
@@ -1107,11 +1108,13 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         g_sprintInputActive = (sfPub >= 0) ? (sfPub != 0) : wantSprint;
     }
 
-    // Right stick = camera turn / pitch.
+    // Right-stick output uses the same independent response tuning. Legacy
+    // copies stay available for Scanner and Snap Turn, whose private thresholds
+    // must not move when the player changes deadzone/full-input settings.
     const float legacyRx=ApplyStickDeadzone(vr.rightThumbX,.18f);
     const float legacyRy=ApplyStickDeadzone(vr.rightThumbY,.18f);
-    float rx=analogMovement?cvr::input::AnalogAxis(vr.rightThumbX,g_liveControls.xrRightStickDeadzone,fullInput):legacyRx;
-    float ry=analogMovement?cvr::input::AnalogAxis(vr.rightThumbY,g_liveControls.xrRightStickDeadzone,fullInput):legacyRy;
+    float rx=cvr::input::AnalogAxis(vr.rightThumbX,g_liveControls.xrRightStickDeadzone,fullInput);
+    float ry=cvr::input::AnalogAxis(vr.rightThumbY,g_liveControls.xrRightStickDeadzone,fullInput);
 
     // Right stick pushed near FULL down => CROUCH. Same bind as the right-stick click
     // (R3) used today; we assert R3 while the stick reaches the configured full-travel
@@ -1144,6 +1147,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     // THE SCANNER'S ZOOM TAKES THE RIGHT STICK, and it takes it here -- before the crouch, the dash,
     // the pitch suppression and the snap turn, all of which read this same axis below. Consuming rx/ry
     // is what keeps the gesture from squatting the player or dodging while a zoom is being nudged.
+    bool scannerZoomOwnsRightStick = false;
     {
         static bool     s_ltZoomWas   = false;
         static uint64_t s_nextStepMs  = 0;
@@ -1155,6 +1159,7 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         const bool armed = scannerRemapActive && (CyberpunkVR_ScannerZoom != 0) && ltDown
                            && !g_isInVehicle && (g_menuModeValue == 0);
         if (armed) {
+            scannerZoomOwnsRightStick = true;
             float th = CyberpunkVR_ScannerZoomStick;
             if (!(th > 0.05f) || th > 1.0f) th = 0.50f;
             const int32_t rep = (CyberpunkVR_ScannerZoomRepeatMs > 0)
@@ -1174,8 +1179,8 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
         }
     }
 
-    const bool fullDown=cvr::input::AtFullTravel(analogMovement?vr.rightThumbY:ry,analogMovement,fullInput,true);
-    const bool fullUp=cvr::input::AtFullTravel(analogMovement?vr.rightThumbY:ry,analogMovement,fullInput);
+    const bool fullDown=cvr::input::AtFullTravel(vr.rightThumbY,true,fullInput,true);
+    const bool fullUp=cvr::input::AtFullTravel(vr.rightThumbY,true,fullInput);
     const bool disableRsDashCrouch=classicGeneralContext && g_liveControls.xrClassicDisableRsDashCrouch!=0;
     const bool wantCrouch = !disableRsDashCrouch && fullDown && !inWater && !g_isInVehicle && !deviceScreen && !scannerHold
                             && !DeviceCamActive();   // in a camera the stick aims the camera
@@ -1240,7 +1245,8 @@ DWORD WINAPI HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
     const bool snapEnabled=g_liveControls.xrSnapTurn != 0 && !DeviceCamActive() &&
         !SceneStickYawArmed() && !cvr::input::NativeOwnsTurn(
             g_isInVehicle,g_vehicleState.load(std::memory_order_relaxed),cvr::ladder::Active());
-    const auto turn=cvr::input::RouteTurn(rx,snapEnabled,g_xinputSnapArmedDir,
+    const float routedTurnAxis=(snapEnabled && !scannerZoomOwnsRightStick) ? legacyRx : rx;
+    const auto turn=cvr::input::RouteTurn(routedTurnAxis,snapEnabled,g_xinputSnapArmedDir,
         g_liveControls.xrSnapTurnAngleDeg,CyberpunkVR_SnapTurnStickFire,CyberpunkVR_SnapTurnStickRearm);
     if (turn.clearPending) InterlockedExchange(&g_pendingSnapYawDeltaBits,0);
     else if (turn.snapDegrees!=0) {
