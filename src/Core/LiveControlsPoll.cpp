@@ -551,10 +551,10 @@ void PollLiveControls() {
     float xrSnapTurnAngleDeg = g_liveControls.xrSnapTurnAngleDeg > 0.0f ? g_liveControls.xrSnapTurnAngleDeg : 30.0f;
     int xrMovementSource = g_liveControls.xrMovementSource;
     int xrLaserDotMode = g_liveControls.xrLaserDotMode;
-    float xrLaserDotRadiusMm = g_liveControls.xrLaserDotRadiusMm > 0.0f ? g_liveControls.xrLaserDotRadiusMm : 6.0f;
+    float xrLaserDotRadiusMm = g_liveControls.xrLaserDotRadiusMm > 0.0f ? g_liveControls.xrLaserDotRadiusMm : 30.0f;
     int xrLaserDotScaleWithDistance = g_liveControls.xrLaserDotScaleWithDistance;
     int xrHideLaserDotAds = g_liveControls.xrHideLaserDotAds;
-    int xrMovementSpeedMode=0;
+    int xrMovementSpeedMode=1;
     float xrLeftStickDeadzone=.15f,xrRightStickDeadzone=.15f,xrMaxInputThreshold=.90f;
     int xrXInputInstall = g_liveControls.xrXInputInstall;
     int xrInputActions = g_liveControls.xrInputActions;

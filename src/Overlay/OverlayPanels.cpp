@@ -1041,7 +1041,7 @@ bool DrawLiveControls(LiveControlsUiState& state,int section) {
             ImGui::TextUnformatted("Locomotion direction");
             bool analogMovement=state.xrMovementSpeedMode==1;
             if(ImGui::Checkbox("Analog movement",&analogMovement)) {state.xrMovementSpeedMode=analogMovement?1:0;changed=true;}
-            if(ImGui::IsItemHovered())ImGui::SetTooltip("On: on-foot speed follows left-stick travel. Off: movement uses the current fixed-speed policy (default).\nStick deadzones and full-input tuning below apply in both modes and while driving.");
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("On (default): on-foot speed follows left-stick travel. Off: movement uses the current fixed-speed policy.\nStick deadzones and full-input tuning below apply in both modes and while driving.");
             int leftDeadzone=int(state.xrLeftStickDeadzone*100+.5f);
             int rightDeadzone=int(state.xrRightStickDeadzone*100+.5f);
             int fullInput=int(state.xrMaxInputThreshold*100+.5f);
