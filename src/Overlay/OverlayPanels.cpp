@@ -816,12 +816,6 @@ bool DrawLiveControls(LiveControlsUiState& state,int section) {
 
             if (ImGui::CollapsingHeader("Tracking / Camera")) {
         ImGui::TextUnformatted("Locomotion direction is set in the Controls tab.");
-        changed |= CheckboxInt("Disable Mouse Y (Pitch)", &state.xrDisableMouseY);
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Suppress mouse/right-stick pitch so only the HMD controls\n"
-                              "vertical look. Applied by the CET VRIK mod and the\n"
-                              "XInput merge. On by default.");
-        }
         // "Fix Head" removed. It switched the view to 3DoF, and it did not stop at dropping the
         // head translation -- it dropped these three offsets and the calibration bakes with it,
         // then hid the very sliders that were needed to put the view right. The offsets are
@@ -943,16 +937,14 @@ bool DrawLiveControls(LiveControlsUiState& state,int section) {
             // of the camera crosshair. Hooks the projectile launch orientation provider and feeds it
             // the game's own muzzle world transform. Writes shared[58]; the RED4ext plugin applies it.
             {
-                static bool s_weaponAim = true;   // default ON — backend's m_weaponAimEnable also defaults to 1
-                if (ImGui::Checkbox("Hand aim  (off = Decoupled VR Head Aim)", &s_weaponAim)) {
-                    OpenXRManager::Get().SetWeaponAimEnable(s_weaponAim ? 1 : 0);
+                bool headAim = OpenXRManager::Get().GetWeaponAimEnable() == 0;
+                if (ImGui::Checkbox("Decoupled VR Head Aim", &headAim)) {
+                    OpenXRManager::Get().SetWeaponAimEnable(headAim ? 0 : 1);
                 }
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("ON (Hand Aim): the controller points the weapon and VRIK drives the arms.\n"
-                                      "OFF (Decoupled VR Head Aim): the WEAPON follows your head instead, the game\n"
-                                      "keeps owning its position and its ADS animations, and VRIK stands down for\n"
-                                      "the weapon arm. Either way the shot leaves the real muzzle, for guns and\n"
-                                      "projectiles alike, and free-look while aiming is preserved.");
+                    ImGui::SetTooltip("ON: Aim with your headset, decoupled from locomotion (3DoF Head Aim).\n"
+                                      "OFF: Aim with your VR controllers (6DoF Hand Aim).\n"
+                                      "When Hide laser dot while ADS is enabled, shots follow the weapon sight line.");
                 }
                 ImGui::Checkbox("Weapon Aim laser dot (where the bullet hits)", &g_drawBarrelCross);
                 if (ImGui::IsItemHovered()) {
@@ -1073,7 +1065,12 @@ bool DrawLiveControls(LiveControlsUiState& state,int section) {
                 "Move the stick or push a held hand upward to cancel.");
             if(state.xrLadderAutoFinish)changed |= widgets::SliderFloat("Ladder finish distance", &state.xrLadderFinishDistance,.2f,1.2f,"%.2f m");
             ImGui::Separator();
-            ImGui::TextUnformatted("Turning (right stick)");
+            ImGui::TextUnformatted("Turning and pitch");
+            changed |= CheckboxInt("Disable pitch", &state.xrDisableMouseY);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("On: suppress game/right-stick pitch so the headset controls vertical look.\n"
+                                  "Off: preserve game pitch input on the right stick.");
+            }
             changed |= CheckboxInt("Snap turn", &state.xrSnapTurn);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Convert the right-stick X axis into discrete snap pulses\n"
