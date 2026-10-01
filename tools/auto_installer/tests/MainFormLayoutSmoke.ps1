@@ -73,14 +73,14 @@ function Test-Layout([bool]$devMode) {
         if ([Math]::Abs($statusPoint.Y - $installerPoint.Y) -gt 12 -or $installerPoint.X -le $statusPoint.X) {
             throw "Operation and Installer statuses are not aligned in the footer."
         }
-        if (-not $installerStatus.Text.StartsWith('[v1.5] ')) {
+        if (-not $installerStatus.Text.StartsWith('[v1.7] ')) {
             throw "Installer version was not prefixed to the existing update status."
         }
         $setInstallerStatus = $formType.GetMethod('SetInstallerStatus',
             [Reflection.BindingFlags]'Instance,NonPublic')
         $setInstallerStatus.Invoke($form, [object[]]@('InstallerStatusUpdateAvailable'))
         if (-not $installerStatus.Enabled -or $installerStatus.Cursor -ne [Windows.Forms.Cursors]::Hand -or
-            -not $installerStatus.Text.StartsWith('[v1.5] ')) {
+            -not $installerStatus.Text.StartsWith('[v1.7] ')) {
             throw "Available Installer update status is not an enabled versioned text link."
         }
         foreach ($nonClickableStatus in @('InstallerStatusCurrent', 'InstallerStatusChecking',
@@ -197,8 +197,24 @@ function Test-Layout([bool]$devMode) {
                 throw "Release notes link remained visible for an empty release body."
             }
         }
-        if ($fork.Items.Count -ne 6 -or $fork.Items[0].ToString() -ne "Tofu Express") {
-            throw "Embedded Folks were not appended after the built-in fork."
+        $expectedForks = @(
+            "Tofu Express",
+            "dariulone (Upstream)",
+            "Ajson44 (Quest 3 / Story Fixes)",
+            "satyaloka93 (PSVR2)",
+            "norfmare (SteamVR / Quest Link)",
+            "elliotttate (Rendering Research)",
+            "Crazymoniker (Steam Frame)",
+            "voodoofrog (Rift S)",
+            "fr05t1k"
+        )
+        if ($fork.Items.Count -ne $expectedForks.Count) {
+            throw "Embedded Folks count does not match the configured fork list."
+        }
+        for ($forkIndex = 0; $forkIndex -lt $expectedForks.Count; $forkIndex++) {
+            if ($fork.Items[$forkIndex].ToString() -ne $expectedForks[$forkIndex]) {
+                throw "Embedded Folks were not appended in the configured order."
+            }
         }
     }
     finally { $form.Dispose() }
@@ -264,8 +280,9 @@ Duplicate own=dabinn/cyberpunk-vr-port
 "@
     $loadForks = $formType.GetMethod("LoadForks", [Reflection.BindingFlags]"Static,NonPublic")
     $forks = $loadForks.Invoke($null, [object[]]@($ini, $true, [string]$forkConfigRoot))
-    if ($forks.Count -ne 7 -or $forks[0].ToString() -ne "Tofu Express" -or
-        $forks[6].ToString() -ne "Another fork") {
+    if ($forks.Count -ne 11 -or $forks[0].ToString() -ne "Tofu Express" -or
+        $forks[9].ToString() -ne "iPowerTech upstream" -or
+        $forks[10].ToString() -ne "Another fork") {
         throw "External DevForks were not appended after embedded Folks in INI order."
     }
 }
