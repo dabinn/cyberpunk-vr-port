@@ -145,9 +145,10 @@ void DrawVRHandsControls() {
     // and sets g_VRBind = this value). Must be 4 = full-arm IK (the mode the CET
     // "Start VR Tracking" button uses). Mode 2 is the legacy direct bone-write
     // fallback -> stretched forearm / wrong placement, which is what this was.
-    static bool s_vrHandTracking = true;   // default ON — backend's m_vrHandTrackingMode also defaults to 4
-    if (ImGui::Checkbox("Start VR hand tracking", &s_vrHandTracking)) {
-        OpenXRManager::Get().SetVRHandTrackingMode(s_vrHandTracking ? 4 : 0);
+    bool vrHandTracking = OpenXRManager::Get().GetVRHandTrackingMode() != 0;
+    if (ImGui::Checkbox("Start VR hand tracking", &vrHandTracking)) {
+        OpenXRManager::Get().SetVRHandTrackingMode(vrHandTracking ? 4 : 0);
+        PersistLiveControlsNow();
     }
     ImGui::SameLine();
     if (ImGui::Button("Log VR Diag")) {
@@ -358,8 +359,6 @@ void DrawVRHandsControls() {
     ImGui::Separator();
     bool apply  = ImGui::Button("Apply Calibration");
     ImGui::SameLine();
-    bool save   = ImGui::Button("Save");
-    ImGui::SameLine();
     bool load   = ImGui::Button("Load");
     ImGui::SameLine();
     if (ImGui::Button("Reset Defaults")) {
@@ -385,7 +384,6 @@ void DrawVRHandsControls() {
             s_calDirty = false;
         }
     }
-    if (save) OpenXRManager::Get().SaveCalibrationToFile();
     if (load) {
         // The two-way sync above pulls the loaded values into the sliders next frame.
         OpenXRManager::Get().LoadCalibrationFromFile();
@@ -473,8 +471,10 @@ void DrawStereoControls() {
     bool submit = submitOn;
     char submitLabel[64];
     std::snprintf(submitLabel, sizeof(submitLabel), "Send VRCAM to the %s EYE", kVrcamEye);
-    if (ImGui::Checkbox(submitLabel, &submit))
+    if (ImGui::Checkbox(submitLabel, &submit)) {
         CyberpunkVR_StereoSubmit = submit ? 1 : 0;
+        PersistLiveControlsNow();
+    }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Off = the old behaviour, MAIN duplicated into both eyes.\n"
                           "On = the %s eye gets the VRCAM view's own final colour --\n"
@@ -490,8 +490,10 @@ void DrawStereoControls() {
                         static_cast<unsigned long long>(CyberpunkVR_DebugMirrorRtvHits));
 
     int maxAge = static_cast<int>(CyberpunkVR_StereoEyeMaxAgeMs);
-    if (widgets::SliderInt("Eye staleness limit (ms)", &maxAge, 33, 1000))
+    if (widgets::SliderInt("Eye staleness limit (ms)", &maxAge, 33, 1000)) {
         CyberpunkVR_StereoEyeMaxAgeMs = static_cast<uint32_t>(maxAge);
+        PersistLiveControlsNow();
+    }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("How long the last VRCAM frame stays usable. Past this the %s\n"
                           "eye falls back to MAIN -- one eye frozen while the other moves\n"
@@ -509,16 +511,20 @@ void DrawStereoControls() {
                           "graphics settings, not here.");
     }
     bool forceCam = CyberpunkVR_ForceVrcamCam != 0;
-    if (ImGui::Checkbox("Match VRCAM projection to MAIN  (fov / zoom / near / far)", &forceCam))
+    if (ImGui::Checkbox("Match VRCAM projection to MAIN  (fov / zoom / near / far)", &forceCam)) {
         CyberpunkVR_ForceVrcamCam = forceCam ? 1 : 0;
+        PersistLiveControlsNow();
+    }
 
     ImGui::Separator();
     // Forces the RTT component's isEnabled through the game's RTTI (the CET side re-asserts it,
     // so it survives a reload/respawn). Off means the engine stops rendering the second view
     // entirely, not just our stereo shift -- which is the cheapest way back to plain mono.
     bool vrcamOn = CyberpunkVR_VrcamEnabled != 0;
-    if (ImGui::Checkbox("VRCAM component  (RTTI Toggle: force ON/OFF)", &vrcamOn))
+    if (ImGui::Checkbox("VRCAM component  (RTTI Toggle: force ON/OFF)", &vrcamOn)) {
         CyberpunkVR_SetVrcamEnabled(vrcamOn ? 1u : 0u);
+        PersistLiveControlsNow();
+    }
     ImGui::TextDisabled("component %s   camera %s",
                         CyberpunkVR_VrcamComponentName(), CyberpunkVR_VrcamCameraName());
     if(cvr::RuntimeDiagnosticsEnabled())ImGui::TextDisabled("view nodes: main %llu   other %llu   vrcam %llu",
@@ -529,8 +535,10 @@ void DrawStereoControls() {
     // Separate second swapchain + window mirroring the VRCAM eye (for OBS / desktop preview).
     // Costs a per-frame copy, so it is off unless asked for.
     bool mirrorOn = CyberpunkVR_MirrorOutput != 0;
-    if (ImGui::Checkbox("VRCAM Mirror  (separate window, for capture)", &mirrorOn))
+    if (ImGui::Checkbox("VRCAM Mirror  (separate window, for capture)", &mirrorOn)) {
         CyberpunkVR_MirrorOutput = mirrorOn ? 1u : 0u;
+        PersistLiveControlsNow();
+    }
 
     // Weapon ADS is not a toggle: the vrcam eye always follows MAIN's vertical FOV, narrowed by
     // the aim zoom. Read-only here because the numbers are the quickest way to tell a wrong FOV
@@ -541,7 +549,9 @@ void DrawStereoControls() {
                         CyberpunkVR_MainAdsZoomFactor);
 
     if (ImGui::CollapsingHeader("Diagnostics")) {
-        ImGui::Checkbox("Compact ADS camera telemetry (in-headset)", &g_showCompactAdsTelemetry);
+        if (ImGui::Checkbox("Compact ADS camera telemetry (in-headset)", &g_showCompactAdsTelemetry)) {
+            PersistLiveControlsNow();
+        }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("A small panel that stays up after F10 is closed, reporting what the "
                               "ENGINE did to the camera when the sights came up:\n"
@@ -551,31 +561,39 @@ void DrawStereoControls() {
         }
         if (g_showCompactAdsTelemetry) {
             ImGui::Indent();
-            widgets::SliderFloat("Telemetry X", &g_compactAdsTelemetryX, 0.10f, 0.90f, "%.2f");
-            widgets::SliderFloat("Telemetry Y", &g_compactAdsTelemetryY, 0.10f, 0.90f, "%.2f");
+            if (widgets::SliderFloat("Telemetry X", &g_compactAdsTelemetryX, 0.10f, 0.90f, "%.2f")) PersistLiveControlsNow();
+            if (widgets::SliderFloat("Telemetry Y", &g_compactAdsTelemetryY, 0.10f, 0.90f, "%.2f")) PersistLiveControlsNow();
             ImGui::TextDisabled("Normalised position in the eye image");
             ImGui::Unindent();
         }
         ImGui::Separator();
 
         bool slog = CyberpunkVR_StereoLog != 0;
-        if (ImGui::Checkbox("Stereo logging -> cyberpunkvrport.log", &slog))
+        if (ImGui::Checkbox("Stereo logging -> cyberpunkvrport.log", &slog)) {
             CyberpunkVR_StereoLog = slog ? 1 : 0;
+            PersistLiveControlsNow();
+        }
 
         bool stable = CyberpunkVR_StableCopy != 0;
-        if (ImGui::Checkbox("Committed snapshot of the VRCAM final", &stable))
+        if (ImGui::Checkbox("Committed snapshot of the VRCAM final", &stable)) {
             CyberpunkVR_StableCopy = stable ? 1 : 0;
+            PersistLiveControlsNow();
+        }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Off = read the engine's transient directly. That target is a\n"
                               "frame-graph allocation which a later pass aliases, which is what\n"
                               "made the image alternate bright/dark. Leave on.");
         bool fromTonemap = CyberpunkVR_StableFromTonemap != 0;
-        if (ImGui::Checkbox("Snapshot at the tonemap node instead of RenderFinal2D", &fromTonemap))
+        if (ImGui::Checkbox("Snapshot at the tonemap node instead of RenderFinal2D", &fromTonemap)) {
             CyberpunkVR_StableFromTonemap = fromTonemap ? 1 : 0;
+            PersistLiveControlsNow();
+        }
 
         bool prof = CyberpunkVR_ProfEnable != 0;
-        if (ImGui::Checkbox("Node CPU profiler  (per-node self+incl ms)", &prof))
+        if (ImGui::Checkbox("Node CPU profiler  (per-node self+incl ms)", &prof)) {
             CyberpunkVR_ProfEnable = prof ? 1 : 0;
+            PersistLiveControlsNow();
+        }
         ImGui::TextDisabled("frame %.2f ms   dispatch: main %.2f (%u)  vrcam %.2f (%u)",
                             CyberpunkVR_ProfFrameMs,
                             CyberpunkVR_ProfDispMainMs, CyberpunkVR_ProfDispMainNodes,
@@ -802,11 +820,6 @@ bool DrawLiveControls(LiveControlsUiState& state,int section) {
     if (ImGui::Button("Recenter HMD (F7)")) {
         RequestLiveControlsRecenter();
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Save")) {
-        SetLiveControlsUiState(&state, 1);
-    }
-
     if (section>=0 || ImGui::BeginTabBar("CyberpunkVRPortTabs")) {
         if (section>=0 ? section==0 : ImGui::BeginTabItem("GENERAL")) {
             if (ImGui::CollapsingHeader("GAME MENUS", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -828,17 +841,18 @@ bool DrawLiveControls(LiveControlsUiState& state,int section) {
 
             if (ImGui::CollapsingHeader("Debug Gizmos")) {
                 ImGui::TextUnformatted("Raw hand overlay / debug gizmos:");
-                ImGui::Checkbox("Enable hand overlay", &g_drawHandLocator);
-                ImGui::Checkbox("Draw 3D hand proxy", &g_drawHandProxy3D);
-                ImGui::Checkbox("Draw debug wire/axes", &g_drawHandDebugAxes);
-                widgets::SliderFloat("Locator scale", &g_handLocatorScale, 0.50f, 2.00f, "%.2f");
+                if (ImGui::Checkbox("Enable hand overlay", &g_drawHandLocator)) PersistLiveControlsNow();
+                if (ImGui::Checkbox("Draw 3D hand proxy", &g_drawHandProxy3D)) PersistLiveControlsNow();
+                if (ImGui::Checkbox("Draw debug wire/axes", &g_drawHandDebugAxes)) PersistLiveControlsNow();
+                if (widgets::SliderFloat("Locator scale", &g_handLocatorScale, 0.50f, 2.00f, "%.2f")) PersistLiveControlsNow();
             }
 
             if (ImGui::CollapsingHeader("Diagnostics")) {
-        { int vl = g_verboseLog; if (CheckboxInt("Verbose log (spammy diag)", &vl)) g_verboseLog = vl; }
+        { int vl = GetLiveVerboseLogSetting(); if (CheckboxInt("Verbose log (spammy diag)", &vl)) SetLiveVerboseLogSetting(vl); }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Off by default for a clean cyberpunkvrport.log. Enable only\n"
-                              "when capturing ClipCursor / depth / hook diagnostics.");
+                              "when capturing ClipCursor / depth / hook diagnostics.\n"
+                              "Until changed here, this follows the launcher's DEBUG setting.");
         }
             }
             if(section<0)ImGui::EndTabItem();
@@ -940,13 +954,16 @@ bool DrawLiveControls(LiveControlsUiState& state,int section) {
                 bool headAim = OpenXRManager::Get().GetWeaponAimEnable() == 0;
                 if (ImGui::Checkbox("Decoupled VR Head Aim", &headAim)) {
                     OpenXRManager::Get().SetWeaponAimEnable(headAim ? 0 : 1);
+                    PersistLiveControlsNow();
                 }
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("ON: Aim with your headset, decoupled from locomotion (3DoF Head Aim).\n"
                                       "OFF: Aim with your VR controllers (6DoF Hand Aim).\n"
                                       "When Hide laser dot while ADS is enabled, shots follow the weapon sight line.");
                 }
-                ImGui::Checkbox("Weapon Aim laser dot (where the bullet hits)", &g_drawBarrelCross);
+                if (ImGui::Checkbox("Weapon Aim laser dot (where the bullet hits)", &g_drawBarrelCross)) {
+                    PersistLiveControlsNow();
+                }
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Red dot projected from the actual weapon muzzle direction through the\n"
                                       "game camera -- marks exactly where the bullet will fly.");

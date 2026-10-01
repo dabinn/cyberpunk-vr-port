@@ -30,6 +30,7 @@
 #include <share.h>
 #include "Utils/AobScanner.hpp"
 #include "Overlay/LiveControlsUi.hpp"
+#include "Overlay/OverlayInternal.hpp"
 #include "Overlay/LauncherDialog.hpp"
 #include "Runtimes/OpenXRManager.hpp"
 #include "Runtimes/RuntimeFovCorrection.hpp"
@@ -50,6 +51,19 @@
 #include "Core/CoreInternal.hpp"
 #include "Camera/CameraLink.hpp"
 #include "Hooks/Hook.hpp"
+
+// -1 follows the launcher's DEBUG flag until the F10 checkbox is changed.
+static int g_liveVerboseLogSetting = -1;
+
+extern "C" int CyberpunkVR_StereoSubmit;
+extern "C" uint32_t CyberpunkVR_StereoEyeMaxAgeMs;
+extern "C" uint32_t CyberpunkVR_VrcamEnabled;
+extern "C" void CyberpunkVR_SetVrcamEnabled(uint32_t on);
+extern "C" uint32_t CyberpunkVR_MirrorOutput;
+extern "C" int32_t CyberpunkVR_StereoLog;
+extern "C" int32_t CyberpunkVR_StableFromTonemap;
+extern "C" int32_t CyberpunkVR_ProfEnable;
+extern "C" int GetLauncherDebug();
 
 // Poll the CET VRIK mod's recenter request (written with an incrementing counter on
 // save load / OnGameAttached); recenter when the counter changes.
@@ -464,6 +478,24 @@ void PollLiveControls() {
     int32_t  xrIndirectCensus = CyberpunkVR_IndirectCensus;
     int32_t  xrNoStateLies = CyberpunkVR_NoStateLies;
     int32_t  xrStableCopy = CyberpunkVR_StableCopy;
+    int xrDebugHandOverlay = overlay::g_drawHandLocator ? 1 : 0;
+    int xrDebugHandProxy = overlay::g_drawHandProxy3D ? 1 : 0;
+    int xrDebugHandAxes = overlay::g_drawHandDebugAxes ? 1 : 0;
+    float xrDebugHandScale = overlay::g_handLocatorScale;
+    int xrVerboseLog = -1;
+    int xrDecoupledHeadAim = OpenXRManager::Get().GetWeaponAimEnable() == 0 ? 1 : 0;
+    int xrLaserDotEnable = overlay::g_drawBarrelCross ? 1 : 0;
+    int xrStereoSubmit = CyberpunkVR_StereoSubmit != 0 ? 1 : 0;
+    int xrStereoEyeMaxAgeMs = static_cast<int>(CyberpunkVR_StereoEyeMaxAgeMs);
+    int xrVrcamEnabled = CyberpunkVR_VrcamEnabled != 0 ? 1 : 0;
+    int xrMirrorOutput = CyberpunkVR_MirrorOutput != 0 ? 1 : 0;
+    int xrAdsTelemetry = overlay::g_showCompactAdsTelemetry ? 1 : 0;
+    float xrAdsTelemetryX = overlay::g_compactAdsTelemetryX;
+    float xrAdsTelemetryY = overlay::g_compactAdsTelemetryY;
+    int xrStereoLog = CyberpunkVR_StereoLog != 0 ? 1 : 0;
+    int xrStableFromTonemap = CyberpunkVR_StableFromTonemap != 0 ? 1 : 0;
+    int xrProfEnable = CyberpunkVR_ProfEnable != 0 ? 1 : 0;
+    int xrVrikHandTracking = OpenXRManager::Get().GetVRHandTrackingMode() != 0 ? 1 : 0;
     uint32_t xrDistantReuse = CyberpunkVR_DistantReuseMode;
     uint32_t xrLocalShadowReuse = CyberpunkVR_LocalShadowReuseMode;
     uint32_t xrGiReuse = CyberpunkVR_GiReuseMode;
@@ -864,6 +896,96 @@ void PollLiveControls() {
         if (sscanf_s(line, "xr_force_vrcam_cam=%d", &intValue) == 1 ||
             sscanf_s(line, "xr_force_vrcam_cam = %d", &intValue) == 1) {
             xrForceVrcamCam = intValue ? 1u : 0u;
+            continue;
+        }
+        if (sscanf_s(line, "xr_debug_hand_overlay=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_debug_hand_overlay = %d", &intValue) == 1) {
+            xrDebugHandOverlay = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_debug_hand_proxy=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_debug_hand_proxy = %d", &intValue) == 1) {
+            xrDebugHandProxy = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_debug_hand_axes=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_debug_hand_axes = %d", &intValue) == 1) {
+            xrDebugHandAxes = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_debug_hand_scale=%f", &value) == 1 ||
+            sscanf_s(line, "xr_debug_hand_scale = %f", &value) == 1) {
+            xrDebugHandScale = value;
+            continue;
+        }
+        if (sscanf_s(line, "xr_verbose_log=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_verbose_log = %d", &intValue) == 1) {
+            xrVerboseLog = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_decoupled_head_aim=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_decoupled_head_aim = %d", &intValue) == 1) {
+            xrDecoupledHeadAim = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_laser_dot_enable=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_laser_dot_enable = %d", &intValue) == 1) {
+            xrLaserDotEnable = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_stereo_submit=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_stereo_submit = %d", &intValue) == 1) {
+            xrStereoSubmit = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_stereo_eye_max_age_ms=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_stereo_eye_max_age_ms = %d", &intValue) == 1) {
+            xrStereoEyeMaxAgeMs = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_vrcam_enabled=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_vrcam_enabled = %d", &intValue) == 1) {
+            xrVrcamEnabled = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_mirror_output=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_mirror_output = %d", &intValue) == 1) {
+            xrMirrorOutput = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_ads_telemetry=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_ads_telemetry = %d", &intValue) == 1) {
+            xrAdsTelemetry = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_ads_telemetry_x=%f", &value) == 1 ||
+            sscanf_s(line, "xr_ads_telemetry_x = %f", &value) == 1) {
+            xrAdsTelemetryX = value;
+            continue;
+        }
+        if (sscanf_s(line, "xr_ads_telemetry_y=%f", &value) == 1 ||
+            sscanf_s(line, "xr_ads_telemetry_y = %f", &value) == 1) {
+            xrAdsTelemetryY = value;
+            continue;
+        }
+        if (sscanf_s(line, "xr_stereo_log=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_stereo_log = %d", &intValue) == 1) {
+            xrStereoLog = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_stable_from_tonemap=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_stable_from_tonemap = %d", &intValue) == 1) {
+            xrStableFromTonemap = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_prof_enable=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_prof_enable = %d", &intValue) == 1) {
+            xrProfEnable = intValue;
+            continue;
+        }
+        if (sscanf_s(line, "xr_vr_hand_tracking=%d", &intValue) == 1 ||
+            sscanf_s(line, "xr_vr_hand_tracking = %d", &intValue) == 1) {
+            xrVrikHandTracking = intValue;
             continue;
         }
         if (sscanf_s(line, "xr_cap_grant=%d", &intValue) == 1 ||
@@ -1450,6 +1572,33 @@ void PollLiveControls() {
 
     }
     fclose(file);
+
+    overlay::g_drawHandLocator = xrDebugHandOverlay != 0;
+    overlay::g_drawHandProxy3D = xrDebugHandProxy != 0;
+    overlay::g_drawHandDebugAxes = xrDebugHandAxes != 0;
+    overlay::g_handLocatorScale = std::isfinite(xrDebugHandScale)
+        ? std::clamp(xrDebugHandScale, 0.50f, 2.00f) : 1.0f;
+    g_liveVerboseLogSetting = xrVerboseLog < 0 ? -1 : (xrVerboseLog != 0 ? 1 : 0);
+    g_verboseLog = g_liveVerboseLogSetting < 0 ? GetLauncherDebug() : g_liveVerboseLogSetting;
+    const int weaponAimEnable = xrDecoupledHeadAim != 0 ? 0 : 1;
+    if (OpenXRManager::Get().GetWeaponAimEnable() != weaponAimEnable)
+        OpenXRManager::Get().SetWeaponAimEnable(weaponAimEnable);
+    overlay::g_drawBarrelCross = xrLaserDotEnable != 0;
+    CyberpunkVR_StereoSubmit = xrStereoSubmit != 0 ? 1 : 0;
+    CyberpunkVR_StereoEyeMaxAgeMs = static_cast<uint32_t>(std::clamp(xrStereoEyeMaxAgeMs, 33, 1000));
+    if ((CyberpunkVR_VrcamEnabled != 0) != (xrVrcamEnabled != 0))
+        CyberpunkVR_SetVrcamEnabled(xrVrcamEnabled != 0 ? 1u : 0u);
+    overlay::g_showCompactAdsTelemetry = xrAdsTelemetry != 0;
+    overlay::g_compactAdsTelemetryX = std::isfinite(xrAdsTelemetryX)
+        ? std::clamp(xrAdsTelemetryX, 0.10f, 0.90f) : 0.57f;
+    overlay::g_compactAdsTelemetryY = std::isfinite(xrAdsTelemetryY)
+        ? std::clamp(xrAdsTelemetryY, 0.10f, 0.90f) : 0.30f;
+    CyberpunkVR_StereoLog = xrStereoLog != 0 ? 1 : 0;
+    CyberpunkVR_StableFromTonemap = xrStableFromTonemap != 0 ? 1 : 0;
+    CyberpunkVR_ProfEnable = xrProfEnable != 0 ? 1 : 0;
+    const int handTrackingMode = xrVrikHandTracking != 0 ? 4 : 0;
+    if ((OpenXRManager::Get().GetVRHandTrackingMode() != 0) != (handTrackingMode != 0))
+        OpenXRManager::Get().SetVRHandTrackingMode(handTrackingMode);
 
     const int prevXrRecenter = g_liveControls.xrRecenter;
     const int prevXrMonoSubmit = g_liveControls.xrMonoSubmit;
@@ -2154,6 +2303,24 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
     fprintf(file, "xr_wheel_horn_radius=%.3f\n", state.xrWheelHornRadius > 0.0f ? state.xrWheelHornRadius : 0.12f);
     fprintf(file, "xr_vehicle_gun_trigger=%d\n", state.xrVehicleGunTrigger != 0 ? 1 : 0);
     fprintf(file, "xr_vehicle_throttle_trim=%.2f\n", state.xrVehicleThrottleTrim > 0.0f ? state.xrVehicleThrottleTrim : 0.5f);
+    fprintf(file, "xr_debug_hand_overlay=%d\n", overlay::g_drawHandLocator ? 1 : 0);
+    fprintf(file, "xr_debug_hand_proxy=%d\n", overlay::g_drawHandProxy3D ? 1 : 0);
+    fprintf(file, "xr_debug_hand_axes=%d\n", overlay::g_drawHandDebugAxes ? 1 : 0);
+    fprintf(file, "xr_debug_hand_scale=%.2f\n", overlay::g_handLocatorScale);
+    fprintf(file, "xr_verbose_log=%d\n", g_liveVerboseLogSetting);
+    fprintf(file, "xr_decoupled_head_aim=%d\n", OpenXRManager::Get().GetWeaponAimEnable() == 0 ? 1 : 0);
+    fprintf(file, "xr_laser_dot_enable=%d\n", overlay::g_drawBarrelCross ? 1 : 0);
+    fprintf(file, "xr_stereo_submit=%d\n", CyberpunkVR_StereoSubmit != 0 ? 1 : 0);
+    fprintf(file, "xr_stereo_eye_max_age_ms=%u\n", CyberpunkVR_StereoEyeMaxAgeMs);
+    fprintf(file, "xr_vrcam_enabled=%d\n", CyberpunkVR_VrcamEnabled != 0 ? 1 : 0);
+    fprintf(file, "xr_mirror_output=%d\n", CyberpunkVR_MirrorOutput != 0 ? 1 : 0);
+    fprintf(file, "xr_ads_telemetry=%d\n", overlay::g_showCompactAdsTelemetry ? 1 : 0);
+    fprintf(file, "xr_ads_telemetry_x=%.2f\n", overlay::g_compactAdsTelemetryX);
+    fprintf(file, "xr_ads_telemetry_y=%.2f\n", overlay::g_compactAdsTelemetryY);
+    fprintf(file, "xr_stereo_log=%d\n", CyberpunkVR_StereoLog != 0 ? 1 : 0);
+    fprintf(file, "xr_stable_from_tonemap=%d\n", CyberpunkVR_StableFromTonemap != 0 ? 1 : 0);
+    fprintf(file, "xr_prof_enable=%d\n", CyberpunkVR_ProfEnable != 0 ? 1 : 0);
+    fprintf(file, "xr_vr_hand_tracking=%d\n", OpenXRManager::Get().GetVRHandTrackingMode() != 0 ? 1 : 0);
     fclose(file);
 
     WIN32_FILE_ATTRIBUTE_DATA fileData;
@@ -2165,6 +2332,20 @@ void PersistLiveControlsUiState(const LiveControlsUiState& state) {
 extern "C" void GetLiveControlsUiState(LiveControlsUiState* outState) {
     if (!outState) return;
     *outState = MakeLiveControlsUiState();
+}
+
+extern "C" void PersistLiveControlsNow() {
+    PersistLiveControlsUiState(MakeLiveControlsUiState());
+}
+
+extern "C" int GetLiveVerboseLogSetting() {
+    return g_liveVerboseLogSetting < 0 ? (GetLauncherDebug() != 0 ? 1 : 0) : g_liveVerboseLogSetting;
+}
+
+extern "C" void SetLiveVerboseLogSetting(int enabled) {
+    g_liveVerboseLogSetting = enabled != 0 ? 1 : 0;
+    g_verboseLog = g_liveVerboseLogSetting;
+    PersistLiveControlsNow();
 }
 
 extern "C" void RequestLiveControlsRecenter() {

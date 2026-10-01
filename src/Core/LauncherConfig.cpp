@@ -223,6 +223,26 @@ void EnsureLiveControlFileExists() {
     fprintf(file, "xr_mono_xqueue_wait=0\n");
     fprintf(file, "xr_snap_turn_pulse_ms=30\n");
     fprintf(file, "xr_mono_depth_capture=1\n");
+    fprintf(file, "xr_debug_hand_overlay=0\n");
+    fprintf(file, "xr_debug_hand_proxy=0\n");
+    fprintf(file, "xr_debug_hand_axes=0\n");
+    fprintf(file, "xr_debug_hand_scale=1.00\n");
+    fprintf(file, "xr_verbose_log=-1\n");
+    fprintf(file, "xr_decoupled_head_aim=0\n");
+    fprintf(file, "xr_laser_dot_enable=1\n");
+    fprintf(file, "xr_stereo_submit=1\n");
+    fprintf(file, "xr_stereo_eye_max_age_ms=250\n");
+    fprintf(file, "xr_force_vrcam_cam=1\n");
+    fprintf(file, "xr_vrcam_enabled=1\n");
+    fprintf(file, "xr_mirror_output=0\n");
+    fprintf(file, "xr_ads_telemetry=0\n");
+    fprintf(file, "xr_ads_telemetry_x=0.57\n");
+    fprintf(file, "xr_ads_telemetry_y=0.30\n");
+    fprintf(file, "xr_stereo_log=1\n");
+    fprintf(file, "xr_stable_copy=1\n");
+    fprintf(file, "xr_stable_from_tonemap=0\n");
+    fprintf(file, "xr_prof_enable=0\n");
+    fprintf(file, "xr_vr_hand_tracking=1\n");
     fclose(file);
 }
 
